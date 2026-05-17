@@ -62,7 +62,7 @@ export TENUO_WARRANT=$(hermes-tenuo mint --ttl 1h \
 - **Subagents** — set `child_warrant`; children spawned by `delegate_task` get the narrower warrant automatically
 - **Multi-user gateways** — call `guard.set_session_warrant(session_id, warrant)` per user; sessions are isolated
 
-See [full documentation](https://tenuo.ai/docs/hermes) and [examples](https://github.com/tenuo-ai/tenuo/tree/main/tenuo-python/examples/hermes).
+See [full documentation](https://tenuo.ai/docs/hermes) and [examples](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
 
 ## With Tenuo Cloud (optional)
 
