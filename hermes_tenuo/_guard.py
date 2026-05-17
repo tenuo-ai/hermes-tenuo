@@ -19,31 +19,35 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         get_connect_token,
         get_child_warrant_raw,
         get_signing_key,
+        get_trusted_roots,
         get_warrant_raw,
         load_warrant,
     )
 
     connect_token = get_connect_token(ctx)
-    if not connect_token:
+    warrant_raw = get_warrant_raw(ctx)
+    if not connect_token and not warrant_raw:
         return None
 
-    # Connect to Tenuo Cloud — starts background heartbeat, enables audit
-    try:
-        from tenuo.control_plane import connect
-        connect(token=connect_token)
-    except Exception as exc:
-        logger.warning("hermes-tenuo: Cloud connection failed: %s", exc)
-        # Continue — enforcement can still run locally without Cloud
+    # Connect to Tenuo Cloud — optional, only when connect_token is configured
+    if connect_token:
+        try:
+            from tenuo.control_plane import connect
+            connect(token=connect_token)
+        except Exception as exc:
+            logger.warning("hermes-tenuo: Cloud connection failed: %s", exc)
 
-    warrant = load_warrant(get_warrant_raw(ctx))
+    warrant = load_warrant(warrant_raw)
     child_warrant = load_warrant(get_child_warrant_raw(ctx))
     signing_key = get_signing_key(ctx)
+    trusted_roots = get_trusted_roots(ctx)
 
     from hermes_tenuo.hermes_guard import HermesGuard
     guard = HermesGuard(
         warrant=warrant,
         signing_key=signing_key,
         child_warrant=child_warrant,
+        trusted_roots=trusted_roots,
     )
 
     return PluginGuard(guard)

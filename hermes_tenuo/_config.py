@@ -12,7 +12,7 @@ import base64
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger("hermes_tenuo._config")
 
@@ -47,7 +47,6 @@ def get_warrant_raw(ctx: Any) -> Optional[str]:
     raw = entry.get("warrant") or os.environ.get("TENUO_WARRANT")
     if not raw:
         return None
-    # If it looks like a path, read the file
     path = Path(raw).expanduser()
     if path.exists():
         return path.read_text().strip()
@@ -69,16 +68,34 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
 def get_signing_key(ctx: Any):
     """Return SigningKey from env or config, or None."""
     entry = _get_plugin_entry(ctx)
-    # config can name an env var to read from, or supply the key directly
     key_env = entry.get("signing_key_env", "TENUO_SIGNING_KEY")
     raw = os.environ.get(key_env)
     if not raw:
         return None
     try:
         from tenuo_core import SigningKey
-        return SigningKey.from_base64(raw)
+        return SigningKey.from_bytes(base64.b64decode(raw))
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load signing key: %s", exc)
+        return None
+
+
+def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
+    """Return list of trusted PublicKeys from env or config, or None."""
+    entry = _get_plugin_entry(ctx)
+    raw = entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
+    if not raw:
+        return None
+    try:
+        from tenuo_core import PublicKey
+        roots = []
+        for r in raw.split(","):
+            r = r.strip()
+            if r:
+                roots.append(PublicKey.from_bytes(base64.b64decode(r)))
+        return roots if roots else None
+    except Exception as exc:
+        logger.warning("hermes-tenuo: could not load trusted_root: %s", exc)
         return None
 
 
