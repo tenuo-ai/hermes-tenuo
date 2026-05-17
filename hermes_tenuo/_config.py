@@ -41,15 +41,24 @@ def get_connect_token(ctx: Any) -> Optional[str]:
     )
 
 
+def _looks_like_path(s: str) -> bool:
+    """Return True if the string looks like a file path rather than base64 data."""
+    return (
+        len(s) < 256  # max filename length on most filesystems
+        and (s.startswith("/") or s.startswith("~") or s.startswith("."))
+    )
+
+
 def get_warrant_raw(ctx: Any) -> Optional[str]:
     """Return raw warrant: base64 string or path to warrant file."""
     entry = _get_plugin_entry(ctx)
     raw = entry.get("warrant") or os.environ.get("TENUO_WARRANT")
     if not raw:
         return None
-    path = Path(raw).expanduser()
-    if path.exists():
-        return path.read_text().strip()
+    if _looks_like_path(raw):
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path.read_text().strip()
     return raw
 
 
@@ -59,9 +68,10 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
     raw = entry.get("child_warrant") or os.environ.get("TENUO_CHILD_WARRANT")
     if not raw:
         return None
-    path = Path(raw).expanduser()
-    if path.exists():
-        return path.read_text().strip()
+    if _looks_like_path(raw):
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path.read_text().strip()
     return raw
 
 
