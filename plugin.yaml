@@ -1,0 +1,23 @@
+name: hermes-tenuo
+version: 0.1.0
+description: >
+  Warrant-based authorization for Hermes Agent tool calls.
+  Streams every tool call to Tenuo Cloud for audit and policy learning.
+  Activates cryptographic enforcement once a warrant is configured.
+author: Tenuo AI
+kind: standalone
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - on_session_start
+  - on_session_end
+requires_env:
+  - name: TENUO_CONNECT_TOKEN
+    description: "Tenuo Cloud connect token (from dashboard Quick Connect). Single token for audit + key management."
+    required: false
+  - name: TENUO_WARRANT
+    description: "Base64-encoded warrant or path to .warrant file. Required to activate enforcement."
+    required: false
+  - name: TENUO_SIGNING_KEY
+    description: "Base64-encoded Ed25519 signing key for Proof-of-Possession (Tier 2)."
+    required: false

@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "hermes-tenuo"
+version = "0.1.0"
+description = "Tenuo authorization plugin for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tenuo AI" }]
+keywords = ["hermes", "authorization", "agents", "security", "warrants", "tenuo"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "tenuo>=0.1.0b23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+hermes-tenuo = "hermes_tenuo.cli:main"
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-tenuo = "hermes_tenuo"
+
+[project.urls]
+Homepage = "https://tenuo.ai"
+Documentation = "https://tenuo.ai/docs/hermes"
+Repository = "https://github.com/tenuo-ai/hermes-tenuo"
+Issues = "https://github.com/tenuo-ai/hermes-tenuo/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hermes_tenuo*"]
+
+[tool.setuptools.package-data]
+hermes_tenuo = ["plugin.yaml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]
