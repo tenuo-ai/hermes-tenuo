@@ -283,7 +283,22 @@ class HermesGuard:
             )
             return None
 
-        # Enforce
+        # The Cloud trigger UI prefixes capability names with "tool:" (e.g. "tool:web_search").
+        # Try enforcement with the bare name first; if that fails with tool_not_authorized,
+        # retry with the "tool:" prefix so Cloud-issued warrants work transparently.
+        return self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+
+    def _enforce(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        signing_key: Any,
+        warrant: Any,
+        session_id: str,
+        task_id: str,
+        tool_call_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Run enforce_tool_call, retrying with tool: prefix for Cloud-issued warrants."""
         try:
             from tenuo._enforcement import enforce_tool_call
             from tenuo.config import resolve_trusted_roots
@@ -301,6 +316,25 @@ class HermesGuard:
             if self._on_denial == "block":
                 return {"action": "block", "message": f"Authorization error: {exc}"}
             return None
+
+        # If blocked and the tool isn't already prefixed, retry with "tool:" prefix.
+        # Cloud trigger UI stores capabilities as "tool:web_search" not "web_search".
+        if not result.allowed and not tool_name.startswith("tool:"):
+            prefixed = f"tool:{tool_name}"
+            try:
+                from tenuo._enforcement import enforce_tool_call
+                from tenuo.config import resolve_trusted_roots
+                bound2 = warrant.bind(signing_key)
+                result2 = enforce_tool_call(
+                    tool_name=prefixed,
+                    tool_args=args,
+                    bound_warrant=bound2,
+                    trusted_roots=resolve_trusted_roots(self._trusted_roots),
+                    approval_handler=self._approval_handler,
+                )
+                result = result2
+            except Exception:
+                pass  # fall through to original result
 
         if self._control_plane is not None:
             try:
