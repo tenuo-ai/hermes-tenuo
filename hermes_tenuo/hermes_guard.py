@@ -102,6 +102,7 @@ class HermesGuard:
         trusted_roots: Optional[List[Any]] = None,
         on_denial: str = "block",   # "block" | "log"
         audit_callback: Optional[AuditCallback] = None,
+        approval_handler: Optional[Callable] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
@@ -109,6 +110,7 @@ class HermesGuard:
         self._trusted_roots = trusted_roots
         self._on_denial = on_denial
         self._audit_callback = audit_callback
+        self._approval_handler = approval_handler
 
         # Session warrant registry: session_id → (warrant, signing_key)
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
@@ -292,6 +294,7 @@ class HermesGuard:
                 tool_args=args,
                 bound_warrant=bound,
                 trusted_roots=resolve_trusted_roots(self._trusted_roots),
+                approval_handler=self._approval_handler,
             )
         except Exception as exc:
             logger.warning("hermes-tenuo: enforcement error for %s: %s", tool_name, exc)

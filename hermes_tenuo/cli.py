@@ -54,12 +54,86 @@ def _build_constraint(tool: str, arg: str, pattern: str):
 # ---------------------------------------------------------------------------
 
 def cmd_mint(args: argparse.Namespace) -> int:
-    """Mint a warrant locally and print config to stdout."""
+    """Mint a warrant and print config to stdout."""
+    # Cloud-backed minting via trigger
+    if getattr(args, "trigger", None):
+        return _mint_from_trigger(args)
+    return _mint_local(args)
+
+
+def _mint_from_trigger(args: argparse.Namespace) -> int:
+    """Mint via Tenuo Cloud trigger: POST /v1/triggers/{id}/fire."""
+    token = getattr(args, "connect_token", None) or os.environ.get("TENUO_CONNECT_TOKEN")
+    if not token:
+        print(
+            "error: --trigger requires a connect token. "
+            "Set TENUO_CONNECT_TOKEN or pass --connect-token.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from hermes_tenuo._cloud import parse_connect_token, fire_trigger, CloudAPIError
+    creds = parse_connect_token(token)
+    if not creds or not creds.api_key:
+        print("error: could not parse connect token", file=sys.stderr)
+        return 1
+
+    print(f"Firing trigger {args.trigger}...", file=sys.stderr)
     try:
-        from tenuo import SigningKey, Warrant, Wildcard
+        result = fire_trigger(
+            args.trigger,
+            api_key=creds.api_key,
+            endpoint=creds.endpoint,
+        )
+    except CloudAPIError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    _print_cloud_mint_output(result, args.output)
+    return 0
+
+
+def _print_cloud_mint_output(result: Any, output_format: str) -> None:
+    """Print the Cloud-minted warrant config."""
+    from hermes_tenuo._cloud import FireTriggerResult
+    if output_format == "env":
+        print(f"export TENUO_WARRANT={result.warrant_b64}")
+        if result.trusted_root_b64:
+            print(f"export TENUO_TRUSTED_ROOT={result.trusted_root_b64}")
+    elif output_format == "yaml":
+        print(f"warrant: {result.warrant_b64}")
+        if result.trusted_root_b64:
+            print(f"trusted_root: {result.trusted_root_b64}")
+    else:
+        print("# ── Hermes config (add to ~/.hermes/config.yaml) ────────────────")
+        print("plugins:")
+        print("  enabled:")
+        print("    - hermes-tenuo")
+        print("  entries:")
+        print("    hermes-tenuo:")
+        print(f"      warrant: {result.warrant_b64}")
+        if result.trusted_root_b64:
+            print(f"      trusted_root: {result.trusted_root_b64}")
+        print(f"      signing_key_env: TENUO_SIGNING_KEY")
+        print()
+        if result.warrant_id:
+            print(f"# ── Warrant ID: {result.warrant_id}")
+        if result.expires_at:
+            print(f"# ── Expires:    {result.expires_at}")
+        print()
+        print("# ── Note: set TENUO_SIGNING_KEY to your agent's Ed25519 signing key")
+        print("# ── (the key registered with Cloud, matching the warrant holder)")
+
+
+def _mint_local(args: argparse.Namespace) -> int:
+    """Mint a warrant locally (no Cloud required)."""
+    try:
+        from tenuo import SigningKey, Warrant, Wildcard  # noqa: F401
     except ImportError:
         print("error: tenuo is required. Install with: pip install tenuo", file=sys.stderr)
         return 1
+
+    from tenuo import SigningKey, Warrant
 
     # Generate keys
     control_key = SigningKey.generate()
@@ -69,7 +143,6 @@ def cmd_mint(args: argparse.Namespace) -> int:
     builder = Warrant.mint_builder().holder(agent_key.public_key)
 
     if not args.allow:
-        # Default: allow everything (useful as a starting point)
         print("Warning: no --allow flags given; warrant allows all tools with Wildcard constraints.", file=sys.stderr)
 
     for cap in (args.allow or []):
@@ -234,6 +307,11 @@ def main() -> None:
                              "--allow 'read_file:path=/data'")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
+    mint_p.add_argument("--trigger", metavar="TRIGGER_ID",
+                        help="Fire a Tenuo Cloud trigger to get a Cloud-issued warrant "
+                             "(requires TENUO_CONNECT_TOKEN or --connect-token)")
+    mint_p.add_argument("--connect-token", metavar="TOKEN",
+                        help="Tenuo Cloud connect token (overrides TENUO_CONNECT_TOKEN)")
 
     # status
     subparsers.add_parser("status", help="Show current configuration status")
