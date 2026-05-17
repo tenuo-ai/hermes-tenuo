@@ -82,7 +82,7 @@ def _api_request(
     timeout: float = 30.0,
 ) -> Dict[str, Any]:
     """Make an authenticated API request to Tenuo Cloud."""
-    data = json.dumps(body, separators=(",", ":")).encode() if body else None
+    data = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -97,13 +97,18 @@ def _api_request(
         try:
             err_body = json.loads(e.read().decode())
         except Exception:
-            err_body = {"error": e.reason or str(e.code)}
-        code = err_body.get("code") or err_body.get("error", {}).get("code", "")
-        msg = (
-            (err_body.get("error", {}).get("message") if isinstance(err_body.get("error"), dict) else None)
-            or err_body.get("message")
-            or str(e)
-        )
+            err_body = {}
+        code = ""
+        msg = str(e)
+        if isinstance(err_body, dict):
+            err = err_body.get("error") or {}
+            if isinstance(err, dict):
+                code = err.get("code", "")
+                msg = err.get("message") or msg
+            elif isinstance(err, str):
+                msg = err
+            elif err_body.get("message"):
+                msg = err_body["message"]
         raise CloudAPIError(f"HTTP {e.code} {code}: {msg}", status_code=e.code) from e
     except urllib.error.URLError as e:
         raise CloudAPIError(f"Cannot reach {url}: {e.reason}") from e
@@ -137,23 +142,25 @@ def fire_trigger(
 ) -> FireTriggerResult:
     """Fire a trigger to get a Cloud-issued warrant.
 
-    POST {endpoint}/triggers/{trigger_id}/fire
+    POST {base_url}/v1/triggers/{trigger_id}:fire
+    The endpoint param should be the base URL (e.g. https://api.tenuo.ai)
+    or the /v1 URL — both are normalized.
     Returns FireTriggerResult with the signed warrant and its issuer public key.
     """
-    body: Dict[str, Any] = {}
-    if event_data:
-        body["event_data"] = event_data
-    if initiator_identity:
-        body["initiator"] = {"type": "api_key", "identity": initiator_identity}
+    # Normalize endpoint: ensure /v1 suffix
+    base = endpoint.rstrip("/")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
 
-    url = f"{endpoint}/triggers/{trigger_id}/fire"
+    body: Dict[str, Any] = {"event_data": event_data or {}}
+
+    url = f"{base}/triggers/{trigger_id}/fire"
     resp = _api_request("POST", url, api_key, body=body)
 
     warrant_b64 = resp.get("warrant", "")
     if not warrant_b64:
         raise CloudAPIError("trigger fire response missing 'warrant' field")
 
-    # Extract trusted_root from the warrant's issuer public key
     trusted_root_b64 = _extract_issuer_b64(warrant_b64)
 
     return FireTriggerResult(
