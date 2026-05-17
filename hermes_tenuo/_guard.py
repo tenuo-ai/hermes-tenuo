@@ -37,7 +37,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         if cloud_creds:
             try:
                 from tenuo.control_plane import connect
-                connect(token=connect_token)
+                connect(token=connect_token, authorizer_name=cloud_creds.agent_id or "hermes-agent")
             except Exception as exc:
                 logger.warning("hermes-tenuo: Cloud connection failed: %s", exc)
 
