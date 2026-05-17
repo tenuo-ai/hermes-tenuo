@@ -66,7 +66,7 @@ See [full documentation](https://tenuo.ai/docs/hermes) and [examples](https://gi
 
 ## With Tenuo Cloud (optional)
 
-Connect to Tenuo Cloud to let the warrant builder learn your agent's real call patterns and generate tight warrants automatically:
+Connect to [Tenuo Cloud](https://cloud.tenuo.ai) to let the warrant builder learn your agent's real call patterns and generate tight warrants automatically:
 
 ```yaml
 plugins:
