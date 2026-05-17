@@ -17,7 +17,8 @@ plugins:
     - hermes-tenuo
   entries:
     hermes-tenuo:
-      warrant: ~/.hermes/tenuo/warrant   # path to your warrant file
+      warrant: ~/.hermes/tenuo/warrant      # path to your warrant file
+      trusted_root: <base64-issuer-pubkey>  # control plane public key
       # signing_key_env: TENUO_SIGNING_KEY  # env var holding your Ed25519 key
 ```
 
