@@ -115,7 +115,9 @@ def load_warrant(raw: Optional[str]):
         return None
     try:
         from tenuo_core import Warrant
-        data = base64.b64decode(raw)
+        # Warrants use URL-safe base64 (- and _ instead of + and /)
+        padded = raw + "=" * (-len(raw) % 4)
+        data = base64.urlsafe_b64decode(padded)
         return Warrant.from_bytes(data)
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load warrant: %s", exc)

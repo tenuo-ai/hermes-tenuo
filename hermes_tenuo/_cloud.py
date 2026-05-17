@@ -152,7 +152,12 @@ def fire_trigger(
     if not base.endswith("/v1"):
         base = f"{base}/v1"
 
-    body: Dict[str, Any] = {"event_data": event_data or {}}
+    body: Dict[str, Any] = {
+        "event_data": event_data or {},
+        # Explicitly identify the initiator as the API key so trigger
+        # initiator policies that match on api_key identity work correctly
+        "initiator": {"type": "api_key", "identity": api_key},
+    }
 
     url = f"{base}/triggers/{trigger_id}/fire"
     resp = _api_request("POST", url, api_key, body=body)
@@ -175,11 +180,11 @@ def _extract_issuer_b64(warrant_b64: str) -> str:
     """Extract the issuer public key from a warrant as base64."""
     try:
         from tenuo_core import Warrant
-        w = Warrant.from_bytes(base64.b64decode(warrant_b64))
+        padded = warrant_b64 + "=" * (-len(warrant_b64) % 4)
+        w = Warrant.from_bytes(base64.urlsafe_b64decode(padded))
         issuer = w.issuer
         if issuer is None:
             return ""
-        # issuer may be PublicKey object or bytes
         if hasattr(issuer, "to_bytes"):
             return base64.b64encode(issuer.to_bytes()).decode()
         return base64.b64encode(bytes(issuer)).decode()
