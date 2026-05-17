@@ -2,8 +2,6 @@
 
 Cryptographic warrant enforcement for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Scope your autonomous agents — cron jobs, sub-agents, gateway users — to exactly the tools and paths they need. No tool call runs outside what you explicitly authorized.
 
-Works standalone. [Tenuo Cloud](https://cloud.tenuo.ai) is optional — it adds a warrant builder that learns from your agent's real call patterns, plus a dashboard and audit log.
-
 ## Install
 
 ```bash
