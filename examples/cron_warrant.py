@@ -27,7 +27,7 @@ For standalone use without Tenuo Cloud, mint the warrant in Python:
 from __future__ import annotations
 
 from tenuo import SigningKey, Warrant, Subpath, Wildcard
-from tenuo.hermes import HermesGuard
+from hermes_tenuo import HermesGuard
 
 # ---------------------------------------------------------------------------
 # Key setup (production: use Tenuo Cloud or your key management system)

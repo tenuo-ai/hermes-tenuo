@@ -30,7 +30,7 @@ Usage with hermes-tenuo plugin:
 from __future__ import annotations
 
 from tenuo import SigningKey, Warrant, Subpath, Wildcard
-from tenuo.hermes import HermesGuard
+from hermes_tenuo import HermesGuard
 
 # ---------------------------------------------------------------------------
 # Keys

@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Optional
 
 from tenuo import SigningKey, Warrant, Subpath, Wildcard
-from tenuo.hermes import HermesGuard
+from hermes_tenuo import HermesGuard
 
 # ---------------------------------------------------------------------------
 # Keys

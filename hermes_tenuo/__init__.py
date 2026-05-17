@@ -12,17 +12,16 @@ Enable in ~/.hermes/config.yaml:
         - hermes-tenuo
       entries:
         hermes-tenuo:
-          connect_token: tc_live_...   # paste from Tenuo Cloud dashboard
-          # warrant: ~/.hermes/tenuo/warrant  # optional: activates enforcement
+          warrant: ~/.hermes/tenuo/warrant
+          # connect_token: tc_live_...   # optional: Tenuo Cloud
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    pass
+from hermes_tenuo.hermes_guard import HermesGuard, HermesAuditEvent  # noqa: F401
 
 logger = logging.getLogger("hermes_tenuo")
 
@@ -33,7 +32,7 @@ def register(ctx: Any) -> None:
 
     guard = build_plugin_guard(ctx)
     if guard is None:
-        logger.debug("hermes-tenuo: no connect_token configured, plugin inactive")
+        logger.debug("hermes-tenuo: no warrant or connect_token configured, plugin inactive")
         return
 
     ctx.register_hook("pre_tool_call", guard.pre_tool_call_hook)

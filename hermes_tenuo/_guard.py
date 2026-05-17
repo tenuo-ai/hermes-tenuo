@@ -39,7 +39,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     child_warrant = load_warrant(get_child_warrant_raw(ctx))
     signing_key = get_signing_key(ctx)
 
-    from tenuo.hermes import HermesGuard
+    from hermes_tenuo.hermes_guard import HermesGuard
     guard = HermesGuard(
         warrant=warrant,
         signing_key=signing_key,
