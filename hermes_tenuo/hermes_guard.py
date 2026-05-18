@@ -116,8 +116,8 @@ class HermesGuard:
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
         self._session_lock = threading.Lock()
 
-        # Primary session tracking for child warrant heuristic
-        # (on_session_start is not fired by Hermes — see _resolve_warrant)
+        # Session warrant chains: session_id → parent_warrant for chain verification
+        self._session_warrant_chains: Dict[str, Any] = {}
         self._primary_session_id: Optional[str] = None
         self._primary_lock = threading.Lock()
 
@@ -176,17 +176,26 @@ class HermesGuard:
         if entry is not None:
             return entry
 
-        if self._child_warrant is not None:
+        if self._child_warrant is not None or self._pending_child_warrants:
             with self._primary_lock:
                 if self._primary_session_id is None and session_id:
-                    # First session seen — record as primary
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
-                    # Different session_id → child/subagent session
-                    # For dynamically-attenuated child warrants, the trusted_root
-                    # is the agent's signing key (not Cloud's root), so we return
-                    # it with a temporary trusted_roots override handled at enforcement time.
-                    return self._child_warrant, self._static_signing_key
+                    # Child session — check for a pending attenuated warrant first
+                    pending = self._claim_child_warrant(self._primary_session_id)
+                    if pending is not None:
+                        if isinstance(pending, tuple):
+                            child_w, parent_w = pending
+                            if parent_w is not None:
+                                with self._session_lock:
+                                    self._session_warrant_chains[session_id] = parent_w
+                        else:
+                            child_w = pending
+                        self.set_session_warrant(session_id, child_w, self._static_signing_key)
+                        return child_w, self._static_signing_key
+                    # No pending warrant — fall back to static child_warrant heuristic
+                    if self._child_warrant is not None:
+                        return self._child_warrant, self._static_signing_key
 
         return self._static_warrant, self._static_signing_key
 
@@ -208,10 +217,14 @@ class HermesGuard:
         try:
             # Resolve toolset names → Hermes tool names
             requested_tools: set = set()
+            resolution_failed = False
             for ts in (toolsets or []):
                 try:
                     from toolsets import resolve_toolset
                     requested_tools.update(resolve_toolset(ts))
+                except ImportError:
+                    resolution_failed = True
+                    break
                 except Exception:
                     pass
 
@@ -226,8 +239,20 @@ class HermesGuard:
                     for candidate in (f"tool:{bare}", bare):
                         if candidate in parent_tools:
                             keep.add(candidate)
+            elif toolsets and resolution_failed:
+                # Hermes toolsets module unavailable — match toolset names as prefixes
+                # e.g. "web" matches "tool:web_search", "tool:web_extract"
+                keep = set()
+                for ts in toolsets:
+                    for t in parent_tools:
+                        bare = t.removeprefix("tool:")
+                        if bare == ts or bare.startswith(ts + "_") or bare.startswith(ts):
+                            keep.add(t)
+                if not keep:
+                    keep = parent_tools  # full fallback if nothing matched
             else:
-                # No toolsets specified — child gets all parent tools
+                # No toolsets specified (or Hermes toolsets module unavailable)
+                # → child gets all parent tools
                 keep = parent_tools
 
             if not keep:
@@ -259,7 +284,8 @@ class HermesGuard:
         """Pre-register attenuated warrants for upcoming child sessions.
 
         If toolsets is provided, dynamically attenuates the parent warrant.
-        Falls back to the static child_warrant if attenuation fails or is not configured.
+        The parent warrant is stored alongside the child so enforcement can
+        pass the full delegation chain to enforce_tool_call (warrant_chain=[parent]).
         """
         parent_warrant, signing_key = self._resolve_warrant(parent_session_id)
 
@@ -268,6 +294,7 @@ class HermesGuard:
             child = self._attenuate_for_toolsets(parent_warrant, toolsets or [], signing_key)
         elif self._child_warrant:
             child = self._child_warrant
+            parent_warrant = None  # no chain for static child_warrant
         else:
             return
 
@@ -276,16 +303,21 @@ class HermesGuard:
 
         with self._pending_lock:
             for i in range(task_count):
-                self._pending_child_warrants[(parent_session_id, i)] = child
+                # Store (child_warrant, parent_warrant) so enforcement can use
+                # the full chain: warrant_chain=[parent] + child as leaf
+                self._pending_child_warrants[(parent_session_id, i)] = (child, parent_warrant)
         logger.debug(
-            "hermes-tenuo: pre-registered %d child warrant(s) for session %s",
-            task_count, parent_session_id,
+            "hermes-tenuo: pre-registered %d child warrant(s) for session %s (chain=%s)",
+            task_count, parent_session_id, parent_warrant is not None,
         )
 
     def _claim_child_warrant(
         self, parent_session_id: str
     ) -> Optional[Any]:
-        """Claim the next pending child warrant for this parent (FIFO by task_index)."""
+        """Claim the next pending child warrant for this parent (FIFO by task_index).
+
+        Returns the child warrant (or a (child, parent) tuple if chain is available).
+        """
         with self._counter_lock:
             idx = self._child_counters.get(parent_session_id, 0)
             self._child_counters[parent_session_id] = idx + 1
@@ -347,6 +379,12 @@ class HermesGuard:
 
         warrant, signing_key = self._resolve_warrant(session_id)
 
+        # Ensure primary session is tracked even before child sessions appear
+        if session_id and self._primary_session_id is None:
+            with self._primary_lock:
+                if self._primary_session_id is None:
+                    self._primary_session_id = session_id
+
         # Audit-only mode: no warrant configured — pass through, emit later
         if warrant is None:
             return None
@@ -389,11 +427,16 @@ class HermesGuard:
                     trusted = [signing_key.public_key]
                 except Exception:
                     pass
+            # Pass the parent warrant as the chain for full delegation verification
+            # (parent was signed by Cloud; child was attenuated from parent by agent)
+            with self._session_lock:
+                parent_warrant = self._session_warrant_chains.get(session_id)
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
                 bound_warrant=bound,
-                trusted_roots=trusted,
+                trusted_roots=trusted if parent_warrant is None else resolve_trusted_roots(self._trusted_roots),
+                warrant_chain=[parent_warrant] if parent_warrant is not None else None,
                 approval_handler=self._approval_handler,
             )
         except Exception as exc:
