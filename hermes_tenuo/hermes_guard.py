@@ -184,10 +184,11 @@ class HermesGuard:
                     # Child session — check for a pending attenuated warrant first.
                     #
                     # V1 LIMITATION: single-parent-session only. If two parent sessions
-                    # run concurrently, the second parent is misidentified as a child of
-                    # the first. For single-user interactive and cron use cases this is
-                    # fine. The correct fix is on_session_start firing with parent_session_id
-                    # (not currently emitted by Hermes) — see hermes-integration-spec.md.
+                    # run concurrently (same process, e.g. gateway), the second parent is
+                    # misidentified as a child of the first. Mitigated by on_session_end
+                    # resetting _primary_session_id, so after the first session ends the
+                    # next session becomes primary. For single-user interactive use this
+                    # is fine. The correct fix is on_session_start with parent_session_id.
                     pending = self._claim_child_warrant(self._primary_session_id)
                     if pending is not None:
                         if isinstance(pending, tuple):
@@ -274,9 +275,15 @@ class HermesGuard:
             b.with_ttl(3600)
             child = b.delegate(signing_key)
 
+            # Log scope reduction clearly — important for demo and audit
+            parent_tool_count = len(set(parent_warrant.tools or []))
             logger.info(
-                "hermes-tenuo: attenuated child warrant for toolsets %s → tools: %s",
-                toolsets, sorted(keep),
+                "hermes-tenuo: delegation scope — parent has %d tools, child gets %d "
+                "(toolsets=%s, tools=%s)",
+                parent_tool_count,
+                len(keep),
+                toolsets,
+                sorted(keep),
             )
             return child
 
@@ -358,6 +365,13 @@ class HermesGuard:
         self.clear_session_warrant(session_id)
         with self._counter_lock:
             self._child_counters.pop(session_id, None)
+        # Reset primary if this was the primary session, so the next session
+        # is correctly identified as a new primary rather than a child.
+        with self._primary_lock:
+            if self._primary_session_id == session_id:
+                self._primary_session_id = None
+        with self._session_lock:
+            self._session_warrant_chains.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Hook: pre_tool_call
@@ -412,12 +426,12 @@ class HermesGuard:
         return self._enforce(effective_tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
 
     def _normalize_tool_name(self, tool_name: str, warrant: Any) -> str:
-        """Normalize the incoming tool name to match the warrant's naming convention.
+        """Map the incoming Hermes tool name to the warrant's capability name.
 
-        Cloud triggers emit capabilities as "tool:web_search"; Hermes calls "web_search".
-        Check the warrant's tool list once and map accordingly — no double enforcement.
-        When Cloud locks down its naming convention, remove this normalization and
-        ensure warrants are minted with bare names instead.
+        Cloud triggers use a namespaced convention ("tool:web_search") while Hermes
+        uses bare names ("web_search"). This is a bridge layer — one lookup against
+        the warrant's tool list, no double enforcement. When Cloud warrant issuance
+        moves to bare names, delete this method and call _enforce directly.
         """
         if warrant is None:
             return tool_name
@@ -445,21 +459,30 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
+            # For chain verification: use configured trusted_roots (Cloud's key).
+            # If not configured, extract the root from the parent warrant's issuer
+            # field — the parent was Cloud-signed, so parent.issuer IS Cloud's key.
+            with self._session_lock:
+                parent_warrant = self._session_warrant_chains.get(session_id)
             trusted = resolve_trusted_roots(self._trusted_roots)
+            if trusted is None and parent_warrant is not None:
+                # Derive trusted root from the parent's issuer (the Cloud signing key)
+                try:
+                    if parent_warrant.issuer is not None:
+                        trusted = [parent_warrant.issuer]
+                except Exception:
+                    pass
             if trusted is None and signing_key is not None:
+                # Last resort: trust the agent's own key (covers static child_warrant)
                 try:
                     trusted = [signing_key.public_key]
                 except Exception:
                     pass
-            # Pass the parent warrant as the chain for full delegation verification
-            # (parent was signed by Cloud; child was attenuated from parent by agent)
-            with self._session_lock:
-                parent_warrant = self._session_warrant_chains.get(session_id)
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
                 bound_warrant=bound,
-                trusted_roots=trusted if parent_warrant is None else resolve_trusted_roots(self._trusted_roots),
+                trusted_roots=trusted,
                 warrant_chain=[parent_warrant] if parent_warrant is not None else None,
                 approval_handler=self._approval_handler,
             )

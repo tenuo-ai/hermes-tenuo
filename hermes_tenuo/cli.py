@@ -299,8 +299,8 @@ def main() -> None:
 
     # mint
     mint_p = subparsers.add_parser("mint", help="Mint a warrant and print config")
-    mint_p.add_argument("--ttl", default="1h", metavar="DURATION",
-                        help="Warrant TTL, e.g. 30m, 1h, 7d (default: 1h)")
+    mint_p.add_argument("--ttl", default="24h", metavar="DURATION",
+                        help="Warrant TTL, e.g. 30m, 1h, 7d (default: 24h)")
     mint_p.add_argument("--allow", action="append", metavar="TOOL[:ARG=VALUE]",
                         help="Allow a tool (repeat for multiple). "
                              "Examples: --allow web_search  "
