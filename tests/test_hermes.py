@@ -187,21 +187,23 @@ class TestEnforcementMode:
 
 class TestMissingSigningKey:
 
-    def test_warrant_without_signing_key_passes_through_with_warning(
-        self, basic_warrant, root_key
-    ):
+    def test_warrant_without_signing_key_hard_blocks(self, basic_warrant, root_key):
+        """Missing signing key returns a hard block — not a silent pass-through.
+
+        A misconfigured deployment that silently allows all calls defeats the
+        purpose of running Tenuo. Operators must notice the misconfiguration
+        immediately rather than discovering it after the fact in audit logs.
+        """
         guard = HermesGuard(
             warrant=basic_warrant,
             signing_key=None,  # no key
             trusted_roots=[root_key.public_key],
         )
         guard._primary_session_id = "s1"
-        with patch("hermes_tenuo.hermes_guard.logger") as mock_log:
-            result = guard.pre_tool_call("terminal", {"command": "rm -rf /"}, session_id="s1")
-        assert result is None  # passes through — does NOT silently enforce
-        mock_log.warning.assert_called()
-        warning_text = mock_log.warning.call_args[0][0]
-        assert "signing_key" in warning_text
+        result = guard.pre_tool_call("terminal", {"command": "rm -rf /"}, session_id="s1")
+        assert result is not None
+        assert result["action"] == "block"
+        assert "TENUO_SIGNING_KEY" in result["message"]
 
 
 # ---------------------------------------------------------------------------

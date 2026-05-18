@@ -181,7 +181,13 @@ class HermesGuard:
                 if self._primary_session_id is None and session_id:
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
-                    # Child session — check for a pending attenuated warrant first
+                    # Child session — check for a pending attenuated warrant first.
+                    #
+                    # V1 LIMITATION: single-parent-session only. If two parent sessions
+                    # run concurrently, the second parent is misidentified as a child of
+                    # the first. For single-user interactive and cron use cases this is
+                    # fine. The correct fix is on_session_start firing with parent_session_id
+                    # (not currently emitted by Hermes) — see hermes-integration-spec.md.
                     pending = self._claim_child_warrant(self._primary_session_id)
                     if pending is not None:
                         if isinstance(pending, tuple):
@@ -390,18 +396,38 @@ class HermesGuard:
             return None
 
         # Enforcement requires a signing key for Proof-of-Possession.
-        # If no key is configured, warn once and pass through.
+        # Hard block: a misconfigured demo that silently passes through
+        # defeats the point of running Tenuo at all.
         if signing_key is None:
-            logger.warning(
-                "hermes-tenuo: warrant is configured but no signing_key — "
-                "enforcement requires TENUO_SIGNING_KEY for PoP. Passing through."
-            )
-            return None
+            return {
+                "action": "block",
+                "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
+            }
 
-        # The Cloud trigger UI prefixes capability names with "tool:" (e.g. "tool:web_search").
-        # Try enforcement with the bare name first; if that fails with tool_not_authorized,
-        # retry with the "tool:" prefix so Cloud-issued warrants work transparently.
-        return self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+        # Normalize tool name to match the warrant's capability naming convention.
+        # Cloud trigger UI emits "tool:web_search"; Hermes calls "web_search".
+        # Normalize once here so enforcement never sees a double-denial.
+        effective_tool_name = self._normalize_tool_name(tool_name, warrant)
+
+        return self._enforce(effective_tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+
+    def _normalize_tool_name(self, tool_name: str, warrant: Any) -> str:
+        """Normalize the incoming tool name to match the warrant's naming convention.
+
+        Cloud triggers emit capabilities as "tool:web_search"; Hermes calls "web_search".
+        Check the warrant's tool list once and map accordingly — no double enforcement.
+        When Cloud locks down its naming convention, remove this normalization and
+        ensure warrants are minted with bare names instead.
+        """
+        if warrant is None:
+            return tool_name
+        tools = set(warrant.tools or [])
+        if tool_name in tools:
+            return tool_name
+        prefixed = f"tool:{tool_name}"
+        if prefixed in tools:
+            return prefixed
+        return tool_name
 
     def _enforce(
         self,
@@ -413,14 +439,12 @@ class HermesGuard:
         task_id: str,
         tool_call_id: str,
     ) -> Optional[Dict[str, Any]]:
-        """Run enforce_tool_call, retrying with tool: prefix for Cloud-issued warrants."""
+        """Run enforce_tool_call once against the normalized tool name."""
         try:
             from tenuo._enforcement import enforce_tool_call
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # attenuate_builder() children are verified via the parent chain;
-            # fall back to signing key as trusted root for locally-attenuated warrants.
             trusted = resolve_trusted_roots(self._trusted_roots)
             if trusted is None and signing_key is not None:
                 try:
@@ -444,31 +468,6 @@ class HermesGuard:
             if self._on_denial == "block":
                 return {"action": "block", "message": f"Authorization error: {exc}"}
             return None
-
-        # If blocked and the tool isn't already prefixed, retry with "tool:" prefix.
-        # Cloud trigger UI stores capabilities as "tool:web_search" not "web_search".
-        if not result.allowed and not tool_name.startswith("tool:"):
-            prefixed = f"tool:{tool_name}"
-            try:
-                from tenuo._enforcement import enforce_tool_call
-                from tenuo.config import resolve_trusted_roots
-                bound2 = warrant.bind(signing_key)
-                trusted2 = resolve_trusted_roots(self._trusted_roots)
-                if trusted2 is None and signing_key is not None:
-                    try:
-                        trusted2 = [signing_key.public_key]
-                    except Exception:
-                        pass
-                result2 = enforce_tool_call(
-                    tool_name=prefixed,
-                    tool_args=args,
-                    bound_warrant=bound2,
-                    trusted_roots=trusted2,
-                    approval_handler=self._approval_handler,
-                )
-                result = result2
-            except Exception:
-                pass  # fall through to original result
 
         if self._control_plane is not None:
             try:
