@@ -177,32 +177,42 @@ class HermesGuard:
             return entry
 
         if self._child_warrant is not None or self._pending_child_warrants:
+            # Lock ordering: _primary_lock → _pending_lock → _counter_lock → _session_lock.
+            # Acquire _primary_lock to determine the child warrant, then release it
+            # before touching _session_lock (set_session_warrant / _session_warrant_chains).
+            child_w = None
+            parent_w = None
+            is_child_session = False
+            fall_back_to_static = False
+
             with self._primary_lock:
                 if self._primary_session_id is None and session_id:
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
-                    # Child session — check for a pending attenuated warrant first.
-                    #
                     # V1 LIMITATION: single-parent-session only. If two parent sessions
                     # run concurrently (same process, e.g. gateway), the second parent is
                     # misidentified as a child of the first. Mitigated by on_session_end
-                    # resetting _primary_session_id, so after the first session ends the
-                    # next session becomes primary. For single-user interactive use this
-                    # is fine. The correct fix is on_session_start with parent_session_id.
+                    # resetting _primary_session_id. The correct fix is on_session_start
+                    # with parent_session_id (not currently emitted by Hermes).
                     pending = self._claim_child_warrant(self._primary_session_id)
                     if pending is not None:
+                        is_child_session = True
                         if isinstance(pending, tuple):
                             child_w, parent_w = pending
-                            if parent_w is not None:
-                                with self._session_lock:
-                                    self._session_warrant_chains[session_id] = parent_w
                         else:
                             child_w = pending
-                        self.set_session_warrant(session_id, child_w, self._static_signing_key)
-                        return child_w, self._static_signing_key
-                    # No pending warrant — fall back to static child_warrant heuristic
-                    if self._child_warrant is not None:
-                        return self._child_warrant, self._static_signing_key
+                    elif self._child_warrant is not None:
+                        fall_back_to_static = True
+            # _primary_lock released — now safe to acquire _session_lock
+
+            if is_child_session and child_w is not None:
+                if parent_w is not None:
+                    with self._session_lock:
+                        self._session_warrant_chains[session_id] = parent_w
+                self.set_session_warrant(session_id, child_w, self._static_signing_key)
+                return child_w, self._static_signing_key
+            if fall_back_to_static:
+                return self._child_warrant, self._static_signing_key
 
         return self._static_warrant, self._static_signing_key
 
