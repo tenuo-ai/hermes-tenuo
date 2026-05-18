@@ -202,8 +202,8 @@ class HermesGuard:
     ) -> Optional[Any]:
         """Attenuate the parent warrant to only the tools in the given Hermes toolsets.
 
-        Uses parent_warrant.grant_builder() so the child is a cryptographically
-        verifiable descendant of the parent — the child cannot exceed the parent's scope.
+        Uses parent_warrant.attenuate_builder() with inherit_all() so all parent
+        constraints are preserved — the child cannot exceed the parent's scope.
         """
         try:
             # Resolve toolset names → Hermes tool names
@@ -213,39 +213,39 @@ class HermesGuard:
                     from toolsets import resolve_toolset
                     requested_tools.update(resolve_toolset(ts))
                 except Exception:
-                    pass  # toolsets module not available — skip
+                    pass
 
-            # Get parent's authorized tool names (strip tool: prefix for lookup)
+            # Get parent's authorized tool names
             parent_tools = set(parent_warrant.tools or [])
-            parent_bare = {t.removeprefix("tool:") for t in parent_tools}
 
-            # Determine child tools: intersection of requested and parent-allowed
+            # Determine which tools to keep in the child
             if requested_tools:
-                child_bare = requested_tools & parent_bare
+                # Map bare names to tool: prefixed names used in Cloud warrants
+                keep = set()
+                for bare in requested_tools:
+                    for candidate in (f"tool:{bare}", bare):
+                        if candidate in parent_tools:
+                            keep.add(candidate)
             else:
                 # No toolsets specified — child gets all parent tools
-                child_bare = parent_bare
+                keep = parent_tools
 
-            if not child_bare:
+            if not keep:
                 logger.debug("hermes-tenuo: no overlapping tools for child — using static child_warrant")
                 return self._child_warrant
 
-            # Build attenuated child warrant via grant_builder
-            # The grant is signed by the agent key, so trusted_root for child = signing_key.public_key
-            builder = parent_warrant.grant_builder().holder(signing_key.public_key)
-            for bare_name in sorted(child_bare):
-                # Re-add tool: prefix to match Cloud warrant naming convention
-                cap_name = f"tool:{bare_name}"
-                if cap_name in parent_tools:
-                    builder = builder.capability(cap_name)  # inherit no extra constraints
-                else:
-                    builder = builder.capability(bare_name)  # bare name fallback
-            builder = builder.ttl(3600)
-            child = builder.grant(signing_key)
+            # Build attenuated child via attenuate_builder:
+            # inherit_all() preserves all parent constraints (avoids monotonicity violations)
+            # with_tools() whitelists only the requested tools
+            b = parent_warrant.attenuate_builder()
+            b.inherit_all()
+            b.with_tools(sorted(keep))
+            b.with_ttl(3600)
+            child = b.delegate(signing_key)
 
             logger.info(
                 "hermes-tenuo: attenuated child warrant for toolsets %s → tools: %s",
-                toolsets, sorted(child_bare),
+                toolsets, sorted(keep),
             )
             return child
 
@@ -381,8 +381,8 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # For dynamically-attenuated child warrants (signed by agent key, not Cloud),
-            # fall back to trusting the signing key itself when no Cloud trusted_root works.
+            # attenuate_builder() children are verified via the parent chain;
+            # fall back to signing key as trusted root for locally-attenuated warrants.
             trusted = resolve_trusted_roots(self._trusted_roots)
             if trusted is None and signing_key is not None:
                 try:
