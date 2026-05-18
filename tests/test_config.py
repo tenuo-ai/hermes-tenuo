@@ -240,24 +240,14 @@ class TestMintCLI:
         assert "export TENUO_SIGNING_KEY=" in out
         assert "export TENUO_TRUSTED_ROOT=" in out
 
-    def test_mint_with_path_constraint(self, capsys):
+    def test_mint_with_multiple_tools(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         import argparse
-        args = argparse.Namespace(ttl="1h", allow=["read_file:path=/data"], output="env")
+        args = argparse.Namespace(ttl="1h", allow=["read_file", "web_search"], output="env", trigger=None)
         result = cmd_mint(args)
         assert result == 0
-
-    def test_parse_capability_bare(self):
-        from hermes_tenuo.cli import _parse_capability
-        name, constraints = _parse_capability("web_search")
-        assert name == "web_search"
-        assert constraints == {}
-
-    def test_parse_capability_with_constraint(self):
-        from hermes_tenuo.cli import _parse_capability
-        name, constraints = _parse_capability("read_file:path=/data")
-        assert name == "read_file"
-        assert constraints == {"path": "/data"}
+        out = capsys.readouterr().out
+        assert "export TENUO_WARRANT=" in out
 
     def test_parse_ttl(self):
         from hermes_tenuo.cli import _parse_ttl
