@@ -384,12 +384,20 @@ class HermesGuard:
         # If a future Hermes version fires this with parent_session_id, the explicit
         # session warrant registration here will take precedence over the heuristic.
         if parent_session_id and self._child_warrant:
-            child_warrant = self._claim_child_warrant(parent_session_id)
-            warrant = child_warrant or self._child_warrant
+            claimed = self._claim_child_warrant(parent_session_id)
+            if isinstance(claimed, tuple):
+                child_w, parent_w = claimed
+            else:
+                child_w, parent_w = claimed, None
+            warrant = child_w or self._child_warrant
+            if parent_w is not None:
+                with self._session_lock:
+                    self._session_warrant_chains[session_id] = parent_w
             self.set_session_warrant(session_id, warrant, self._static_signing_key)
             logger.debug(
-                "hermes-tenuo: on_session_start fired — child session %s registered (parent=%s)",
-                session_id, parent_session_id,
+                "hermes-tenuo: on_session_start fired — child session %s registered "
+                "(parent=%s, chain=%s)",
+                session_id, parent_session_id, parent_w is not None,
             )
 
     def on_session_end(self, session_id: str) -> None:
@@ -465,10 +473,18 @@ class HermesGuard:
     def _normalize_tool_name(self, tool_name: str, warrant: Any) -> str:
         """Map the incoming Hermes tool name to the warrant's capability name.
 
-        Cloud triggers use a namespaced convention ("tool:web_search") while Hermes
-        uses bare names ("web_search"). This is a bridge layer — one lookup against
-        the warrant's tool list, no double enforcement. When Cloud warrant issuance
-        moves to bare names, delete this method and call _enforce directly.
+        TEMPORARY SHIM: Cloud trigger UI currently prefixes capabilities with
+        "tool:" (e.g. "tool:web_search"), while Hermes calls bare names
+        ("web_search"). This method scans warrant.tools to pick the matching
+        form so enforce_tool_call sees exactly what the warrant contains.
+
+        Once Cloud's trigger templates issue warrants with bare names, this
+        method becomes a no-op and should be deleted — core will receive the
+        same string Hermes sends, with no Python involvement in name selection.
+
+        Note: Python reading warrant.tools here does NOT constitute a parallel
+        authorization check — it is purely name translation. The authoritative
+        allow/deny decision on the resolved name is made by enforce_tool_call.
         """
         if warrant is None:
             return tool_name
@@ -510,12 +526,9 @@ class HermesGuard:
                         trusted = [parent_warrant.issuer]
                 except Exception:
                     pass
-            if trusted is None and signing_key is not None:
-                # Last resort: trust the agent's own key (covers static child_warrant)
-                try:
-                    trusted = [signing_key.public_key]
-                except Exception:
-                    pass
+            # No signing_key.public_key fallback here: without an explicit trusted
+            # root anchor we must fail closed and let enforce_tool_call reject the
+            # warrant rather than silently accepting a self-issued one.
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
