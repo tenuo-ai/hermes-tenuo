@@ -183,6 +183,9 @@ class HermesGuard:
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
                     # Different session_id → child/subagent session
+                    # For dynamically-attenuated child warrants, the trusted_root
+                    # is the agent's signing key (not Cloud's root), so we return
+                    # it with a temporary trusted_roots override handled at enforcement time.
                     return self._child_warrant, self._static_signing_key
 
         return self._static_warrant, self._static_signing_key
@@ -191,16 +194,89 @@ class HermesGuard:
     # delegate_task child warrant pre-registration
     # ------------------------------------------------------------------
 
+    def _attenuate_for_toolsets(
+        self,
+        parent_warrant: Any,
+        toolsets: List[str],
+        signing_key: Any,
+    ) -> Optional[Any]:
+        """Attenuate the parent warrant to only the tools in the given Hermes toolsets.
+
+        Uses parent_warrant.grant_builder() so the child is a cryptographically
+        verifiable descendant of the parent — the child cannot exceed the parent's scope.
+        """
+        try:
+            # Resolve toolset names → Hermes tool names
+            requested_tools: set = set()
+            for ts in (toolsets or []):
+                try:
+                    from toolsets import resolve_toolset
+                    requested_tools.update(resolve_toolset(ts))
+                except Exception:
+                    pass  # toolsets module not available — skip
+
+            # Get parent's authorized tool names (strip tool: prefix for lookup)
+            parent_tools = set(parent_warrant.tools or [])
+            parent_bare = {t.removeprefix("tool:") for t in parent_tools}
+
+            # Determine child tools: intersection of requested and parent-allowed
+            if requested_tools:
+                child_bare = requested_tools & parent_bare
+            else:
+                # No toolsets specified — child gets all parent tools
+                child_bare = parent_bare
+
+            if not child_bare:
+                logger.debug("hermes-tenuo: no overlapping tools for child — using static child_warrant")
+                return self._child_warrant
+
+            # Build attenuated child warrant via grant_builder
+            # The grant is signed by the agent key, so trusted_root for child = signing_key.public_key
+            builder = parent_warrant.grant_builder().holder(signing_key.public_key)
+            for bare_name in sorted(child_bare):
+                # Re-add tool: prefix to match Cloud warrant naming convention
+                cap_name = f"tool:{bare_name}"
+                if cap_name in parent_tools:
+                    builder = builder.capability(cap_name)  # inherit no extra constraints
+                else:
+                    builder = builder.capability(bare_name)  # bare name fallback
+            builder = builder.ttl(3600)
+            child = builder.grant(signing_key)
+
+            logger.info(
+                "hermes-tenuo: attenuated child warrant for toolsets %s → tools: %s",
+                toolsets, sorted(child_bare),
+            )
+            return child
+
+        except Exception as exc:
+            logger.warning("hermes-tenuo: attenuation failed (%s), using static child_warrant", exc)
+            return self._child_warrant
+
     def _register_child_warrants(
-        self, parent_session_id: str, task_count: int
+        self, parent_session_id: str, task_count: int, toolsets: Optional[List[str]] = None
     ) -> None:
-        """Pre-register attenuated warrants for upcoming child sessions."""
-        if not self._child_warrant:
+        """Pre-register attenuated warrants for upcoming child sessions.
+
+        If toolsets is provided, dynamically attenuates the parent warrant.
+        Falls back to the static child_warrant if attenuation fails or is not configured.
+        """
+        parent_warrant, signing_key = self._resolve_warrant(parent_session_id)
+
+        # Try dynamic attenuation first if we have both parent warrant and signing key
+        if parent_warrant and signing_key and (toolsets is not None or self._child_warrant is None):
+            child = self._attenuate_for_toolsets(parent_warrant, toolsets or [], signing_key)
+        elif self._child_warrant:
+            child = self._child_warrant
+        else:
             return
+
+        if child is None:
+            return
+
         with self._pending_lock:
             for i in range(task_count):
-                key = (parent_session_id, i)
-                self._pending_child_warrants[key] = self._child_warrant
+                self._pending_child_warrants[(parent_session_id, i)] = child
         logger.debug(
             "hermes-tenuo: pre-registered %d child warrant(s) for session %s",
             task_count, parent_session_id,
@@ -262,11 +338,12 @@ class HermesGuard:
         Returns {"action": "block", "message": "..."} to block the call,
         or None to allow it.
         """
-        # Intercept delegate_task to pre-register child warrants
-        if tool_name == "delegate_task" and self._child_warrant:
+        # Intercept delegate_task to pre-register attenuated child warrants
+        if tool_name == "delegate_task":
             tasks = args.get("tasks") or []
             task_count = len(tasks) if isinstance(tasks, list) else 1
-            self._register_child_warrants(session_id, task_count)
+            toolsets = args.get("toolsets") or []
+            self._register_child_warrants(session_id, task_count, toolsets=toolsets)
 
         warrant, signing_key = self._resolve_warrant(session_id)
 
@@ -304,11 +381,19 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
+            # For dynamically-attenuated child warrants (signed by agent key, not Cloud),
+            # fall back to trusting the signing key itself when no Cloud trusted_root works.
+            trusted = resolve_trusted_roots(self._trusted_roots)
+            if trusted is None and signing_key is not None:
+                try:
+                    trusted = [signing_key.public_key]
+                except Exception:
+                    pass
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
                 bound_warrant=bound,
-                trusted_roots=resolve_trusted_roots(self._trusted_roots),
+                trusted_roots=trusted,
                 approval_handler=self._approval_handler,
             )
         except Exception as exc:
@@ -325,11 +410,17 @@ class HermesGuard:
                 from tenuo._enforcement import enforce_tool_call
                 from tenuo.config import resolve_trusted_roots
                 bound2 = warrant.bind(signing_key)
+                trusted2 = resolve_trusted_roots(self._trusted_roots)
+                if trusted2 is None and signing_key is not None:
+                    try:
+                        trusted2 = [signing_key.public_key]
+                    except Exception:
+                        pass
                 result2 = enforce_tool_call(
                     tool_name=prefixed,
                     tool_args=args,
                     bound_warrant=bound2,
-                    trusted_roots=resolve_trusted_roots(self._trusted_roots),
+                    trusted_roots=trusted2,
                     approval_handler=self._approval_handler,
                 )
                 result = result2
