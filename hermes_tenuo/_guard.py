@@ -111,6 +111,28 @@ class PluginGuard:
     def has_warrant(self) -> bool:
         return self._guard.has_warrant
 
+    # ------------------------------------------------------------------
+    # Gateway/orchestration surface — proxies to the underlying HermesGuard
+    # so plugin users don't have to reach into `plugin_guard._guard`.
+    # ------------------------------------------------------------------
+
+    def set_session_warrant(
+        self,
+        session_id: str,
+        warrant: Any,
+        signing_key: Optional[Any] = None,
+    ) -> None:
+        """Register a per-session warrant (gateway multi-user pattern)."""
+        self._guard.set_session_warrant(session_id, warrant, signing_key)
+
+    def clear_session_warrant(self, session_id: str) -> None:
+        """Drop a session's warrant (call on session_end if not using hooks)."""
+        self._guard.clear_session_warrant(session_id)
+
+    def set_trusted_roots(self, roots: Optional[list]) -> None:
+        """Thread-safe replacement of the trusted root set."""
+        self._guard.set_trusted_roots(roots)
+
     def pre_tool_call_hook(
         self,
         tool_name: str = "",
@@ -215,16 +237,14 @@ class PluginGuard:
             self._guard.set_session_warrant(session_id, warrant, signing_key)
 
             # Update trusted_roots if we got an issuer from the warrant.
-            # KNOWN GAP: direct mutation is not thread-safe if enforcement runs
-            # concurrently. Safe for single-session gateway use (orchestration
-            # code calls this before any tool calls in the session).
-            # TODO: expose HermesGuard.set_trusted_roots() with a lock.
-            if result.trusted_root_b64 and self._guard._trusted_roots is None:
+            # Uses HermesGuard.set_trusted_roots() so the mutation is locked
+            # against concurrent enforcement reads.
+            if result.trusted_root_b64 and self._guard._get_trusted_roots() is None:
                 try:
                     import base64
                     from tenuo_core import PublicKey
                     root = PublicKey.from_bytes(base64.b64decode(result.trusted_root_b64))
-                    self._guard._trusted_roots = [root]
+                    self._guard.set_trusted_roots([root])
                 except Exception:
                     pass
 

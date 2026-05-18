@@ -217,6 +217,74 @@ class TestPluginGuardCloudIntegration:
 
 
 # ---------------------------------------------------------------------------
+# PluginGuard gateway proxy surface (set_session_warrant, set_trusted_roots)
+# ---------------------------------------------------------------------------
+
+class TestPluginGuardGatewayProxy:
+    """Verify PluginGuard exposes gateway helpers without reaching into _guard."""
+
+    def test_set_session_warrant_proxies_to_inner_guard(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+        from hermes_tenuo.hermes_guard import HermesGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner, cloud_creds=None)
+        pg.set_session_warrant("alice", warrant, agent_key)
+
+        w, k = inner._resolve_warrant("alice")
+        assert w is warrant
+        assert k is agent_key
+
+    def test_clear_session_warrant_proxies(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+        from hermes_tenuo.hermes_guard import HermesGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner, cloud_creds=None)
+        pg.set_session_warrant("alice", warrant, agent_key)
+        pg.clear_session_warrant("alice")
+        with inner._session_lock:
+            assert "alice" not in inner._session_warrants
+
+    def test_set_trusted_roots_proxies(self):
+        from tenuo import SigningKey
+        from hermes_tenuo._guard import PluginGuard
+        from hermes_tenuo.hermes_guard import HermesGuard
+
+        inner = HermesGuard()
+        pg = PluginGuard(inner, cloud_creds=None)
+
+        root_key = SigningKey.generate()
+        pg.set_trusted_roots([root_key.public_key])
+        assert inner._get_trusted_roots() == [root_key.public_key]
+
+        pg.set_trusted_roots(None)
+        assert inner._get_trusted_roots() is None
+
+
+# ---------------------------------------------------------------------------
 # CLI --trigger
 # ---------------------------------------------------------------------------
 

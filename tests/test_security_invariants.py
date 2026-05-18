@@ -137,6 +137,71 @@ class TestFailClosed:
         assert result is not None
         assert result["action"] == "block"
 
+    def test_no_trusted_root_hard_blocks(self, parent_warrant, agent_key):
+        """Warrant + signing key present but no trusted root and no chain → hard block.
+
+        The agent-key fallback was removed: without an issuer anchor we cannot
+        verify the warrant's signature, so we refuse rather than trust an
+        unrelated key (the holder's own pubkey).
+        """
+        guard = HermesGuard(
+            warrant=parent_warrant,
+            signing_key=agent_key,
+            trusted_roots=None,  # no anchor configured
+        )
+        guard._primary_session_id = "s1"
+        result = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="s1")
+        assert result is not None
+        assert result["action"] == "block"
+        assert "trusted_root" in result["message"]
+
+    def test_audit_only_mode_emits_warning_once(self, agent_key, cloud_key, caplog):
+        """Audit-only mode (no warrant) must be visible in logs at first call."""
+        import logging
+        guard = HermesGuard(signing_key=agent_key, trusted_roots=[cloud_key.public_key])
+        guard._primary_session_id = "s1"
+        with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
+            guard.pre_tool_call("web_search", {"query": "a"}, session_id="s1")
+            guard.pre_tool_call("web_search", {"query": "b"}, session_id="s1")
+        audit_warnings = [r for r in caplog.records if "AUDIT-ONLY" in r.getMessage()]
+        assert len(audit_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Trusted root management — lock-protected setter
+# ---------------------------------------------------------------------------
+
+
+class TestTrustedRootsSetter:
+
+    def test_set_trusted_roots_installs_anchor(self, parent_warrant, agent_key, cloud_key):
+        """set_trusted_roots makes enforcement succeed after the fact."""
+        guard = HermesGuard(
+            warrant=parent_warrant,
+            signing_key=agent_key,
+            trusted_roots=None,
+        )
+        guard._primary_session_id = "s1"
+        # Initially blocks because no trusted root.
+        r = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="s1")
+        assert r is not None and r["action"] == "block"
+        # Install the right anchor.
+        guard.set_trusted_roots([cloud_key.public_key])
+        r2 = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="s1")
+        assert r2 is None
+
+    def test_set_trusted_roots_none_clears(self, parent_warrant, agent_key, cloud_key):
+        """Passing None clears the trusted root set."""
+        guard = HermesGuard(
+            warrant=parent_warrant,
+            signing_key=agent_key,
+            trusted_roots=[cloud_key.public_key],
+        )
+        guard._primary_session_id = "s1"
+        guard.set_trusted_roots(None)
+        r = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="s1")
+        assert r is not None and r["action"] == "block"
+
 
 # ---------------------------------------------------------------------------
 # I2: Monotonicity — child ⊆ parent

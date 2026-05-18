@@ -116,23 +116,11 @@ def get_on_denial(ctx: Any) -> str:
 
 
 def load_warrant(raw: Optional[str]):
-    """Deserialise a base64 warrant string into a Warrant object."""
+    """Deserialise a URL-safe base64 warrant string into a Warrant object."""
     if not raw:
         return None
     try:
         from tenuo_core import Warrant
-        padded = raw + "=" * (-len(raw) % 4)
-        data = base64.urlsafe_b64decode(padded)
-        return Warrant.from_bytes(data)
-    except Exception as exc:
-        logger.warning("hermes-tenuo: could not load warrant: %s", exc)
-        return None
-    """Deserialise a base64 warrant string into a Warrant object."""
-    if not raw:
-        return None
-    try:
-        from tenuo_core import Warrant
-        # Warrants use URL-safe base64 (- and _ instead of + and /)
         padded = raw + "=" * (-len(raw) % 4)
         data = base64.urlsafe_b64decode(padded)
         return Warrant.from_bytes(data)
