@@ -51,7 +51,14 @@ def register(ctx: Any) -> None:
                     tool_call_id=str(kwargs.get("tool_call_id") or ""),
                 )
                 if result and result.get("action") == "block":
-                    raise PermissionError(result.get("message", f"Tool '{tool_name}' not authorized"))
+                    # Use EnforcementDenied sentinel so the registry distinguishes
+                    # a policy denial from a bug in the enforcement fn.
+                    try:
+                        from tools.registry import EnforcementDenied
+                        raise EnforcementDenied(result.get("message", f"Tool '{tool_name}' not authorized"))
+                    except ImportError:
+                        # Upstream Hermes without EnforcementDenied — fall back to PermissionError
+                        raise PermissionError(result.get("message", f"Tool '{tool_name}' not authorized"))
 
             _tool_registry.set_enforcement_fn(_enforcement_fn)
             _registered_via_registry = True

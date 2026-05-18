@@ -227,9 +227,6 @@ def _save_secret_b64(path: Path, raw_bytes: bytes) -> None:
         pass
 
 
-def _load_secret_b64(path: Path) -> bytes:
-    return base64.b64decode(path.read_text().strip())
-
 
 def _prompt_for_tools() -> list:
     """Interactive tool-allow prompt. Returns list of capability strings."""
