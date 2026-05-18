@@ -29,7 +29,13 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     if not connect_token and not warrant_raw:
         return None
 
-    # Parse Cloud credentials if connect_token is present
+    warrant = load_warrant(warrant_raw)
+    child_warrant = load_warrant(get_child_warrant_raw(ctx))
+    signing_key = get_signing_key(ctx)
+    trusted_roots = get_trusted_roots(ctx)
+
+    # Parse Cloud credentials and connect (pass signing_key as object to avoid
+    # env var path which calls SigningKey.from_base64 — not available in all builds)
     cloud_creds = None
     if connect_token:
         from hermes_tenuo._cloud import parse_connect_token
@@ -37,14 +43,13 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         if cloud_creds:
             try:
                 from tenuo.control_plane import connect
-                connect(token=connect_token, authorizer_name=cloud_creds.agent_id or "hermes-agent")
+                connect(
+                    token=connect_token,
+                    authorizer_name=cloud_creds.agent_id or "hermes-agent",
+                    signing_key=signing_key,
+                )
             except Exception as exc:
                 logger.warning("hermes-tenuo: Cloud connection failed: %s", exc)
-
-    warrant = load_warrant(warrant_raw)
-    child_warrant = load_warrant(get_child_warrant_raw(ctx))
-    signing_key = get_signing_key(ctx)
-    trusted_roots = get_trusted_roots(ctx)
 
     # Wire Cloud approval handler when connect_token is present
     approval_handler = None
