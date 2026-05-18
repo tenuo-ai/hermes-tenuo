@@ -272,6 +272,8 @@ class HermesGuard:
             b = parent_warrant.attenuate_builder()
             b.inherit_all()
             b.with_tools(sorted(keep))
+            # TTL is capped at parent's remaining lifetime by the Rust core
+            # (I3: child.exp <= parent.exp) — passing 3600 is a requested maximum.
             b.with_ttl(3600)
             child = b.delegate(signing_key)
 
