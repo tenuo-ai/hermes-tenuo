@@ -109,7 +109,24 @@ def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
         return None
 
 
+def get_on_denial(ctx: Any) -> str:
+    """Return on_denial mode: 'block' (default) or 'log' (audit — log but don't block)."""
+    entry = _get_plugin_entry(ctx)
+    return entry.get("on_denial", "block")
+
+
 def load_warrant(raw: Optional[str]):
+    """Deserialise a base64 warrant string into a Warrant object."""
+    if not raw:
+        return None
+    try:
+        from tenuo_core import Warrant
+        padded = raw + "=" * (-len(raw) % 4)
+        data = base64.urlsafe_b64decode(padded)
+        return Warrant.from_bytes(data)
+    except Exception as exc:
+        logger.warning("hermes-tenuo: could not load warrant: %s", exc)
+        return None
     """Deserialise a base64 warrant string into a Warrant object."""
     if not raw:
         return None

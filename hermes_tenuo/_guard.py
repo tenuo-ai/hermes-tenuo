@@ -18,6 +18,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     from hermes_tenuo._config import (
         get_connect_token,
         get_child_warrant_raw,
+        get_on_denial,
         get_signing_key,
         get_trusted_roots,
         get_warrant_raw,
@@ -33,6 +34,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     child_warrant = load_warrant(get_child_warrant_raw(ctx))
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
+    on_denial = get_on_denial(ctx)
 
     # Parse Cloud credentials and connect (pass signing_key as object to avoid
     # env var path which calls SigningKey.from_base64 — not available in all builds)
@@ -75,6 +77,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         child_warrant=child_warrant,
         trusted_roots=trusted_roots,
         approval_handler=approval_handler,
+        on_denial=on_denial,
     )
 
     return PluginGuard(guard, cloud_creds=cloud_creds, trigger_map=trigger_map)
