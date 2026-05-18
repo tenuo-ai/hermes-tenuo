@@ -10,7 +10,9 @@
       "Bash(python3 -m pytest tests/test_cli.py -v)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(python3 -m pytest tests/test_registry_enforcement.py -v)",
+      "Bash(python3 -m pytest tests/test_registry_enforcement.py -v -p no:xdist -o addopts=)"
     ]
   }
 }

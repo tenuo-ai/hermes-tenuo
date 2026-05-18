@@ -75,4 +75,12 @@ def register(ctx: Any) -> None:
     ctx.register_hook("on_session_end", guard.on_session_end_hook)
 
     mode = "enforcing" if guard.has_warrant else "audit-only"
-    logger.info("hermes-tenuo: active (%s)", mode)
+    if mode == "audit-only":
+        logger.warning(
+            "hermes-tenuo: running in AUDIT-ONLY mode — all tool calls are logged "
+            "but NOT blocked. Set TENUO_WARRANT (or warrant: in config) to activate "
+            "enforcement. This mode is intended only for initial warrant-builder "
+            "on-ramp; do not use in production without a warrant."
+        )
+    else:
+        logger.info("hermes-tenuo: active (%s)", mode)

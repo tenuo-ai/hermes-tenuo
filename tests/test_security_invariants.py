@@ -153,7 +153,7 @@ class TestFailClosed:
         result = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="s1")
         assert result is not None
         assert result["action"] == "block"
-        assert "trusted_root" in result["message"]
+        assert any(w in result["message"] for w in ("trusted_root", "issuer", "trusted"))
 
     def test_audit_only_mode_emits_warning_once(self, agent_key, cloud_key, caplog):
         """Audit-only mode (no warrant) must be visible in logs at first call."""

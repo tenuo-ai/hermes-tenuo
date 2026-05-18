@@ -327,17 +327,36 @@ class TestChildWarrantHeuristic:
         guard_with_child.pre_tool_call("web_search", {"query": "test"}, session_id="parent")
         assert guard_with_child._primary_session_id == "parent"
 
-    def test_child_session_gets_child_warrant(self, guard_with_child, child_warrant):
-        # Establish primary session
+    def test_child_session_without_pending_gets_static_warrant(self, guard_with_child, basic_warrant, child_warrant):
+        """A session with a different session_id but NO pending child warrant is a
+        concurrent parent session — it gets the static parent warrant, not _child_warrant.
+        Giving it _child_warrant without explicit delegation is a confused-deputy risk.
+        """
         guard_with_child._primary_session_id = "parent"
         warrant, _ = guard_with_child._resolve_warrant("child-1")
-        assert warrant is child_warrant
+        assert warrant is basic_warrant  # not child_warrant — no pending warrant registered
 
-    def test_child_cannot_call_parent_only_tools(
-        self, guard_with_child, agent_key, root_key
+    def test_child_with_pending_warrant_gets_attenuated_warrant(
+        self, guard_with_child, child_warrant
     ):
-        """Child warrant (web_search only) blocks read_file."""
+        """After delegate_task fires (pending warrants registered), child gets
+        the attenuated warrant — not the parent's full warrant.
+        """
         guard_with_child._primary_session_id = "parent"
+        # Simulate delegate_task pre-registering a pending child warrant
+        with guard_with_child._pending_lock:
+            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        warrant, _ = guard_with_child._resolve_warrant("child-1")
+        assert warrant is child_warrant  # claimed from pending
+
+    def test_child_cannot_call_parent_only_tools_when_pending(
+        self, guard_with_child, child_warrant, agent_key, root_key
+    ):
+        """After delegation, child warrant (web_search only) blocks read_file."""
+        guard_with_child._primary_session_id = "parent"
+        # Register pending child warrant (as delegate_task interception would)
+        with guard_with_child._pending_lock:
+            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
         result = guard_with_child.pre_tool_call(
             "read_file", {"path": "/data/x"}, session_id="child-1"
         )

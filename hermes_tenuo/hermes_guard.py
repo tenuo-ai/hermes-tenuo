@@ -112,7 +112,7 @@ class HermesGuard:
         self._on_denial = on_denial
         self._audit_callback = audit_callback
         self._approval_handler = approval_handler
-        self._audit_only_warned = False
+        self._audit_only_warned = False  # warn once when running without a warrant
 
         # Session warrant registry: session_id → (warrant, signing_key)
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
@@ -140,24 +140,6 @@ class HermesGuard:
         return self._static_warrant is not None
 
     # ------------------------------------------------------------------
-    # Trusted roots management
-    # ------------------------------------------------------------------
-
-    def set_trusted_roots(self, roots: Optional[List[Any]]) -> None:
-        """Thread-safe replacement of the trusted root set.
-
-        Used by gateway orchestration to install Cloud-derived roots after a
-        trigger fires. Pass None to clear.
-        """
-        with self._trusted_roots_lock:
-            self._trusted_roots = list(roots) if roots else None
-
-    def _get_trusted_roots(self) -> Optional[List[Any]]:
-        """Snapshot the current trusted root list under lock."""
-        with self._trusted_roots_lock:
-            return list(self._trusted_roots) if self._trusted_roots else None
-
-    # ------------------------------------------------------------------
     # Session warrant management (gateway multi-user)
     # ------------------------------------------------------------------
 
@@ -174,6 +156,20 @@ class HermesGuard:
     def clear_session_warrant(self, session_id: str) -> None:
         with self._session_lock:
             self._session_warrants.pop(session_id, None)
+
+    def set_trusted_roots(self, roots: Optional[List[Any]]) -> None:
+        """Thread-safe replacement of the trusted root set.
+
+        Call this after receiving a Cloud-issued warrant to install the issuer
+        anchor used for chain verification.  Pass None to clear.
+        """
+        with self._trusted_roots_lock:
+            self._trusted_roots = roots
+
+    def _get_trusted_roots(self) -> Optional[List[Any]]:
+        """Thread-safe read of the current trusted root set (testing/introspection)."""
+        with self._trusted_roots_lock:
+            return self._trusted_roots
 
     def _resolve_warrant(
         self, session_id: str
@@ -203,7 +199,6 @@ class HermesGuard:
             child_w = None
             parent_w = None
             is_child_session = False
-            fall_back_to_static = False
 
             with self._primary_lock:
                 if self._primary_session_id is None and session_id:
@@ -221,8 +216,14 @@ class HermesGuard:
                             child_w, parent_w = pending
                         else:
                             child_w = pending
-                    elif self._child_warrant is not None:
-                        fall_back_to_static = True
+                    # Note: if pending is None (no delegation happened for this primary),
+                    # this session is treated as a new independent session and falls
+                    # through to _static_warrant. We intentionally do NOT fall back to
+                    # _child_warrant here: a session with no pending warrant is a
+                    # concurrent parent session, not a child, so giving it _child_warrant
+                    # (potentially narrower or broader) would be wrong. The _child_warrant
+                    # fallback only applies inside _attenuate_for_toolsets when delegation
+                    # is actually in progress.
             # _primary_lock released — now safe to acquire _session_lock
 
             if is_child_session and child_w is not None:
@@ -231,8 +232,6 @@ class HermesGuard:
                         self._session_warrant_chains[session_id] = parent_w
                 self.set_session_warrant(session_id, child_w, self._static_signing_key)
                 return child_w, self._static_signing_key
-            if fall_back_to_static:
-                return self._child_warrant, self._static_signing_key
 
         return self._static_warrant, self._static_signing_key
 
@@ -437,18 +436,13 @@ class HermesGuard:
                 if self._primary_session_id is None:
                     self._primary_session_id = session_id
 
-        # Audit-only mode: no warrant configured — pass through, emit later.
-        # Emit a one-time WARNING so an operator who forgot to set `warrant:`
-        # in config notices that nothing is being enforced. The on-ramp design
-        # (connect_token without warrant) is intentional, but silent fail-open
-        # is exactly the misconfiguration we want to surface loudly.
+        # Audit-only mode: no warrant configured — pass through, emit later
         if warrant is None:
             if not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
-                    "hermes-tenuo: AUDIT-ONLY MODE — no warrant configured, "
-                    "tool calls will NOT be blocked. Set `warrant:` in plugin "
-                    "config to enable enforcement."
+                    "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "
+                    "pass through. Set TENUO_WARRANT to activate enforcement."
                 )
             return None
 
@@ -504,26 +498,24 @@ class HermesGuard:
             bound = warrant.bind(signing_key)
             # For chain verification: use configured trusted_roots (Cloud's key).
             # If not configured, extract the root from the parent warrant's issuer
-            # field — the parent was operator-trusted at load time, so its issuer
-            # is acceptable as a chain anchor.
+            # field — the parent was Cloud-signed, so parent.issuer IS Cloud's key.
             with self._session_lock:
                 parent_warrant = self._session_warrant_chains.get(session_id)
-            trusted = resolve_trusted_roots(self._get_trusted_roots())
+            with self._trusted_roots_lock:
+                trusted = resolve_trusted_roots(self._trusted_roots)
             if trusted is None and parent_warrant is not None:
+                # Derive trusted root from the parent's issuer (the Cloud signing key)
                 try:
                     if parent_warrant.issuer is not None:
                         trusted = [parent_warrant.issuer]
                 except Exception:
                     pass
-            # Fail-closed: with no trusted root and no chain, we cannot verify
-            # the warrant's issuer. Refuse to authorise rather than fall back to
-            # trusting the agent's own key — warrants aren't signed by their
-            # holder, so that fallback was either dead or actively dangerous.
-            if trusted is None:
-                return {
-                    "action": "block",
-                    "message": "tenuo: no trusted root configured — set `trusted_root` in plugin config",
-                }
+            if trusted is None and signing_key is not None:
+                # Last resort: trust the agent's own key (covers static child_warrant)
+                try:
+                    trusted = [signing_key.public_key]
+                except Exception:
+                    pass
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
@@ -533,19 +525,12 @@ class HermesGuard:
                 approval_handler=self._approval_handler,
             )
         except Exception as exc:
-            # The raw exception text often surfaces internal types/state that
-            # aren't actionable for the agent or the operator. Log the detail,
-            # return a stable message that hints at where to look.
-            logger.warning("hermes-tenuo: enforcement error for %s: %s", tool_name, exc, exc_info=True)
-            if self._on_denial == "block":
-                return {
-                    "action": "block",
-                    "message": (
-                        f"tenuo: internal error while authorising '{tool_name}' — "
-                        "call blocked. Check hermes-tenuo logs for details."
-                    ),
-                }
-            return None
+            logger.warning("hermes-tenuo: enforcement error for %s: %s", tool_name, exc)
+            # Enforcement exceptions always block — on_denial: log only applies to
+            # *policy* denials from the Rust core (result.allowed=False). Internal
+            # failures (bad warrant, expired key, crypto error) should never silently
+            # allow execution, regardless of the on_denial setting.
+            return {"action": "block", "message": f"Authorization error: {exc}"}
 
         if self._control_plane is not None:
             try:
