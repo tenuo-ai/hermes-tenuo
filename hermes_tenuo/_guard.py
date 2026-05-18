@@ -214,7 +214,11 @@ class PluginGuard:
             signing_key = self._guard._static_signing_key
             self._guard.set_session_warrant(session_id, warrant, signing_key)
 
-            # Update trusted_roots if we got an issuer from the warrant
+            # Update trusted_roots if we got an issuer from the warrant.
+            # KNOWN GAP: direct mutation is not thread-safe if enforcement runs
+            # concurrently. Safe for single-session gateway use (orchestration
+            # code calls this before any tool calls in the session).
+            # TODO: expose HermesGuard.set_trusted_roots() with a lock.
             if result.trusted_root_b64 and self._guard._trusted_roots is None:
                 try:
                     import base64
