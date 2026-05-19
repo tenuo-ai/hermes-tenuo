@@ -85,12 +85,42 @@ class HermesGuard:
     to Tenuo Cloud for warrant builder learning. Enforcement activates
     once a warrant is present.
 
-    Session warrant registry supports per-session warrants for multi-user
-    gateway deployments (different warrant per Telegram/Discord user).
+    Deployment modes
+    ----------------
+    Single-agent (CLI / cron):
+        Provide `warrant` + `signing_key`. One session runs at a time.
+        delegate_task subagents are detected by the _primary_session_id
+        heuristic: the first session_id seen is the parent; all others
+        are treated as children and receive attenuated warrants.
 
-    delegate_task interception: when tool_name == "delegate_task", the guard
-    pre-registers attenuated child warrants keyed by (parent_session_id, task_index)
-    so children never inherit the parent's root authority.
+    Multi-user gateway (Slack / Telegram / Discord bot):
+        The _primary_session_id heuristic is NOT safe for concurrent
+        sessions — User B's independent session would be misidentified as
+        a child of User A. For gateway deployments, call
+        ``fire_session_warrant(session_id, trigger_id)`` for each user
+        session before it runs tools. Explicit session warrants take
+        precedence over the heuristic and are safe to use concurrently.
+
+        Example::
+
+            @bot.message_handler
+            def on_message(msg):
+                guard.fire_session_warrant(
+                    session_id=str(msg.chat.id),
+                    trigger_id="trg-telegram-user",
+                )
+                hermes.run(session_id=str(msg.chat.id), ...)
+
+        The Permanent Fix: Hermes firing ``on_session_start`` with
+        ``parent_session_id`` would allow exact child detection with no
+        heuristics. The hook is wired and ready (see ``on_session_start``);
+        it is awaiting a Hermes-side change to emit it.
+
+    delegate_task interception:
+        When tool_name == "delegate_task", the guard pre-registers
+        attenuated child warrants keyed by (parent_session_id, task_index)
+        so children never inherit the parent's root authority. Registration
+        happens only after delegate_task is authorized.
     """
 
     def __init__(
@@ -209,11 +239,14 @@ class HermesGuard:
                 if self._primary_session_id is None and session_id:
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
-                    # V1 LIMITATION: single-parent-session only. If two parent sessions
-                    # run concurrently (same process, e.g. gateway), the second parent is
-                    # misidentified as a child of the first. Mitigated by on_session_end
-                    # resetting _primary_session_id. The correct fix is on_session_start
-                    # with parent_session_id (not currently emitted by Hermes).
+                    # V1 LIMITATION: single-parent-session only.
+                    # This heuristic is ONLY safe for single-agent deployments
+                    # (CLI / cron) where one parent runs at a time.
+                    # For multi-user gateways, use fire_session_warrant() per
+                    # session instead — explicit session warrants bypass this
+                    # branch entirely (see _resolve_warrant L174-177).
+                    # The permanent fix: Hermes emitting on_session_start with
+                    # parent_session_id (hook wired, awaiting Hermes change).
                     pending = self._claim_child_warrant(self._primary_session_id)
                     if pending is not None:
                         is_child_session = True
