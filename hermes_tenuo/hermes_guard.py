@@ -494,12 +494,7 @@ class HermesGuard:
                 "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
             }
 
-        # Normalize tool name to match the warrant's capability naming convention.
-        # Cloud trigger UI emits "tool:web_search"; Hermes calls "web_search".
-        # Normalize once here so enforcement never sees a double-denial.
-        effective_tool_name = self._normalize_tool_name(tool_name, warrant)
-
-        result = self._enforce(effective_tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+        result = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
 
         # Intercept delegate_task: only pre-register attenuated child warrants if
         # the delegation call itself was AUTHORIZED. Registering before authorization
@@ -512,32 +507,6 @@ class HermesGuard:
             self._register_child_warrants(session_id, task_count, toolsets=toolsets)
 
         return result
-
-    def _normalize_tool_name(self, tool_name: str, warrant: Any) -> str:
-        """Map the incoming Hermes tool name to the warrant's capability name.
-
-        TEMPORARY SHIM: Cloud trigger UI currently prefixes capabilities with
-        "tool:" (e.g. "tool:web_search"), while Hermes calls bare names
-        ("web_search"). This method scans warrant.tools to pick the matching
-        form so enforce_tool_call sees exactly what the warrant contains.
-
-        Once Cloud's trigger templates issue warrants with bare names, this
-        method becomes a no-op and should be deleted — core will receive the
-        same string Hermes sends, with no Python involvement in name selection.
-
-        Note: Python reading warrant.tools here does NOT constitute a parallel
-        authorization check — it is purely name translation. The authoritative
-        allow/deny decision on the resolved name is made by enforce_tool_call.
-        """
-        if warrant is None:
-            return tool_name
-        tools = set(warrant.tools or [])
-        if tool_name in tools:
-            return tool_name
-        prefixed = f"tool:{tool_name}"
-        if prefixed in tools:
-            return prefixed
-        return tool_name
 
     def _enforce(
         self,
