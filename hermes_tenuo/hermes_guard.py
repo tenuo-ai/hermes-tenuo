@@ -131,6 +131,11 @@ class HermesGuard:
         self._child_counters: Dict[str, int] = {}
         self._counter_lock = threading.Lock()
 
+        # Pre-hook decisions: tool_call_id → (allowed, reason)
+        # Stored by pre_tool_call so post_tool_call can record the accurate outcome.
+        self._pre_decisions: Dict[str, Tuple[bool, str]] = {}
+        self._pre_decisions_lock = threading.Lock()
+
         # Connect to control plane (auto-discovers from env if not already connected)
         from tenuo.control_plane import get_or_create
         self._control_plane = get_or_create()
@@ -429,13 +434,6 @@ class HermesGuard:
         Returns {"action": "block", "message": "..."} to block the call,
         or None to allow it.
         """
-        # Intercept delegate_task to pre-register attenuated child warrants
-        if tool_name == "delegate_task":
-            tasks = args.get("tasks") or []
-            task_count = len(tasks) if isinstance(tasks, list) else 1
-            toolsets = args.get("toolsets") or []
-            self._register_child_warrants(session_id, task_count, toolsets=toolsets)
-
         warrant, signing_key = self._resolve_warrant(session_id)
 
         # Ensure primary session is tracked even before child sessions appear
@@ -468,7 +466,19 @@ class HermesGuard:
         # Normalize once here so enforcement never sees a double-denial.
         effective_tool_name = self._normalize_tool_name(tool_name, warrant)
 
-        return self._enforce(effective_tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+        result = self._enforce(effective_tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
+
+        # Intercept delegate_task: only pre-register attenuated child warrants if
+        # the delegation call itself was AUTHORIZED. Registering before authorization
+        # would let a denied delegation poison pending slots — the next heuristic
+        # child session could claim a warrant with no valid parent delegation.
+        if tool_name == "delegate_task" and result is None:
+            tasks = args.get("tasks") or []
+            task_count = len(tasks) if isinstance(tasks, list) else 1
+            toolsets = args.get("toolsets") or []
+            self._register_child_warrants(session_id, task_count, toolsets=toolsets)
+
+        return result
 
     def _normalize_tool_name(self, tool_name: str, warrant: Any) -> str:
         """Map the incoming Hermes tool name to the warrant's capability name.
@@ -559,6 +569,10 @@ class HermesGuard:
             reason = result.denial_reason or f"Tool '{tool_name}' not authorized"
             if self._on_denial == "log":
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
+                # Store the real decision so post_tool_call records DENY, not ALLOW
+                if tool_call_id:
+                    with self._pre_decisions_lock:
+                        self._pre_decisions[tool_call_id] = (False, reason)
                 return None
             return {"action": "block", "message": reason}
 
@@ -598,8 +612,17 @@ class HermesGuard:
             self._emit_audit(tool_name, args, True, "audit-only", session_id, task_id, tool_call_id, duration_ms)
             return
 
-        # If enforcement ran in pre_tool_call, post_tool_call is observational only
-        self._emit_audit(tool_name, args, True, "post-dispatch", session_id, task_id, tool_call_id, duration_ms)
+        # If enforcement ran in pre_tool_call, post_tool_call records timing.
+        # Retrieve the pre-hook decision if stored (covers on_denial:log where a
+        # denied call was allowed through — post must reflect DENY, not ALLOW).
+        allowed = True
+        reason = "post-dispatch"
+        if tool_call_id:
+            with self._pre_decisions_lock:
+                pre = self._pre_decisions.pop(tool_call_id, None)
+            if pre is not None:
+                allowed, reason = pre
+        self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
 
     # ------------------------------------------------------------------
     # Internal: audit callback

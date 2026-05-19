@@ -389,18 +389,58 @@ class TestChildWarrantHeuristic:
         assert warrant is basic_warrant  # explicit, not child_warrant
 
     def test_delegate_task_pre_registers_child_warrants(
-        self, guard_with_child
+        self, child_warrant, agent_key, root_key
     ):
-        """pre_tool_call for delegate_task calls _register_child_warrants."""
-        guard_with_child._primary_session_id = "parent"
-        guard_with_child.pre_tool_call(
+        """pre_tool_call for delegate_task registers children only when authorized."""
+        from tenuo import Warrant, Wildcard
+        # Warrant that explicitly includes delegate_task
+        parent_warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("delegate_task", tasks=Wildcard())
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        guard = HermesGuard(
+            warrant=parent_warrant,
+            signing_key=agent_key,
+            child_warrant=child_warrant,
+            trusted_roots=[root_key.public_key],
+        )
+        guard._primary_session_id = "parent"
+        result = guard.pre_tool_call(
             "delegate_task",
-            {"tasks": [{"goal": "research A"}, {"goal": "research B"}]},
+            {"tasks": ["research A", "research B"]},
             session_id="parent",
         )
+        # delegate_task is authorized — children should be registered
+        assert result is None
+        with guard._pending_lock:
+            assert ("parent", 0) in guard._pending_child_warrants
+            assert ("parent", 1) in guard._pending_child_warrants
+
+    def test_delegate_task_denied_does_not_poison_pending_slots(
+        self, guard_with_child
+    ):
+        """If delegate_task is blocked, no child warrants should be pre-registered.
+
+        Pre-registering before authorization would allow a denied delegation to
+        poison pending slots — the next heuristic child session could claim a
+        warrant with no valid parent delegation ever having occurred.
+        """
+        guard_with_child._primary_session_id = "parent"
+        # delegate_task is NOT in basic_warrant → enforcement blocks it
+        result = guard_with_child.pre_tool_call(
+            "delegate_task",
+            {"tasks": [{"goal": "research A"}]},
+            session_id="parent",
+        )
+        assert result is not None
+        assert result["action"] == "block"
+        # No children should have been registered
         with guard_with_child._pending_lock:
-            assert ("parent", 0) in guard_with_child._pending_child_warrants
-            assert ("parent", 1) in guard_with_child._pending_child_warrants
+            assert ("parent", 0) not in guard_with_child._pending_child_warrants
 
 
 # ---------------------------------------------------------------------------

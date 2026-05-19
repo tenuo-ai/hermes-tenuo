@@ -116,7 +116,7 @@ def get_on_denial(ctx: Any) -> str:
 
 
 def load_warrant(raw: Optional[str]):
-    """Deserialise a URL-safe base64 warrant string into a Warrant object."""
+    """Deserialise a base64 warrant string into a Warrant object."""
     if not raw:
         return None
     try:
