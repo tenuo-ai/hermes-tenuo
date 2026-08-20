@@ -50,7 +50,33 @@ def _looks_like_path(s: str) -> bool:
 
 
 def get_warrant_raw(ctx: Any) -> Optional[str]:
-    """Return raw warrant: base64 string or path to warrant file."""
+    """Return raw warrant: base64 string or path to warrant file.
+
+    When this process is a kanban worker (HERMES_KANBAN_TASK set), a staged
+    per-task warrant takes precedence over the global warrant. Workers are
+    scoped to their task, period — the install-wide warrant does not apply.
+    """
+    from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw
+
+    task_id = current_task_id()
+    if task_id:
+        task_raw = load_task_warrant_raw(task_id)
+        if task_raw:
+            logger.info(
+                "loaded task warrant for kanban worker (task_id=%s)", task_id,
+            )
+            return task_raw
+        # Fail closed: a kanban worker scoped to a task must not inherit the
+        # install-wide warrant.  Returning None here causes build_plugin_guard
+        # to return None (no warrant, no connect_token), and register() will
+        # install a block-all pre_tool_call hook so the worker cannot proceed.
+        logger.error(
+            "kanban worker %s has no staged task warrant — all tool calls will be blocked. "
+            "Stage a warrant at ~/.hermes/tenuo/warrants/%s.warrant before dispatching.",
+            task_id, task_id,
+        )
+        return None
+
     entry = _get_plugin_entry(ctx)
     raw = entry.get("warrant") or os.environ.get("TENUO_WARRANT")
     if not raw:

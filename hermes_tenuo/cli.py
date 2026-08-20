@@ -206,6 +206,182 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """End-to-end install check.
+
+    Verifies: tenuo importable, plugin entry point registered, Hermes config
+    valid, warrant loadable and unexpired, signing key + trusted root present,
+    enforcement path (registry hook vs. pre_tool_call fallback).
+    """
+    ok = True
+
+    def check(passed: bool, msg: str, hint: str = "") -> None:
+        nonlocal ok
+        if passed:
+            print(f"  ✓  {msg}")
+        else:
+            ok = False
+            print(f"  ✗  {msg}")
+            if hint:
+                print(f"        {hint}")
+
+    def note(msg: str) -> None:
+        print(f"  —  {msg}")
+
+    # 1. tenuo importable
+    try:
+        from tenuo_core import Warrant, PublicKey  # noqa: F401
+        check(True, "tenuo_core importable")
+    except ImportError as exc:
+        check(False, "tenuo_core not importable", f"pip install tenuo ({exc})")
+        return 1
+
+    # 2. Plugin entry point registered
+    try:
+        from importlib.metadata import entry_points
+        eps = entry_points(group="hermes_agent.plugins")
+        registered = [ep for ep in eps if ep.name == "hermes-tenuo"]
+        check(
+            bool(registered),
+            "plugin entry point hermes_agent.plugins:hermes-tenuo registered",
+            "reinstall: pip install --force-reinstall hermes-tenuo",
+        )
+    except Exception as exc:
+        note(f"could not check entry points ({exc})")
+
+    # 3. Hermes config — is the plugin enabled?
+    config_entry: dict = {}
+    try:
+        from hermes_cli.config import load_config
+        config = load_config() or {}
+        plugins_cfg = config.get("plugins") or {}
+        enabled = plugins_cfg.get("enabled") or []
+        check(
+            "hermes-tenuo" in enabled,
+            "hermes-tenuo listed in plugins.enabled",
+            "add `- hermes-tenuo` under plugins.enabled in ~/.hermes/config.yaml",
+        )
+        config_entry = (plugins_cfg.get("entries") or {}).get("hermes-tenuo") or {}
+        if config_entry:
+            note(f"plugins.entries.hermes-tenuo has {len(config_entry)} keys")
+        else:
+            note("plugins.entries.hermes-tenuo empty (falling back to env vars)")
+    except ImportError:
+        note("hermes_cli not importable here — skipping config.yaml checks")
+
+    # 4. Warrant loadable
+    from hermes_tenuo._config import load_warrant
+
+    raw = (
+        config_entry.get("warrant")
+        or os.environ.get("TENUO_WARRANT")
+    )
+    if raw and (raw.startswith("/") or raw.startswith("~") or raw.startswith(".")):
+        path = os.path.expanduser(raw)
+        if os.path.exists(path):
+            with open(path) as fh:
+                raw = fh.read().strip()
+        else:
+            check(False, f"warrant path does not exist: {path}")
+            raw = None
+
+    warrant = load_warrant(raw) if raw else None
+    check(
+        warrant is not None,
+        "warrant loaded",
+        "set TENUO_WARRANT or plugins.entries.hermes-tenuo.warrant",
+    )
+
+    if warrant is not None:
+        # 5. Warrant unexpired / not expiring soon
+        try:
+            expired = warrant.is_expired()
+            check(not expired, "warrant not expired", "mint a fresh warrant: hermes-tenuo mint --ttl 1h ...")
+            if not expired:
+                try:
+                    import datetime
+                    exp = getattr(warrant, "expires_at", None)
+                    if exp is not None:
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        # exp may be a datetime or a Unix timestamp float
+                        if isinstance(exp, (int, float)):
+                            exp = datetime.datetime.fromtimestamp(exp, tz=datetime.timezone.utc)
+                        days_left = (exp - now).total_seconds() / 86400
+                        if days_left < 7:
+                            note(f"warrant expires in {days_left:.1f} days — consider renewing soon")
+                except Exception:
+                    pass
+        except Exception:
+            note("could not determine warrant expiry")
+
+        # 6. Signing key + holder match
+        signing_raw = os.environ.get(
+            config_entry.get("signing_key_env", "TENUO_SIGNING_KEY"),
+            os.environ.get("TENUO_SIGNING_KEY"),
+        )
+        if signing_raw:
+            try:
+                from tenuo_core import SigningKey
+                key = SigningKey.from_bytes(base64.b64decode(signing_raw))
+                holder = getattr(warrant, "holder", None)
+                if holder is not None and key.public_key.to_bytes() == holder.to_bytes():
+                    check(True, "signing key matches warrant holder")
+                else:
+                    check(
+                        False,
+                        "signing key does not match warrant holder",
+                        "export the signing key that was registered with the warrant",
+                    )
+            except Exception as exc:
+                check(False, f"signing key could not be loaded: {exc}")
+        else:
+            check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
+
+    # 7. Trusted root
+    trusted = config_entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
+    check(
+        bool(trusted),
+        "trusted_root set",
+        "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
+    )
+
+    # 8. Enforcement path
+    print()
+    try:
+        from tools.registry import registry as _tr
+        has_enforcement_fn = hasattr(_tr, "set_enforcement_fn")
+        if has_enforcement_fn:
+            print("  Enforcement paths:")
+            print("    ToolRegistry.set_enforcement_fn — registry-dispatched tools")
+            print("      Covered: execute_code sandbox, direct registry.dispatch() callers,")
+            print("               skip_pre_tool_call_hook=True callers")
+            print("    pre_tool_call hook — always registered (covers tools below)")
+            print("      Covered: delegate_task, todo, memory, session_search")
+            print("      (run_agent.py intercepts these before the registry)")
+        else:
+            print("  Enforcement path: pre_tool_call hook only")
+            print("    Covered: all agent-loop tool calls including delegate_task")
+            print("    Gaps:")
+            print("      - skip_pre_tool_call_hook=True callers bypass enforcement")
+            print("      - direct registry.dispatch(...) callers bypass enforcement")
+            print("      - execute_code sandbox dispatch path not intercepted")
+            print("    Fix pending: https://github.com/NousResearch/hermes-agent/pull/32719")
+        print()
+        print("  Lifecycle hooks registered:")
+        print("    on_session_start, on_session_end, subagent_start")
+        print("    (subagent_start: pre-injects child warrants before first tool call)")
+    except ImportError:
+        note("tools.registry not importable here — run `hermes-tenuo doctor` from a Hermes-enabled venv")
+
+    print()
+    if ok:
+        print("  All checks passed.")
+        return 0
+    else:
+        print("  Issues found above. Enforcement may be inactive or partial.")
+        return 1
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant is valid and show its capabilities."""
     warrant_raw = os.environ.get("TENUO_WARRANT")
@@ -298,6 +474,9 @@ def main() -> None:
     # verify
     subparsers.add_parser("verify", help="Verify and inspect the current warrant")
 
+    # doctor
+    subparsers.add_parser("doctor", help="End-to-end install check: plugin discovery, warrant, enforcement path")
+
     args = parser.parse_args()
 
     if args.command == "mint":
@@ -306,6 +485,8 @@ def main() -> None:
         sys.exit(cmd_status(args))
     elif args.command == "verify":
         sys.exit(cmd_verify(args))
+    elif args.command == "doctor":
+        sys.exit(cmd_doctor(args))
     else:
         parser.print_help()
         sys.exit(0)

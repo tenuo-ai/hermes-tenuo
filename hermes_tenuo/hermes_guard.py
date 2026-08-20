@@ -73,6 +73,31 @@ AuditCallback = Callable[[HermesAuditEvent], None]
 
 
 # ---------------------------------------------------------------------------
+# Enforcement result helpers
+# ---------------------------------------------------------------------------
+
+def _format_denial_reason(result: Any, tool_name: str) -> str:
+    """Return a human-readable denial reason, with richer messaging for
+    InsufficientApprovals (tenuo>=0.2.3) so the agent knows the call is
+    retryable once additional approvals are gathered.
+    """
+    if getattr(result, "error_type", None) == "insufficient_approvals":
+        got = getattr(result, "got", None)
+        need = getattr(result, "need", None)
+        if got is not None and need is not None:
+            return (
+                f"Multi-sig approval required for '{tool_name}': "
+                f"{got}/{need} approvals received. "
+                "Gather the remaining approvals and retry."
+            )
+        return (
+            result.denial_reason
+            or f"Multi-sig approval threshold not met for '{tool_name}'. Retry after gathering approvals."
+        )
+    return result.denial_reason or f"Tool '{tool_name}' not authorized"
+
+
+# ---------------------------------------------------------------------------
 # HermesGuard
 # ---------------------------------------------------------------------------
 
@@ -212,14 +237,12 @@ class HermesGuard:
         """Return (warrant, signing_key) for a session.
 
         Resolution order:
-        1. Explicit session warrant (set via set_session_warrant — gateway use case)
-        2. Child warrant fallback — if child_warrant is configured and session_id
-           is not the primary session, treat as a subagent session. This works
-           because on_session_start is not currently fired by Hermes (it is in
-           VALID_HOOKS but has no invoke_hook call), so child warrants cannot be
-           pre-injected per-session at start time. Instead we detect child sessions
-           heuristically: the first session_id seen is treated as the primary session;
-           all subsequent different session_ids are child sessions.
+        1. Explicit session warrant (set via set_session_warrant — gateway use case,
+           or injected by subagent_start hook before the child's first tool call)
+        2. Child warrant fallback — heuristic for deployments where subagent_start
+           did not fire (e.g. older Hermes builds). Detects child sessions by position:
+           the first session_id seen is the primary; all subsequent different IDs are
+           assumed children and claim the next pending warrant in FIFO order.
         3. Static warrant from plugin config (fallback for primary session)
         """
         with self._session_lock:
@@ -245,8 +268,8 @@ class HermesGuard:
                     # For multi-user gateways, use fire_session_warrant() per
                     # session instead — explicit session warrants bypass this
                     # branch entirely (see _resolve_warrant L174-177).
-                    # The permanent fix: Hermes emitting on_session_start with
-                    # parent_session_id (hook wired, awaiting Hermes change).
+                    # subagent_start (wired Jun 2026) injects child warrants before
+                    # the first tool call, making this path a fallback for older builds.
                     pending = self._claim_child_warrant(self._primary_session_id)
                     if pending is not None:
                         is_child_session = True
@@ -416,11 +439,14 @@ class HermesGuard:
         parent_session_id: Optional[str] = None,
         task_index: Optional[int] = None,
     ) -> None:
-        """Called if Hermes fires on_session_start (currently not fired — kept for future compatibility)."""
-        # on_session_start is in VALID_HOOKS but Hermes does not currently fire it.
-        # Child warrant injection uses the heuristic in _resolve_warrant instead.
-        # If a future Hermes version fires this with parent_session_id, the explicit
-        # session warrant registration here will take precedence over the heuristic.
+        """Called when Hermes fires on_session_start (fired since upstream commit 455bf2e, Mar 2026).
+
+        Passes session_id, model, and platform. Does not pass parent_session_id —
+        use the subagent_start hook for child-session warrant injection.
+        """
+        # on_session_start fires but without parent_session_id, so this branch only
+        # applies if Hermes ever adds that kwarg. The subagent_start hook is the
+        # authoritative path for child warrant injection today.
         if parent_session_id and self._child_warrant:
             claimed = self._claim_child_warrant(parent_session_id)
             if isinstance(claimed, tuple):
@@ -449,6 +475,59 @@ class HermesGuard:
                 self._primary_session_id = None
         with self._session_lock:
             self._session_warrant_chains.pop(session_id, None)
+
+    # ------------------------------------------------------------------
+    # Hook: subagent_start
+    # ------------------------------------------------------------------
+
+    def on_subagent_start(
+        self,
+        parent_session_id: Optional[str],
+        child_session_id: Optional[str],
+        **_kwargs: Any,
+    ) -> None:
+        """Called when Hermes fires subagent_start (upstream delegate_tool.py, Jun 2026).
+
+        This is the authoritative injection point for child-session warrants: both
+        parent and child session IDs are known before the child runs any tool calls.
+        Takes precedence over the heuristic in _resolve_warrant for delegate_task children.
+        """
+        if not parent_session_id or not child_session_id:
+            return
+
+        # Prefer a pre-registered pending warrant (staged in pre_tool_call when
+        # delegate_task was authorised) — these carry task-specific attenuation.
+        pending = self._claim_child_warrant(parent_session_id)
+        if pending is not None:
+            child_w, parent_w = (pending if isinstance(pending, tuple) else (pending, None))
+            if parent_w is not None:
+                with self._session_lock:
+                    self._session_warrant_chains[child_session_id] = parent_w
+            self.set_session_warrant(child_session_id, child_w, self._static_signing_key)
+            logger.debug(
+                "hermes-tenuo: subagent_start — child %s registered from pending warrant (parent=%s)",
+                child_session_id, parent_session_id,
+            )
+            return
+
+        # No pending warrant — attenuate live from the parent's warrant.
+        parent_warrant, signing_key = self._resolve_warrant(parent_session_id)
+        if parent_warrant is None:
+            logger.debug(
+                "hermes-tenuo: subagent_start — no warrant for parent %s; child %s falls through to static",
+                parent_session_id, child_session_id,
+            )
+            return
+        child_w = self._attenuate_for_toolsets(parent_warrant, [], signing_key)
+        if child_w is None:
+            return
+        with self._session_lock:
+            self._session_warrant_chains[child_session_id] = parent_warrant
+        self.set_session_warrant(child_session_id, child_w, signing_key)
+        logger.debug(
+            "hermes-tenuo: subagent_start — child %s attenuated from parent %s",
+            child_session_id, parent_session_id,
+        )
 
     # ------------------------------------------------------------------
     # Hook: pre_tool_call
@@ -568,7 +647,7 @@ class HermesGuard:
         self._emit_audit(tool_name, args, result.allowed, result.denial_reason or "", session_id, task_id, tool_call_id)
 
         if not result.allowed:
-            reason = result.denial_reason or f"Tool '{tool_name}' not authorized"
+            reason = _format_denial_reason(result, tool_name)
             if self._on_denial == "log":
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 # Store the real decision so post_tool_call records DENY, not ALLOW

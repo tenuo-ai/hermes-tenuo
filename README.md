@@ -63,6 +63,48 @@ hermes-tenuo mint --allow read_file --allow web_search --allow memory --ttl 1h -
 
 See [full documentation](https://tenuo.ai/docs/hermes) and [examples](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
 
+## Verify it's working
+
+After install, run `hermes-tenuo doctor` from the same venv Hermes uses. It checks plugin discovery, config wiring, warrant validity, signing-key/holder match, and reports which enforcement path is active.
+
+```bash
+hermes-tenuo doctor
+#   ✓  tenuo_core importable
+#   ✓  plugin entry point hermes_agent.plugins:hermes-tenuo registered
+#   ✓  hermes-tenuo listed in plugins.enabled
+#   —  plugins.entries.hermes-tenuo has 3 keys
+#   ✓  warrant loaded
+#   ✓  warrant not expired
+#   ✓  signing key matches warrant holder
+#   ✓  trusted_root set
+#
+#   Enforcement path: ToolRegistry.set_enforcement_fn (universal coverage)
+```
+
+If `doctor` reports the `pre_tool_call` fallback path instead, see **Limitations** below.
+
+## Limitations & observability
+
+**Coverage depends on the Hermes build you're running.**
+
+| Hermes build | Enforcement path | Coverage |
+|---|---|---|
+| `tenuo-ai/hermes-agent` fork | `ToolRegistry.set_enforcement_fn` | Every `registry.dispatch()` call, including the `execute_code` sandbox path |
+| Upstream `NousResearch/hermes-agent` | `pre_tool_call` plugin hook | Tool calls through the main agent loop. **Gaps:** callers that set `skip_pre_tool_call_hook=True`, plugins that invoke `registry.dispatch()` directly, and the `execute_code` sandbox dispatch path |
+
+Both paths share two gaps inherent to where Hermes intercepts tools today:
+
+- Tools handled inside `run_agent.py` before reaching the registry (`todo`, `memory`, `session_search`, `delegate_task`) are not gated by either path.
+- Neither path inspects what happens *inside* an `execute_code` script — a script can still call `subprocess.run(...)` or `os.system(...)` directly. Use container/sandbox backends (Docker, Modal, Daytona) for that threat model.
+
+Tracking issues / PRs: [hermes-agent#21849](https://github.com/NousResearch/hermes-agent/issues/21849), [hermes-agent#18148](https://github.com/NousResearch/hermes-agent/issues/18148), [hermes-agent#496](https://github.com/NousResearch/hermes-agent/issues/496).
+
+**Quiet failure modes to know about.**
+
+- *Plugin listed but not configured.* If `hermes-tenuo` is in `plugins.enabled` but `plugins.entries.hermes-tenuo` has no `warrant` or `connect_token`, the plugin loads and silently no-ops. Your agent runs unprotected and looks identical to a protected run. Always confirm with `hermes-tenuo doctor` after install.
+- *Audit-only mode.* With `connect_token` set and no `warrant`, every tool call is logged to Tenuo Cloud but nothing is blocked. This is intentional for the warrant-builder on-ramp — **do not use in production without a warrant.**
+- *Denials are reported to the model, not the operator.* When a warrant blocks a tool, the message is delivered to the model as the tool result. Raise the `hermes_tenuo` log level to see operator-visible denial lines.
+
 ## With Tenuo Cloud (optional)
 
 Connect to [Tenuo Cloud](https://cloud.tenuo.ai) to let the warrant builder learn your agent's real call patterns and generate tight warrants automatically:
@@ -76,6 +118,42 @@ plugins:
 ```
 
 With only `connect_token` and no `warrant`, the plugin runs in **audit-only mode** — every tool call is logged to Cloud for pattern learning, nothing is blocked. Add `warrant` to activate enforcement.
+
+## Managed scope (enterprise / multi-user)
+
+Hermes ships a managed-scope layer (`/etc/hermes/config.yaml`, root-owned) that overlays administrator-pinned values on top of every user's `~/.hermes/config.yaml`. hermes-tenuo config keys read through the same loader, so managed scope is a reliable way to lock warrant and trust settings fleet-wide.
+
+```yaml
+# /etc/hermes/config.yaml  (root-owned, not user-writable)
+plugins:
+  entries:
+    hermes-tenuo:
+      warrant: /etc/hermes/tenuo/fleet.warrant
+      trusted_root: <base64-issuer-pubkey>
+      on_denial: block
+```
+
+Users cannot override these keys from their own `~/.hermes/config.yaml`. The managed file wins per-leaf while leaving unmanaged keys user-controlled.
+
+**What to pin via managed scope**
+
+| Key | Managed? | Notes |
+|---|---|---|
+| `warrant` | Yes | Fleet warrant path; individual users can't point at a wider warrant |
+| `trusted_root` | Yes | Locks the issuer anchor; prevents swapping in a self-signed root |
+| `on_denial` | Yes | Ensures `block` mode can't be softened to `log` by users |
+| `connect_token` | Optional | Pin if all agents should log to the same Cloud workspace |
+| `signing_key_env` | No | Private key material belongs in env vars or a secrets manager, not a config file |
+
+**Activation**
+
+The managed dir defaults to `/etc/hermes`. Override with `HERMES_MANAGED_DIR` for non-standard paths or containerised deployments:
+
+```bash
+HERMES_MANAGED_DIR=/opt/hermes/managed hermes chat
+```
+
+Run `hermes-tenuo doctor` to confirm which warrant is loaded — managed-scope overrides show up in the config path reported there.
 
 ## License
 

@@ -11,6 +11,7 @@ provides_hooks:
   - post_tool_call
   - on_session_start
   - on_session_end
+  - subagent_start
 requires_env:
   - name: TENUO_CONNECT_TOKEN
     description: "Tenuo Cloud connect token (from dashboard Quick Connect). Single token for audit + key management."

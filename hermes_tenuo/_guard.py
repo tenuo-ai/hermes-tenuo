@@ -127,7 +127,30 @@ class PluginGuard:
             session_id=session_id,
             tool_call_id=tool_call_id,
         )
+        if result and result.get("action") == "block":
+            self._auto_block_kanban_task(tool_name, result.get("message", ""))
         return result  # None = allow, {"action": "block", "message": "..."} = block
+
+    @staticmethod
+    def _auto_block_kanban_task(tool_name: str, deny_message: str) -> None:
+        """If this is a kanban worker, mark the task blocked on the board.
+
+        A direct kanban_db write (not a kanban_block tool dispatch) so the
+        system event does not re-enter the enforcement fn and does not need
+        kanban_block to be in the worker's warrant. Idempotent: subsequent
+        denials on an already-blocked task are no-ops.
+        """
+        from hermes_tenuo.kanban import current_task_id, block_task
+
+        kanban_task = current_task_id()
+        if not kanban_task:
+            return
+        reason = f"warrant denied {tool_name}: {deny_message}".strip()
+        if block_task(kanban_task, reason):
+            logger.warning(
+                "hermes-tenuo: auto-blocked kanban task %s (%s)",
+                kanban_task, reason,
+            )
 
     def post_tool_call_hook(
         self,
@@ -178,6 +201,17 @@ class PluginGuard:
         **kwargs: Any,
     ) -> None:
         self._guard.on_session_end(session_id=session_id)
+
+    def on_subagent_start_hook(
+        self,
+        parent_session_id: str = "",
+        child_session_id: str = "",
+        **kwargs: Any,
+    ) -> None:
+        self._guard.on_subagent_start(
+            parent_session_id=parent_session_id or None,
+            child_session_id=child_session_id or None,
+        )
 
     # ------------------------------------------------------------------
     # Gateway proxy helpers (forward to inner HermesGuard)
