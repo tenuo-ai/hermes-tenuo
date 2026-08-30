@@ -92,10 +92,9 @@ If `doctor` reports the `pre_tool_call` fallback path instead, see **Limitations
 | `tenuo-ai/hermes-agent` fork | `ToolRegistry.set_enforcement_fn` | Every `registry.dispatch()` call, including the `execute_code` sandbox path |
 | Upstream `NousResearch/hermes-agent` | `pre_tool_call` plugin hook | Tool calls through the main agent loop. **Gaps:** callers that set `skip_pre_tool_call_hook=True`, plugins that invoke `registry.dispatch()` directly, and the `execute_code` sandbox dispatch path |
 
-Both paths share two gaps inherent to where Hermes intercepts tools today:
+`pre_tool_call` is always registered, including on the fork, so tools that `run_agent.py` intercepts before the registry (`todo`, `memory`, `session_search`, `delegate_task`) stay gated.
 
-- Tools handled inside `run_agent.py` before reaching the registry (`todo`, `memory`, `session_search`, `delegate_task`) are not gated by either path.
-- Neither path inspects what happens *inside* an `execute_code` script — a script can still call `subprocess.run(...)` or `os.system(...)` directly. Use container/sandbox backends (Docker, Modal, Daytona) for that threat model.
+Neither path inspects what happens *inside* an `execute_code` script — a script can still call `subprocess.run(...)` or `os.system(...)` directly. Use container/sandbox backends (Docker, Modal, Daytona) for that threat model.
 
 Tracking issues / PRs: [hermes-agent#21849](https://github.com/NousResearch/hermes-agent/issues/21849), [hermes-agent#18148](https://github.com/NousResearch/hermes-agent/issues/18148), [hermes-agent#496](https://github.com/NousResearch/hermes-agent/issues/496).
 
