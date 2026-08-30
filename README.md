@@ -172,4 +172,4 @@ Run `hermes-tenuo doctor` to confirm which warrant is loaded — managed-scope o
 
 ## License
 
-MIT
+Apache-2.0
