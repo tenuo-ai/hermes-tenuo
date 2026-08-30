@@ -5,8 +5,14 @@ Cryptographic warrant enforcement for [Hermes Agent](https://github.com/NousRese
 ## Install
 
 ```bash
-pip install hermes-tenuo
+pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+# or, from a Hermes-enabled venv:
+hermes plugins install tenuo-ai/hermes-tenuo
 ```
+
+Requires `tenuo>=0.2.3` (pulled in automatically) and **Hermes Agent 0.20.x**. Tested against upstream `NousResearch/hermes-agent` 0.20.x (August 2026) and the `tenuo-ai/hermes-agent` fork that includes `ToolRegistry.set_enforcement_fn`.
+
+To list this plugin in the Hermes community catalog, submit `docs/plugin-index-entry.json` with `ref` set to the install commit SHA.
 
 ## Enable
 
@@ -61,7 +67,7 @@ hermes-tenuo mint --allow read_file --allow web_search --allow memory --ttl 1h -
 - **Subagents** — set `child_warrant`; children spawned by `delegate_task` get the narrower warrant automatically
 - **Multi-user gateways** — call `guard.set_session_warrant(session_id, warrant)` per user; sessions are isolated
 
-See [full documentation](https://tenuo.ai/docs/hermes) and [examples](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
+See [examples](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples). This README is the documentation until a dedicated docs page is published.
 
 ## Verify it's working
 
@@ -100,7 +106,7 @@ Tracking issues / PRs: [hermes-agent#21849](https://github.com/NousResearch/herm
 
 **Quiet failure modes to know about.**
 
-- *Plugin listed but not configured.* If `hermes-tenuo` is in `plugins.enabled` but `plugins.entries.hermes-tenuo` has no `warrant` or `connect_token`, the plugin loads and silently no-ops. Your agent runs unprotected and looks identical to a protected run. Always confirm with `hermes-tenuo doctor` after install.
+- *Plugin listed but not configured.* If `hermes-tenuo` is enabled but has no `warrant` or `connect_token`, the plugin loads and does not enforce. Startup now logs a WARNING, and `hermes-tenuo doctor` fails that check. Confirm with `doctor` after every install.
 - *Audit-only mode.* With `connect_token` set and no `warrant`, every tool call is logged to Tenuo Cloud but nothing is blocked. This is intentional for the warrant-builder on-ramp — **do not use in production without a warrant.**
 - *Denials are reported to the model, not the operator.* When a warrant blocks a tool, the message is delivered to the model as the tool result. Raise the `hermes_tenuo` log level to see operator-visible denial lines.
 - *Cloud approval vs hook timeout.* Hermes fails closed if `pre_tool_call` exceeds `plugins.hook_callback_timeout` (default 30s). Cloud approval polls for up to 5 minutes, so a slow human approval looks like a warrant denial unless you raise or disable that timeout. See **With Tenuo Cloud** below.
@@ -166,4 +172,4 @@ Run `hermes-tenuo doctor` to confirm which warrant is loaded — managed-scope o
 
 ## License
 
-MIT
+Apache-2.0

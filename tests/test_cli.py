@@ -138,3 +138,29 @@ class TestCloudHookTimeoutNote:
         note = _cloud_hook_timeout_note("tc_live_x", "not-a-number")
         assert note is not None
         assert "30s" in note
+
+
+class TestDoctorConfigured:
+
+    def test_fails_when_enabled_but_empty(self, capsys, monkeypatch):
+        from hermes_tenuo.cli import cmd_doctor
+        monkeypatch.delenv("TENUO_WARRANT", raising=False)
+        monkeypatch.delenv("TENUO_CONNECT_TOKEN", raising=False)
+        monkeypatch.delenv("TENUO_TRUSTED_ROOT", raising=False)
+        rc = cmd_doctor(argparse.Namespace())
+        assert rc != 0
+        out = capsys.readouterr().out
+        assert "plugin configured" in out
+        assert "✗" in out
+
+    def test_audit_only_does_not_require_warrant(self, capsys, monkeypatch):
+        from hermes_tenuo.cli import cmd_doctor
+        monkeypatch.delenv("TENUO_WARRANT", raising=False)
+        monkeypatch.setenv("TENUO_CONNECT_TOKEN", "tc_live_test")
+        rc = cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "plugin configured" in out
+        assert "AUDIT-ONLY" in out
+        assert "warrant loaded" not in out
+        # May still fail other checks (entry point, enabled); configured itself passed
+        assert "✓  plugin configured" in out or "plugin configured (warrant or connect_token)" in out

@@ -277,7 +277,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(
             bool(registered),
             "plugin entry point hermes_agent.plugins:hermes-tenuo registered",
-            "reinstall: pip install --force-reinstall hermes-tenuo",
+            'reinstall: pip install --force-reinstall "git+https://github.com/tenuo-ai/hermes-tenuo.git"',
         )
     except Exception as exc:
         note(f"could not check entry points ({exc})")
@@ -304,13 +304,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ImportError:
         note("hermes_cli not importable here — skipping config.yaml checks")
 
-    # 4. Warrant loadable
+    # 4. Configured? Enabled-but-empty is a silent no-op at runtime.
     from hermes_tenuo._config import load_warrant
 
     raw = (
         config_entry.get("warrant")
         or os.environ.get("TENUO_WARRANT")
     )
+    connect_token = config_entry.get("connect_token") or os.environ.get("TENUO_CONNECT_TOKEN")
     if raw and (raw.startswith("/") or raw.startswith("~") or raw.startswith(".")):
         path = os.path.expanduser(raw)
         if os.path.exists(path):
@@ -321,10 +322,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             raw = None
 
     warrant = load_warrant(raw) if raw else None
+    configured = bool(warrant or connect_token)
     check(
-        warrant is not None,
-        "warrant loaded",
-        "set TENUO_WARRANT or plugins.entries.hermes-tenuo.warrant",
+        configured,
+        "plugin configured (warrant or connect_token)",
+        "set TENUO_WARRANT / warrant: or TENUO_CONNECT_TOKEN — until then the "
+        "plugin loads and does not enforce (startup WARNING). Run doctor after install.",
     )
 
     if warrant is not None:
@@ -372,16 +375,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
 
-    # 7. Trusted root
-    trusted = config_entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
-    check(
-        bool(trusted),
-        "trusted_root set",
-        "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
-    )
+        # 7. Trusted root (required for enforcement)
+        trusted = config_entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
+        check(
+            bool(trusted),
+            "trusted_root set",
+            "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
+        )
+    elif connect_token:
+        note(
+            "AUDIT-ONLY mode — connect_token is set but no warrant. "
+            "Tool calls are logged, not blocked. Add a warrant for enforcement."
+        )
 
     # 7b. Cloud approval vs Hermes hook timeout (Hermes #93824, Aug 2026)
-    connect_token = config_entry.get("connect_token") or os.environ.get("TENUO_CONNECT_TOKEN")
     timeout_note = _cloud_hook_timeout_note(connect_token, hook_callback_timeout)
     if timeout_note:
         note(timeout_note)
