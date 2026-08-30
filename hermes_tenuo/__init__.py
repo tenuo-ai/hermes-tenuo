@@ -4,7 +4,7 @@ hermes-tenuo: Tenuo authorization plugin for Hermes Agent.
 Hermes plugin entry point. Hermes calls register(ctx) at startup.
 
 Install:
-    pip install hermes-tenuo
+    pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
 
 Enable in ~/.hermes/config.yaml:
     plugins:
@@ -76,7 +76,12 @@ def register(ctx: Any) -> None:
             )
             _register_kanban_block_all(ctx, kanban_task)
         else:
-            logger.debug("hermes-tenuo: no warrant or connect_token configured, plugin inactive")
+            logger.warning(
+                "hermes-tenuo: plugin loaded but no warrant or connect_token is set — "
+                "tool calls are NOT enforced. Set TENUO_WARRANT (or warrant: in "
+                "config) to enforce, or TENUO_CONNECT_TOKEN for audit-only. "
+                "Run `hermes-tenuo doctor` to verify."
+            )
         return
 
     # Primary enforcement: register directly with ToolRegistry for universal

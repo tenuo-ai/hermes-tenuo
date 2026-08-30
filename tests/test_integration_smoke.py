@@ -279,6 +279,20 @@ class TestHookRegistration:
             assert ctx.registered("on_session_start")
             assert ctx.registered("on_session_end")
 
+    def test_unconfigured_register_warns_and_registers_nothing(
+        self, parent_warrant, agent_key, root_key, caplog
+    ):
+        """Enabled-but-empty must be loud: WARNING, no enforcement hooks."""
+        import logging
+        with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
+            with _plugin_ctx(
+                _warrant_b64(parent_warrant), agent_key, root_key,
+                env_overrides={"TENUO_WARRANT": "", "TENUO_CONNECT_TOKEN": ""},
+            ) as (ctx, _):
+                assert not ctx.registered("pre_tool_call")
+                assert not ctx.registered("subagent_start")
+        assert any("NOT enforced" in r.getMessage() for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # TestEnforcementBehavior

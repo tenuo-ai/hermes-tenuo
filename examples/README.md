@@ -1,19 +1,16 @@
 # Examples
 
-These examples require `tenuo>=0.1.0b24` (the version that includes `tenuo.hermes`).
-
 ```bash
-pip install "tenuo>=0.1.0b24" hermes-tenuo
+pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+# or, from a clone:
+pip install -e ..
+
+hermes-tenuo mint --allow read_file --allow web_search --ttl 1h --output full
+hermes-tenuo doctor
+
 python cron_warrant.py
 python subagent_scope.py
 python gateway_multiuser.py
 ```
 
-Until that version is published, install from source:
-
-```bash
-git clone https://github.com/tenuo-ai/tenuo
-cd tenuo/tenuo-python && pip install -e .
-cd /path/to/hermes-tenuo && pip install -e .
-python examples/cron_warrant.py
-```
+Requires `tenuo>=0.2.3` and Hermes Agent 0.20.x.

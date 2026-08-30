@@ -41,8 +41,8 @@ hermes-tenuo = "hermes_tenuo.cli:main"
 hermes-tenuo = "hermes_tenuo"
 
 [project.urls]
-Homepage = "https://tenuo.ai"
-Documentation = "https://tenuo.ai/docs/hermes"
+Homepage = "https://github.com/tenuo-ai/hermes-tenuo"
+Documentation = "https://github.com/tenuo-ai/hermes-tenuo#readme"
 Repository = "https://github.com/tenuo-ai/hermes-tenuo"
 Issues = "https://github.com/tenuo-ai/hermes-tenuo/issues"
 
