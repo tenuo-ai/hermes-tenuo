@@ -21,6 +21,39 @@ import os
 import sys
 from typing import Any, Optional
 
+# Hermes #93824 (Aug 2026) bounds pre_tool_call at plugins.hook_callback_timeout
+# (default 30s) and fails closed. Cloud approval polls for up to 5 minutes.
+_DEFAULT_HOOK_CALLBACK_TIMEOUT = 30.0
+_CLOUD_APPROVAL_POLL_SECS = 300.0
+
+
+def _cloud_hook_timeout_note(
+    connect_token: Optional[str],
+    hook_callback_timeout: Any,
+) -> Optional[str]:
+    """Return a doctor note if Cloud approval can be cut off by the hook timeout.
+
+    ``hook_callback_timeout`` is the raw ``plugins.hook_callback_timeout`` value
+    (None = unset / Hermes default of 30s; 0 = timeout disabled).
+    """
+    if not connect_token:
+        return None
+    if hook_callback_timeout is None:
+        timeout = _DEFAULT_HOOK_CALLBACK_TIMEOUT
+    else:
+        try:
+            timeout = float(hook_callback_timeout)
+        except (TypeError, ValueError):
+            timeout = _DEFAULT_HOOK_CALLBACK_TIMEOUT
+    if timeout == 0 or timeout >= _CLOUD_APPROVAL_POLL_SECS:
+        return None
+    return (
+        f"plugins.hook_callback_timeout is {timeout:g}s but Cloud approval polls "
+        f"for up to {_CLOUD_APPROVAL_POLL_SECS:g}s — a slow approval will fail "
+        f"closed (Hermes #93824). Set plugins.hook_callback_timeout to "
+        f"{_CLOUD_APPROVAL_POLL_SECS:g} or 0 (disable)."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -251,11 +284,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 3. Hermes config — is the plugin enabled?
     config_entry: dict = {}
+    hook_callback_timeout: Any = None
     try:
         from hermes_cli.config import load_config
         config = load_config() or {}
         plugins_cfg = config.get("plugins") or {}
         enabled = plugins_cfg.get("enabled") or []
+        hook_callback_timeout = plugins_cfg.get("hook_callback_timeout")
         check(
             "hermes-tenuo" in enabled,
             "hermes-tenuo listed in plugins.enabled",
@@ -344,6 +379,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "trusted_root set",
         "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
     )
+
+    # 7b. Cloud approval vs Hermes hook timeout (Hermes #93824, Aug 2026)
+    connect_token = config_entry.get("connect_token") or os.environ.get("TENUO_CONNECT_TOKEN")
+    timeout_note = _cloud_hook_timeout_note(connect_token, hook_callback_timeout)
+    if timeout_note:
+        note(timeout_note)
 
     # 8. Enforcement path
     print()

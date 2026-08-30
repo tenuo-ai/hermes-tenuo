@@ -104,6 +104,7 @@ Tracking issues / PRs: [hermes-agent#21849](https://github.com/NousResearch/herm
 - *Plugin listed but not configured.* If `hermes-tenuo` is in `plugins.enabled` but `plugins.entries.hermes-tenuo` has no `warrant` or `connect_token`, the plugin loads and silently no-ops. Your agent runs unprotected and looks identical to a protected run. Always confirm with `hermes-tenuo doctor` after install.
 - *Audit-only mode.* With `connect_token` set and no `warrant`, every tool call is logged to Tenuo Cloud but nothing is blocked. This is intentional for the warrant-builder on-ramp — **do not use in production without a warrant.**
 - *Denials are reported to the model, not the operator.* When a warrant blocks a tool, the message is delivered to the model as the tool result. Raise the `hermes_tenuo` log level to see operator-visible denial lines.
+- *Cloud approval vs hook timeout.* Hermes fails closed if `pre_tool_call` exceeds `plugins.hook_callback_timeout` (default 30s). Cloud approval polls for up to 5 minutes, so a slow human approval looks like a warrant denial unless you raise or disable that timeout. See **With Tenuo Cloud** below.
 
 ## With Tenuo Cloud (optional)
 
@@ -118,6 +119,15 @@ plugins:
 ```
 
 With only `connect_token` and no `warrant`, the plugin runs in **audit-only mode** — every tool call is logged to Cloud for pattern learning, nothing is blocked. Add `warrant` to activate enforcement.
+
+Cloud approval waits inside `pre_tool_call` for up to 5 minutes. Hermes 0.20+ bounds that hook at `plugins.hook_callback_timeout` (default 30s) and **fails closed** on timeout ([#93824](https://github.com/NousResearch/hermes-agent/pull/93824)). If you use Cloud approval gates, raise the timeout to cover the poll window, or disable it:
+
+```yaml
+plugins:
+  hook_callback_timeout: 300   # seconds; 0 disables the bound
+```
+
+`hermes-tenuo doctor` warns when `connect_token` is set and the timeout is still the 30s default.
 
 ## Managed scope (enterprise / multi-user)
 

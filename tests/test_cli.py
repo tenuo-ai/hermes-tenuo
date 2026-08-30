@@ -106,3 +106,35 @@ class TestStatus:
         cmd_status(argparse.Namespace())
         out = capsys.readouterr().out
         assert "✓" in out
+
+
+class TestCloudHookTimeoutNote:
+
+    def test_no_connect_token_is_silent(self):
+        from hermes_tenuo.cli import _cloud_hook_timeout_note
+        assert _cloud_hook_timeout_note(None, None) is None
+        assert _cloud_hook_timeout_note("", 30) is None
+
+    def test_unset_timeout_warns_at_hermes_default(self):
+        from hermes_tenuo.cli import _cloud_hook_timeout_note
+        note = _cloud_hook_timeout_note("tc_live_x", None)
+        assert note is not None
+        assert "30s" in note
+        assert "300s" in note
+        assert "93824" in note
+
+    def test_default_30s_warns(self):
+        from hermes_tenuo.cli import _cloud_hook_timeout_note
+        assert _cloud_hook_timeout_note("tc_live_x", 30) is not None
+
+    def test_disabled_or_raised_is_silent(self):
+        from hermes_tenuo.cli import _cloud_hook_timeout_note
+        assert _cloud_hook_timeout_note("tc_live_x", 0) is None
+        assert _cloud_hook_timeout_note("tc_live_x", 300) is None
+        assert _cloud_hook_timeout_note("tc_live_x", 600) is None
+
+    def test_invalid_timeout_treated_as_default(self):
+        from hermes_tenuo.cli import _cloud_hook_timeout_note
+        note = _cloud_hook_timeout_note("tc_live_x", "not-a-number")
+        assert note is not None
+        assert "30s" in note
