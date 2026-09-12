@@ -16,7 +16,7 @@ and the plugin wiring in _config.py / _guard.py call into here.
 Credential scoping in worker subprocesses
 ------------------------------------------
 On a single-profile Hermes, kanban_db._default_spawn copies ``os.environ``
-into the worker, so TENUO_SIGNING_KEY / TENUO_CONNECT_TOKEN / TENUO_WARRANT
+into the worker, so TENUO_SIGNING_KEY / TENUO_WARRANT
 are inherited from the dispatcher.
 
 Under ``gateway.multiplex_profiles`` (Hermes #108748), that copy is
@@ -34,11 +34,6 @@ TENUO_WARRANT: superseded at load time. _config.get_warrant_raw() checks
   HERMES_KANBAN_TASK first and loads the per-task warrant from disk instead.
   The global TENUO_WARRANT env var is ignored for kanban workers. It is
   forwarded but harmless.
-
-TENUO_CONNECT_TOKEN: forwarded without per-task scoping. Workers doing
-  audit-only Cloud logging do not strictly need this token; future versions
-  may mint per-task tokens. For now, treat the dispatcher process's env as
-  the credential boundary — workers run in the same trust zone.
 """
 
 from __future__ import annotations

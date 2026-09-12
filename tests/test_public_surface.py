@@ -18,6 +18,12 @@ def test_examples_do_not_mention_connect_token():
         assert "tc_live" not in text, path.name
 
 
+def test_tree_has_no_hosted_client():
+    assert not (ROOT / "mock_cloud.py").exists()
+    assert not (ROOT / "hermes_tenuo" / "_cloud.py").exists()
+    assert not (ROOT / "tests" / "test_cloud.py").exists()
+
+
 def test_skill_is_local_only():
     skill = ROOT / "hermes_tenuo" / "skills" / "tenuo-scope" / "SKILL.md"
     text = skill.read_text()

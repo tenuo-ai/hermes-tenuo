@@ -1,5 +1,5 @@
 """
-Local audit log for hermes-tenuo. Works with no Cloud account.
+Local audit log for hermes-tenuo. Works with no account.
 
 Every authorization decision the guard makes is appended as one JSON line to
 ``$HERMES_HOME/tenuo/audit.jsonl`` (``~/.hermes/tenuo/audit.jsonl`` outside

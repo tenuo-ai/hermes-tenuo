@@ -2,7 +2,7 @@
 Tests for tenuo.hermes — HermesGuard
 
 Covers:
-- Audit-only mode (no warrant): all calls pass through, Cloud gets events
+- Audit-only mode (no warrant): all calls pass through, audit events still fire
 - Enforcement mode: authorized calls pass, unauthorized calls block
 - Expired warrant blocks
 - Missing signing key with warrant: passthrough with warning
@@ -107,7 +107,7 @@ class TestAuditOnlyMode:
         for tool in ["terminal", "write_file", "read_file", "web_search", "delegate_task"]:
             assert guard_audit_only.pre_tool_call(tool, {}) is None
 
-    def test_post_tool_call_emits_to_cloud_in_audit_mode(self, guard_audit_only):
+    def test_post_tool_call_emits_enforcement_in_audit_mode(self, guard_audit_only):
         mock_cp = MagicMock()
         guard_audit_only._control_plane = mock_cp
         guard_audit_only.post_tool_call("web_search", {"query": "test"}, '{"result": "ok"}')
@@ -502,3 +502,45 @@ class TestHookSignatureCompatibility:
         guard._control_plane = None
         guard._primary_session_id = "s1"
         guard.post_tool_call("web_search", {"query": "x"}, '{}', session_id="s1")
+
+
+class TestPluginGuardGatewayProxy:
+    def test_set_session_warrant_proxies_to_inner_guard(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner)
+        pg.set_session_warrant("alice", warrant, agent_key)
+        w, k = inner._resolve_warrant("alice")
+        assert w is warrant
+        assert k is agent_key
+
+    def test_clear_session_warrant_proxies(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner)
+        pg.set_session_warrant("alice", warrant, agent_key)
+        pg.clear_session_warrant("alice")
+        with inner._session_lock:
+            assert "alice" not in inner._session_warrants

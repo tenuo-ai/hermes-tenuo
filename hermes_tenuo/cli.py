@@ -3,7 +3,6 @@ hermes-tenuo CLI — warrant minting and management.
 
 Usage:
     hermes-tenuo mint --ttl 1h --allow web_search --allow read_file
-    hermes-tenuo mint --trigger trg-xyz --connect-token tc_...
     hermes-tenuo status
     hermes-tenuo verify
     hermes-tenuo audit --last 20 --denied
@@ -31,115 +30,13 @@ import os
 import sys
 from typing import Any, Optional
 
-# Hermes #93824 (Aug 2026) bounds pre_tool_call at plugins.hook_callback_timeout
-# (default 30s) and fails closed. Cloud approval polls for up to 5 minutes.
-_DEFAULT_HOOK_CALLBACK_TIMEOUT = 30.0
-_CLOUD_APPROVAL_POLL_SECS = 300.0
-
-
-def _cloud_hook_timeout_note(
-    connect_token: Optional[str],
-    hook_callback_timeout: Any,
-) -> Optional[str]:
-    """Return a doctor note if Cloud approval can be cut off by the hook timeout.
-
-    ``hook_callback_timeout`` is the raw ``plugins.hook_callback_timeout`` value
-    (None = unset / Hermes default of 30s; 0 = timeout disabled).
-    """
-    if not connect_token:
-        return None
-    if hook_callback_timeout is None:
-        timeout = _DEFAULT_HOOK_CALLBACK_TIMEOUT
-    else:
-        try:
-            timeout = float(hook_callback_timeout)
-        except (TypeError, ValueError):
-            timeout = _DEFAULT_HOOK_CALLBACK_TIMEOUT
-    if timeout == 0 or timeout >= _CLOUD_APPROVAL_POLL_SECS:
-        return None
-    return (
-        f"plugins.hook_callback_timeout is {timeout:g}s but Cloud approval polls "
-        f"for up to {_CLOUD_APPROVAL_POLL_SECS:g}s — a slow approval will fail "
-        f"closed (Hermes #93824). Set plugins.hook_callback_timeout to "
-        f"{_CLOUD_APPROVAL_POLL_SECS:g} or 0 (disable)."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
 def cmd_mint(args: argparse.Namespace) -> int:
     """Mint a warrant and print config to stdout."""
-    # Cloud-backed minting via trigger
-    if getattr(args, "trigger", None):
-        return _mint_from_trigger(args)
     return _mint_local(args)
-
-
-def _mint_from_trigger(args: argparse.Namespace) -> int:
-    """Mint via Tenuo Cloud trigger: POST /v1/triggers/{id}/fire."""
-    from hermes_tenuo._config import _env_secret
-    token = getattr(args, "connect_token", None) or _env_secret("TENUO_CONNECT_TOKEN")
-    if not token:
-        print(
-            "error: --trigger requires a connect token. "
-            "Set TENUO_CONNECT_TOKEN or pass --connect-token.",
-            file=sys.stderr,
-        )
-        return 1
-
-    from hermes_tenuo._cloud import parse_connect_token, fire_trigger, CloudAPIError
-    creds = parse_connect_token(token)
-    if not creds or not creds.api_key:
-        print("error: could not parse connect token", file=sys.stderr)
-        return 1
-
-    print(f"Firing trigger {args.trigger}...", file=sys.stderr)
-    try:
-        result = fire_trigger(
-            args.trigger,
-            api_key=creds.api_key,
-            endpoint=creds.endpoint,
-        )
-    except CloudAPIError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
-    _print_cloud_mint_output(result, args.output)
-    return 0
-
-
-def _print_cloud_mint_output(result: Any, output_format: str) -> None:
-    """Print the Cloud-minted warrant config."""
-    from hermes_tenuo._cloud import FireTriggerResult
-    if output_format == "env":
-        print(f"export TENUO_WARRANT={result.warrant_b64}")
-        if result.trusted_root_b64:
-            print(f"export TENUO_TRUSTED_ROOT={result.trusted_root_b64}")
-    elif output_format == "yaml":
-        print(f"warrant: {result.warrant_b64}")
-        if result.trusted_root_b64:
-            print(f"trusted_root: {result.trusted_root_b64}")
-    else:
-        print("# ── Hermes config (add to ~/.hermes/config.yaml) ────────────────")
-        print("plugins:")
-        print("  enabled:")
-        print("    - hermes-tenuo")
-        print("  entries:")
-        print("    hermes-tenuo:")
-        print(f"      warrant: {result.warrant_b64}")
-        if result.trusted_root_b64:
-            print(f"      trusted_root: {result.trusted_root_b64}")
-        print(f"      signing_key_env: TENUO_SIGNING_KEY")
-        print()
-        if result.warrant_id:
-            print(f"# ── Warrant ID: {result.warrant_id}")
-        if result.expires_at:
-            print(f"# ── Expires:    {result.expires_at}")
-        print()
-        print("# ── Note: set TENUO_SIGNING_KEY to your agent's Ed25519 signing key")
-        print("# ── (the key registered with Cloud, matching the warrant holder)")
 
 
 def _parse_constraint_value(value: str) -> Any:
@@ -282,7 +179,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         ("TENUO_WARRANT",      "Warrant"),
         ("TENUO_SIGNING_KEY",  "Signing key"),
         ("TENUO_TRUSTED_ROOT", "Trusted root"),
-        ("TENUO_CONNECT_TOKEN","Cloud token (optional)"),
     ]
     all_required = True
     for env, label in checks:
@@ -348,13 +244,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 3. Hermes config — is the plugin enabled?
     config_entry: dict = {}
-    hook_callback_timeout: Any = None
     try:
         from hermes_cli.config import load_config
         config = load_config() or {}
         plugins_cfg = config.get("plugins") or {}
         enabled = plugins_cfg.get("enabled") or []
-        hook_callback_timeout = plugins_cfg.get("hook_callback_timeout")
         check(
             "hermes-tenuo" in enabled,
             "hermes-tenuo listed in plugins.enabled",
@@ -375,7 +269,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         config_entry.get("warrant")
         or _env_secret("TENUO_WARRANT")
     )
-    connect_token = config_entry.get("connect_token") or _env_secret("TENUO_CONNECT_TOKEN")
     if raw and (raw.startswith("/") or raw.startswith("~") or raw.startswith(".")):
         path = os.path.expanduser(raw)
         if os.path.exists(path):
@@ -386,12 +279,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             raw = None
 
     warrant = load_warrant(raw) if raw else None
-    configured = bool(warrant or connect_token)
+    configured = warrant is not None
     check(
         configured,
-        "plugin configured (warrant or connect_token)",
-        "set TENUO_WARRANT / warrant: or TENUO_CONNECT_TOKEN — until then the "
-        "plugin loads and does not enforce (startup WARNING). Run doctor after install.",
+        "plugin configured (warrant)",
+        "set TENUO_WARRANT / warrant: — until then the plugin loads and does "
+        "not enforce (startup WARNING). Run doctor after install.",
     )
 
     if warrant is not None:
@@ -444,17 +337,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "trusted_root set",
             "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
         )
-    elif connect_token:
-        note(
-            "AUDIT-ONLY mode — connect_token is set but no warrant. "
-            "Tool calls are logged, not blocked. Add a warrant for enforcement."
-        )
-
-    # 7b. Cloud approval vs Hermes hook timeout (Hermes #93824, Aug 2026)
-    timeout_note = _cloud_hook_timeout_note(connect_token, hook_callback_timeout)
-    if timeout_note:
-        note(timeout_note)
-
     # 8. Enforcement path
     print()
     try:
@@ -597,11 +479,6 @@ def main() -> None:
                              "glob with '*'/'?', '/path' prefix, otherwise exact match.")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
-    mint_p.add_argument("--trigger", metavar="TRIGGER_ID",
-                        help="Fire a Tenuo Cloud trigger to get a Cloud-issued warrant "
-                             "(requires TENUO_CONNECT_TOKEN or --connect-token)")
-    mint_p.add_argument("--connect-token", metavar="TOKEN",
-                        help="Tenuo Cloud connect token (overrides TENUO_CONNECT_TOKEN)")
 
     # status
     subparsers.add_parser("status", help="Show current configuration status")

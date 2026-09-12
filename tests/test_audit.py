@@ -1,4 +1,4 @@
-"""Local JSONL audit log: written by the guard, readable without Cloud."""
+"""Local JSONL audit log: written by the guard, readable without an account."""
 
 from __future__ import annotations
 

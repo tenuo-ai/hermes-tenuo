@@ -59,14 +59,6 @@ def _get_plugin_entry(ctx: Any) -> dict:
         return {}
 
 
-def get_connect_token(ctx: Any) -> Optional[str]:
-    entry = _get_plugin_entry(ctx)
-    return (
-        entry.get("connect_token")
-        or _env_secret("TENUO_CONNECT_TOKEN")
-    )
-
-
 def _looks_like_path(s: str) -> bool:
     """Return True if the string looks like a file path rather than base64 data."""
     return (
@@ -94,7 +86,7 @@ def get_warrant_raw(ctx: Any) -> Optional[str]:
             return task_raw
         # Fail closed: a kanban worker scoped to a task must not inherit the
         # install-wide warrant.  Returning None here causes build_plugin_guard
-        # to return None (no warrant, no connect_token), and register() will
+        # to return None (no warrant), and register() will
         # install a block-all pre_tool_call hook so the worker cannot proceed.
         logger.error(
             "kanban worker %s has no staged task warrant — all tool calls will be blocked. "

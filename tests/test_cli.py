@@ -16,7 +16,7 @@ class TestMintLocal:
     def test_mint_bare_tools_env_output(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(
-            ttl="1h", allow=["web_search", "read_file"], output="env", trigger=None
+            ttl="1h", allow=["web_search", "read_file"], output="env"
         )
         rc = cmd_mint(args)
         assert rc == 0
@@ -27,14 +27,14 @@ class TestMintLocal:
 
     def test_mint_no_allow_errors(self, capsys):
         from hermes_tenuo.cli import cmd_mint
-        args = argparse.Namespace(ttl="1h", allow=None, output="env", trigger=None)
+        args = argparse.Namespace(ttl="1h", allow=None, output="env")
         rc = cmd_mint(args)
         assert rc != 0  # at least one --allow is required
 
     def test_mint_yaml_output(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(
-            ttl="30m", allow=["web_search"], output="yaml", trigger=None
+            ttl="30m", allow=["web_search"], output="yaml"
         )
         rc = cmd_mint(args)
         assert rc == 0
@@ -59,23 +59,21 @@ class TestMintLocal:
     def test_mint_full_output(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(
-            ttl="24h", allow=["web_search"], output="full", trigger=None
+            ttl="24h", allow=["web_search"], output="full"
         )
         rc = cmd_mint(args)
         assert rc == 0
         out = capsys.readouterr().out
         assert "hermes-tenuo" in out
         assert "TENUO_SIGNING_KEY" in out
-        # Constraint builder notice
-        assert "Cloud" in out or "warrant" in out.lower()
+        assert "warrant" in out.lower()
 
     def test_mint_warrant_is_valid_tenuo_warrant(self):
         """The minted warrant must be decodable by tenuo_core."""
         from hermes_tenuo.cli import cmd_mint
         import io, sys
         args = argparse.Namespace(
-            ttl="1h", allow=["web_search"], output="env", trigger=None
-        )
+            ttl="1h", allow=["web_search"], output="env"        )
         captured = []
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
@@ -122,62 +120,17 @@ class TestStatus:
         assert "✓" in out
 
 
-class TestCloudHookTimeoutNote:
-
-    def test_no_connect_token_is_silent(self):
-        from hermes_tenuo.cli import _cloud_hook_timeout_note
-        assert _cloud_hook_timeout_note(None, None) is None
-        assert _cloud_hook_timeout_note("", 30) is None
-
-    def test_unset_timeout_warns_at_hermes_default(self):
-        from hermes_tenuo.cli import _cloud_hook_timeout_note
-        note = _cloud_hook_timeout_note("tc_live_x", None)
-        assert note is not None
-        assert "30s" in note
-        assert "300s" in note
-        assert "93824" in note
-
-    def test_default_30s_warns(self):
-        from hermes_tenuo.cli import _cloud_hook_timeout_note
-        assert _cloud_hook_timeout_note("tc_live_x", 30) is not None
-
-    def test_disabled_or_raised_is_silent(self):
-        from hermes_tenuo.cli import _cloud_hook_timeout_note
-        assert _cloud_hook_timeout_note("tc_live_x", 0) is None
-        assert _cloud_hook_timeout_note("tc_live_x", 300) is None
-        assert _cloud_hook_timeout_note("tc_live_x", 600) is None
-
-    def test_invalid_timeout_treated_as_default(self):
-        from hermes_tenuo.cli import _cloud_hook_timeout_note
-        note = _cloud_hook_timeout_note("tc_live_x", "not-a-number")
-        assert note is not None
-        assert "30s" in note
-
-
 class TestDoctorConfigured:
 
     def test_fails_when_enabled_but_empty(self, capsys, monkeypatch):
         from hermes_tenuo.cli import cmd_doctor
         monkeypatch.delenv("TENUO_WARRANT", raising=False)
-        monkeypatch.delenv("TENUO_CONNECT_TOKEN", raising=False)
         monkeypatch.delenv("TENUO_TRUSTED_ROOT", raising=False)
         rc = cmd_doctor(argparse.Namespace())
         assert rc != 0
         out = capsys.readouterr().out
         assert "plugin configured" in out
         assert "✗" in out
-
-    def test_audit_only_does_not_require_warrant(self, capsys, monkeypatch):
-        from hermes_tenuo.cli import cmd_doctor
-        monkeypatch.delenv("TENUO_WARRANT", raising=False)
-        monkeypatch.setenv("TENUO_CONNECT_TOKEN", "tc_live_test")
-        rc = cmd_doctor(argparse.Namespace())
-        out = capsys.readouterr().out
-        assert "plugin configured" in out
-        assert "AUDIT-ONLY" in out
-        assert "warrant loaded" not in out
-        # May still fail other checks (entry point, enabled); configured itself passed
-        assert "✓  plugin configured" in out or "plugin configured (warrant or connect_token)" in out
 
 
 class TestMintConstraints:
@@ -212,15 +165,14 @@ class TestMintConstraints:
 
     def test_mint_malformed_allow_errors(self, capsys):
         from hermes_tenuo.cli import cmd_mint
-        args = argparse.Namespace(ttl="1h", allow=["read_file:path"], output="env", trigger=None)
+        args = argparse.Namespace(ttl="1h", allow=["read_file:path"], output="env")
         assert cmd_mint(args) != 0
         assert "expected arg=value" in capsys.readouterr().err
 
     def test_mint_full_output_lists_constraints(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(
-            ttl="1h", allow=["read_file:path=/data", "web_search"], output="full", trigger=None
-        )
+            ttl="1h", allow=["read_file:path=/data", "web_search"], output="full"        )
         assert cmd_mint(args) == 0
         out = capsys.readouterr().out
         assert "#   read_file  path=/data" in out
@@ -237,7 +189,6 @@ class TestMintConstraints:
             ttl="1h",
             allow=["read_file:path=/data", "web_search:query=*", "git:action=status|diff"],
             output="env",
-            trigger=None,
         )
         assert cmd_mint(args) == 0
         env = {}

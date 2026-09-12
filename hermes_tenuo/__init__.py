@@ -106,10 +106,9 @@ def register(ctx: Any) -> None:
             _register_kanban_block_all(ctx, kanban_task)
         else:
             logger.warning(
-                "hermes-tenuo: plugin loaded but no warrant or connect_token is set — "
+                "hermes-tenuo: plugin loaded but no warrant is set — "
                 "tool calls are NOT enforced. Set TENUO_WARRANT (or warrant: in "
-                "config) to enforce, or TENUO_CONNECT_TOKEN for audit-only. "
-                "Run `hermes-tenuo doctor` to verify."
+                "config) to enforce. Run `hermes-tenuo doctor` to verify."
             )
         return
 
@@ -164,8 +163,7 @@ def register(ctx: Any) -> None:
         logger.warning(
             "hermes-tenuo: running in AUDIT-ONLY mode — all tool calls are logged "
             "but NOT blocked. Set TENUO_WARRANT (or warrant: in config) to activate "
-            "enforcement. This mode is intended only for initial warrant-builder "
-            "on-ramp; do not use in production without a warrant."
+            "enforcement. Do not use in production without a warrant."
         )
     else:
         logger.info("hermes-tenuo: active (%s)", mode)

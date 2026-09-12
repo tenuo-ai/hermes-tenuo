@@ -186,7 +186,7 @@ class HermesGuard:
     def set_trusted_roots(self, roots: Optional[List[Any]]) -> None:
         """Thread-safe replacement of the trusted root set.
 
-        Call this after receiving a Cloud-issued warrant to install the issuer
+        Call this after receiving a warrant to install the issuer
         anchor used for chain verification.  Pass None to clear.
         """
         with self._trusted_roots_lock:
@@ -231,7 +231,7 @@ class HermesGuard:
                     # V1 LIMITATION: single-parent-session only.
                     # This heuristic is ONLY safe for single-agent deployments
                     # (CLI / cron) where one parent runs at a time.
-                    # For multi-user gateways, use fire_session_warrant() per
+                    # For multi-user gateways, use set_session_warrant() per
                     # session instead — explicit session warrants bypass this
                     # branch entirely (see _resolve_warrant L174-177).
                     # subagent_start (wired Jun 2026) injects child warrants before
@@ -296,7 +296,7 @@ class HermesGuard:
 
             # Determine which tools to keep in the child
             if requested_tools:
-                # Map bare names to tool: prefixed names used in Cloud warrants
+                # Map bare names to tool: prefixed names used on some warrants
                 keep = set()
                 for bare in requested_tools:
                     for candidate in (f"tool:{bare}", bare):
@@ -569,15 +569,14 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # For chain verification: use configured trusted_roots (Cloud's key).
-            # If not configured, extract the root from the parent warrant's issuer
-            # field — the parent was Cloud-signed, so parent.issuer IS Cloud's key.
+            # For chain verification: use configured trusted_roots.
+            # If not configured, extract the root from the parent warrant's issuer.
             with self._session_lock:
                 parent_warrant = self._session_warrant_chains.get(session_id)
             with self._trusted_roots_lock:
                 trusted = resolve_trusted_roots(self._trusted_roots)
             if trusted is None and parent_warrant is not None:
-                # Derive trusted root from the parent's issuer (the Cloud signing key)
+                # Derive trusted root from the parent's issuer.
                 try:
                     if parent_warrant.issuer is not None:
                         trusted = [parent_warrant.issuer]
@@ -640,7 +639,7 @@ class HermesGuard:
         tool_call_id: str = "",
         duration_ms: int = 0,
     ) -> None:
-        """Emit audit event to Cloud. Fires for every tool call, including audit-only mode."""
+        """Emit an audit event. Fires for every tool call, including audit-only mode."""
         warrant, _ = self._resolve_warrant(session_id)
 
         # In audit-only mode (no warrant), emit a passthrough audit event

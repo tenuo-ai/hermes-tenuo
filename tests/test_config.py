@@ -163,7 +163,7 @@ class TestEnvSecret:
 
     def test_unscoped_multiplex_does_not_read_os_environ(self, monkeypatch):
         from hermes_tenuo._config import _env_secret
-        monkeypatch.setenv("TENUO_CONNECT_TOKEN", "launch-profile-token")
+        monkeypatch.setenv("TENUO_SIGNING_KEY", "launch-profile-token")
 
         class UnscopedSecretError(RuntimeError):
             pass
@@ -178,14 +178,7 @@ class TestEnvSecret:
         scope_mod.UnscopedSecretError = UnscopedSecretError
         scope_mod.get_secret = _raise
         with patch.dict(sys.modules, {"agent": agent_mod, "agent.secret_scope": scope_mod}):
-            assert _env_secret("TENUO_CONNECT_TOKEN") is None
-
-    def test_get_connect_token_uses_env_secret(self):
-        from hermes_tenuo._config import get_connect_token
-        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
-            with patch("hermes_tenuo._config._env_secret", return_value="tc_scoped") as mock_secret:
-                assert get_connect_token(FakeCtx()) == "tc_scoped"
-                mock_secret.assert_called_with("TENUO_CONNECT_TOKEN")
+            assert _env_secret("TENUO_SIGNING_KEY") is None
 
 
 class TestLoadWarrant:
@@ -211,11 +204,11 @@ class TestLoadWarrant:
 
 class TestBuildPluginGuard:
 
-    def test_returns_none_when_no_warrant_and_no_token(self):
+    def test_returns_none_when_no_warrant(self):
         from hermes_tenuo._guard import build_plugin_guard
         with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
             env = {k: v for k, v in os.environ.items()
-                   if k not in ("TENUO_WARRANT", "TENUO_CONNECT_TOKEN")}
+                   if k != "TENUO_WARRANT"}
             with patch.dict(os.environ, env, clear=True):
                 guard = build_plugin_guard(FakeCtx())
         assert guard is None
@@ -257,14 +250,15 @@ class TestBuildPluginGuard:
         assert result is not None
         assert result["action"] == "block"
 
-    def test_cloud_not_called_without_token(self, warrant_b64, agent_key_b64, trusted_root_b64):
+    def test_builds_without_optional_control_plane_connect(
+        self, warrant_b64, agent_key_b64, trusted_root_b64
+    ):
         from hermes_tenuo._guard import build_plugin_guard
         entry = {"warrant": warrant_b64, "trusted_root": trusted_root_b64}
         with patch("hermes_tenuo._config._get_plugin_entry", return_value=entry):
             with patch.dict(os.environ, {"TENUO_SIGNING_KEY": agent_key_b64}):
-                with patch("tenuo.control_plane.connect") as mock_connect:
-                    build_plugin_guard(FakeCtx())
-        mock_connect.assert_not_called()
+                guard = build_plugin_guard(FakeCtx())
+        assert guard is not None
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +292,7 @@ class TestMintCLI:
     def test_mint_with_multiple_tools(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         import argparse
-        args = argparse.Namespace(ttl="1h", allow=["read_file", "web_search"], output="env", trigger=None)
+        args = argparse.Namespace(ttl="1h", allow=["read_file", "web_search"], output="env")
         result = cmd_mint(args)
         assert result == 0
         out = capsys.readouterr().out

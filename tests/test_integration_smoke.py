@@ -300,7 +300,7 @@ class TestHookRegistration:
         with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
             with _plugin_ctx(
                 _warrant_b64(parent_warrant), agent_key, root_key,
-                env_overrides={"TENUO_WARRANT": "", "TENUO_CONNECT_TOKEN": ""},
+                env_overrides={"TENUO_WARRANT": ""},
             ) as (ctx, _):
                 assert not ctx.registered("pre_tool_call")
                 assert not ctx.registered("subagent_start")

@@ -259,7 +259,6 @@ variable equivalent.
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
 | `on_denial` | | `block` (default) or `log`. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
-| `connect_token` | `TENUO_CONNECT_TOKEN` | Optional. Connects the plugin to Tenuo Cloud (see below). |
 
 Keep secret key material in env vars or a secrets manager, never in
 `config.yaml`.
@@ -296,12 +295,9 @@ Pin `warrant`, `trusted_root`, and `on_denial`. Leave `signing_key_env` to
 the environment. Override the managed directory with `HERMES_MANAGED_DIR` for
 containers or non-standard layouts.
 
-## Tenuo Cloud (optional)
+## A hosted control plane (optional)
 
-Everything above works without an account. If you want a hosted control
-plane, set `connect_token` and the plugin can stream the same audit events, fetch
-Cloud-issued warrants (`hermes-tenuo mint --trigger <id>`), and wait on human
-approval gates. Details at [tenuo.ai](https://tenuo.ai).
+Everything above works without an account. Details at [tenuo.ai](https://tenuo.ai).
 
 ## Listing in the Hermes plugin catalog
 

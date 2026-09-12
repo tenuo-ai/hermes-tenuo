@@ -239,7 +239,7 @@ class TestMonotonicity:
         )
         guard._primary_session_id = "s1"
         guard.set_session_warrant("child-1", child, agent_key)
-        # Store parent in chain so enforcement verifies Cloud→parent→child
+        # Store parent in chain so enforcement verifies root→parent→child
         with guard._session_lock:
             guard._session_warrant_chains["child-1"] = parent_warrant
 
@@ -437,7 +437,7 @@ class TestChainIntegrity:
 
         attacker_key = SigningKey.generate()
 
-        # Real Cloud-issued parent
+        # Parent minted by the trusted root
         real_parent = (
             Warrant.mint_builder()
             .holder(agent_key.public_key)
