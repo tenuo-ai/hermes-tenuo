@@ -212,7 +212,10 @@ def get_require_session_warrant(ctx: Any) -> Optional[bool]:
         return True
     if raw is False or (isinstance(raw, str) and raw.strip().lower() in ("false", "off", "no", "0")):
         return False
-    logger.warning("hermes-tenuo: unknown require_session_warrant value %r — using auto", raw)
+    logger.warning(
+        "hermes-tenuo: unknown require_session_warrant type %s — using auto",
+        type(raw).__name__,
+    )
     return None
 
 

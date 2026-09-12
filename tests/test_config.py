@@ -214,6 +214,16 @@ class TestGetRequireSessionWarrant:
             with patch.dict(os.environ, {"TENUO_REQUIRE_SESSION_WARRANT": "false"}):
                 assert get_require_session_warrant(FakeCtx()) is False
 
+    def test_unknown_value_does_not_log_raw(self, caplog):
+        import logging
+        from hermes_tenuo._config import get_require_session_warrant
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
+            with patch.dict(os.environ, {"TENUO_REQUIRE_SESSION_WARRANT": "maybe"}):
+                with caplog.at_level(logging.WARNING, logger="hermes_tenuo._config"):
+                    assert get_require_session_warrant(FakeCtx()) is None
+        assert "maybe" not in caplog.text
+        assert "using auto" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # build_plugin_guard integration tests
