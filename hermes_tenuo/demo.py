@@ -9,6 +9,7 @@ from tenuo import SigningKey, Subpath, Warrant, Wildcard
 from hermes_tenuo.hermes_guard import HermesGuard
 
 # Lines CI and the README both pin. Do not reword without updating both.
+# Denial lines print the real tool result first, then an editorial gloss after "←".
 CRON_ALLOW = "ALLOW  read_file  path=/data/reports/q3.csv"
 CRON_DENY_PASSWD = "DENY   read_file  path=/etc/passwd"
 CRON_DENY_TERMINAL = "DENY   terminal  command=ls"
@@ -53,8 +54,10 @@ def _call(
         line = f"{line}  {label}"
     lines.append(line.rstrip())
     if result:
-        message = why or str(result.get("message") or "").strip()
-        if message:
+        message = str(result.get("message") or "").strip()
+        if message and why:
+            lines.append(f"         {message}  ← {why}")
+        elif message:
             lines.append(f"         {message}")
     return result
 

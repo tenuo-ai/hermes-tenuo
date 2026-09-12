@@ -21,9 +21,9 @@ The job does the work. Then it tries to leave the slip.
   ALLOW  read_file  path=/data/reports/q3.csv
   ALLOW  write_file  path=/tmp/nightly/report.md
   DENY   read_file  path=/etc/passwd
-         /etc/passwd is not under /data/reports
+         Constraint 'path' not satisfied: value does not match constraint  ← /etc/passwd is not under /data/reports
   DENY   terminal  command=ls
-         terminal is not on the slip
+         Tool 'terminal' is not authorized  ← terminal is not on the slip
 
 That slip is a Tenuo warrant: signed, expiring, checked before
 the handler runs. Same check, two more shapes:
@@ -34,16 +34,16 @@ Same rule, after a handoff. The researcher was only granted web_search.
   [orchestrator] ALLOW  delegate_task  task=research q3  context=web_search only
   [researcher] ALLOW  web_search  query=AI papers 2026
   [researcher] DENY   write_file  path=/data/output/x.md
-         the researcher was not granted write_file
+         Tool 'write_file' is not authorized  ← the researcher was not granted write_file
 
 == Gateway ==
 Same server, two slips.
   [analyst] ALLOW  read_file  path=/data/reports/q1.csv
   [analyst] DENY   write_file  path=/data/output/x.txt
-         write_file is not on the analyst's slip
+         Tool 'write_file' is not authorized  ← write_file is not on the analyst's slip
   [viewer] ALLOW  read_file  path=/data/public/faq.md
   [viewer] DENY   read_file  path=/data/reports/q1.csv
-         /data/reports is not on the viewer's slip
+         Constraint 'path' not satisfied: value does not match constraint  ← /data/reports is not on the viewer's slip
 ```
 
 A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant is that slip. Each Hermes

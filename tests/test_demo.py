@@ -29,13 +29,12 @@ def test_demo_transcript_pins():
     assert "Same server, two slips." in out
     assert CRON_ALLOW in out
     assert CRON_DENY_PASSWD in out
-    assert CRON_WHY_OUTSIDE_DIR in out
-    assert "Constraint 'path' not satisfied" not in out
+    assert "Constraint 'path' not satisfied: value does not match constraint  ← " + CRON_WHY_OUTSIDE_DIR in out
     assert CRON_DENY_TERMINAL in out
-    assert CRON_WHY_TERMINAL in out
+    assert "Tool 'terminal' is not authorized  ← " + CRON_WHY_TERMINAL in out
     assert CHILD_ALLOW_SEARCH in out
     assert CHILD_DENY_WRITE in out
-    assert CHILD_WHY_WRITE in out
+    assert "Tool 'write_file' is not authorized  ← " + CHILD_WHY_WRITE in out
     assert VIEWER_DENY_REPORTS in out
     assert VIEWER_WHY_REPORTS in out
     assert "[researcher] ALLOW  write_file" not in out

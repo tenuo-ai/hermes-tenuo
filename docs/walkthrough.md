@@ -97,6 +97,6 @@ the model was *allowed* to do, because that is a signed grant checked in
 ## Clean up
 
 ```bash
-hermes profile delete tenuo-walkthrough -y
+hermes profile delete tenuo-walkthrough --yes
 rm -rf /tmp/hermes-tenuo-walkthrough
 ```
