@@ -3,7 +3,7 @@
 No Hermes process and no API key. Start here:
 
 ```bash
-pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+pip install hermes-tenuo
 hermes-tenuo demo
 # or, from this directory: python demo.py
 ```
