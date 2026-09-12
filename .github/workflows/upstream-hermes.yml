@@ -1,0 +1,54 @@
+name: Upstream Hermes
+
+# Loads the plugin through NousResearch/hermes-agent `main` via Hermes's real
+# plugin loader, both install routes. Runs nightly so "tested against upstream"
+# stays true as Hermes changes; also on PRs that touch this job.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/upstream-hermes.yml"
+      - "tests/test_upstream_hermes.py"
+      - "__init__.py"
+      - "plugin.yaml"
+      - "pyproject.toml"
+      - "hermes_tenuo/**"
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    name: ${{ matrix.route }} route
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [entrypoint, directory]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: main
+          path: hermes-agent
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Hermes from source
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ./hermes-agent
+          python -c "import hermes_cli, importlib.metadata as m; print('hermes-agent', m.version('hermes-agent'))"
+          git -C hermes-agent log -1 --format='upstream %h %ad %s' --date=short
+      - name: Install the plugin (entrypoint route)
+        if: matrix.route == 'entrypoint'
+        run: pip install . pytest
+      - name: Install only tenuo (directory route)
+        if: matrix.route == 'directory'
+        run: pip install "tenuo>=0.3.0" pytest
+      - name: Load through Hermes's plugin loader
+        run: python -m pytest tests/test_upstream_hermes.py -q -rs --tb=short
