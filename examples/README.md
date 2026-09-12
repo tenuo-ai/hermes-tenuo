@@ -8,10 +8,11 @@ hermes-tenuo demo
 # or, from this directory: python demo.py
 ```
 
-That prints the cron, `delegate_task` (a `grant_builder` hop), and gateway
-scenes. The longer scripts below are the same `HermesGuard.pre_tool_call`
-path, one file per scene. `subagent_scope.py` is the grant; `gateway_multiuser.py`
-is one independently minted warrant per session.
+That is one story: a nightly job leaves its slip, then the same check on a
+child grant and on two gateway users. The longer scripts below are the
+same `HermesGuard.pre_tool_call` path, one file per scene.
+`subagent_scope.py` is the grant; `gateway_multiuser.py` is one
+independently minted warrant per session.
 
 ```bash
 python cron_warrant.py

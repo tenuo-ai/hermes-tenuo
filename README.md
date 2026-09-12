@@ -4,12 +4,6 @@
 
 **Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
 
-A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant sits in front of every
-Hermes tool call. Each call is checked at the argument level before the
-handler runs. A `delegate_task` child is a grant from the parent warrant,
-verified as a chain. Gateway users each carry their own warrant. Keys,
-warrants, and decisions stay local.
-
 See it without installing Hermes or talking to a model:
 
 ```bash
@@ -18,44 +12,55 @@ hermes-tenuo demo
 ```
 
 ```text
-Give each Hermes agent a signed, expiring permission slip.
-Nothing outside it runs. No Hermes process, no API key.
+A nightly job gets a permission slip: read /data/reports,
+write /tmp/nightly, then stop. Nothing else runs.
+No Hermes process, no API key.
 
 == Cron ==
-Nightly job: read /data/reports, write /tmp/nightly, then stop.
+The job does the work. Then it tries to leave the slip.
   ALLOW  read_file  path=/data/reports/q3.csv
   ALLOW  write_file  path=/tmp/nightly/report.md
   DENY   read_file  path=/etc/passwd
-         Constraint 'path' not satisfied: value does not match constraint
+         /etc/passwd is not under /data/reports
   DENY   terminal  command=ls
-         Tool 'terminal' is not authorized
+         terminal is not on the slip
+
+That slip is a Tenuo warrant: signed, expiring, checked before
+the handler runs. Same check, two more shapes:
 
 == delegate_task ==
-Orchestrator grants web_search to the researcher. The chain is verified.
+Same rule, after a handoff. The researcher was only granted web_search.
   [orchestrator] ALLOW  read_file  path=/data/input.csv
   [orchestrator] ALLOW  delegate_task  task=research q3  context=web_search only
   [researcher] ALLOW  web_search  query=AI papers 2026
   [researcher] DENY   write_file  path=/data/output/x.md
-         Tool 'write_file' is not authorized
+         the researcher was not granted write_file
 
 == Gateway ==
-Analyst and viewer on the same server, different warrants.
+Same server, two slips.
   [analyst] ALLOW  read_file  path=/data/reports/q1.csv
   [analyst] DENY   write_file  path=/data/output/x.txt
-         Tool 'write_file' is not authorized
+         write_file is not on the analyst's slip
   [viewer] ALLOW  read_file  path=/data/public/faq.md
   [viewer] DENY   read_file  path=/data/reports/q1.csv
-         Constraint 'path' not satisfied: value does not match constraint
+         /data/reports is not on the viewer's slip
 ```
 
-That `DENY` line is the tool result Hermes gives the model. The handler
-never runs. For a recorded session with a real model and a planted prompt
-injection, see [docs/walkthrough.md](docs/walkthrough.md).
+A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant is that slip. Each Hermes
+tool call is checked against it — tool name and arguments — before the
+handler runs. A `delegate_task` child only gets what the parent granted. A
+gateway user carries their own slip. Keys and decisions stay local.
+
+The plugin returns the denial as the tool result, so the model sees why
+the handler never ran:
 
 ```text
 read_file  path=/etc/passwd
 Constraint 'path' not satisfied: value does not match constraint
 ```
+
+For a recorded session with a real model and a planted prompt injection,
+see [docs/walkthrough.md](docs/walkthrough.md).
 
 ## Install into Hermes
 
