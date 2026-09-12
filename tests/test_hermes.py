@@ -1,0 +1,546 @@
+"""
+Tests for tenuo.hermes — HermesGuard
+
+Covers:
+- Audit-only mode (no warrant): all calls pass through, audit events still fire
+- Enforcement mode: authorized calls pass, unauthorized calls block
+- Expired warrant blocks
+- Missing signing key with warrant: passthrough with warning
+- Session warrant registry: per-session warrant isolation (gateway)
+- delegate_task child warrant: children get child_warrant, not parent root
+- Primary session heuristic: first session_id is primary, others are children
+- on_denial="log" mode: denials are logged but not blocked
+- Hermes hook signature compatibility: kwargs-based hook interface
+- Post-tool-call audit events fire for every call including audit-only mode
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from hermes_tenuo.hermes_guard import HermesAuditEvent, HermesGuard
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def root_key():
+    from tenuo import SigningKey
+    return SigningKey.generate()
+
+
+@pytest.fixture
+def agent_key():
+    from tenuo import SigningKey
+    return SigningKey.generate()
+
+
+@pytest.fixture
+def basic_warrant(root_key, agent_key):
+    """Warrant allowing read_file and web_search."""
+    from tenuo import Warrant, Subpath, Wildcard
+    return (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("read_file", path=Subpath("/data"))
+        .capability("web_search", query=Wildcard())
+        .ttl(3600)
+        .mint(root_key)
+    )
+
+
+@pytest.fixture
+def child_warrant(root_key, agent_key):
+    """Narrow warrant for subagents: web_search only."""
+    from tenuo import Warrant, Wildcard
+    return (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("web_search", query=Wildcard())
+        .ttl(600)
+        .mint(root_key)
+    )
+
+
+@pytest.fixture
+def guard_audit_only():
+    """HermesGuard with no warrant — audit-only mode."""
+    return HermesGuard()
+
+
+@pytest.fixture
+def guard_enforcing(basic_warrant, agent_key, root_key):
+    """HermesGuard in full enforcement mode."""
+    return HermesGuard(
+        warrant=basic_warrant,
+        signing_key=agent_key,
+        trusted_roots=[root_key.public_key],
+    )
+
+
+@pytest.fixture
+def guard_with_child(basic_warrant, child_warrant, agent_key, root_key):
+    """HermesGuard with child_warrant for subagent isolation."""
+    return HermesGuard(
+        warrant=basic_warrant,
+        signing_key=agent_key,
+        child_warrant=child_warrant,
+        trusted_roots=[root_key.public_key],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Audit-only mode
+# ---------------------------------------------------------------------------
+
+
+class TestAuditOnlyMode:
+
+    def test_pre_tool_call_passes_through_when_no_warrant(self, guard_audit_only):
+        result = guard_audit_only.pre_tool_call("terminal", {"command": "rm -rf /"})
+        assert result is None
+
+    def test_all_tools_pass_in_audit_mode(self, guard_audit_only):
+        for tool in ["terminal", "write_file", "read_file", "web_search", "delegate_task"]:
+            assert guard_audit_only.pre_tool_call(tool, {}) is None
+
+    def test_post_tool_call_emits_enforcement_in_audit_mode(self, guard_audit_only):
+        mock_cp = MagicMock()
+        guard_audit_only._control_plane = mock_cp
+        guard_audit_only.post_tool_call("web_search", {"query": "test"}, '{"result": "ok"}')
+        mock_cp.emit_for_enforcement.assert_called_once()
+        call_args = mock_cp.emit_for_enforcement.call_args[0][0]
+        assert call_args.allowed is True
+        assert call_args.tool == "web_search"
+
+    def test_audit_callback_fires_in_audit_mode(self, guard_audit_only):
+        events = []
+        guard_audit_only._audit_callback = events.append
+        guard_audit_only.post_tool_call("read_file", {"path": "/data/x"}, '{}', duration_ms=12)
+        assert len(events) == 1
+        assert events[0].tool == "read_file"
+        assert events[0].decision == "ALLOW"
+        assert events[0].duration_ms == 12
+
+
+# ---------------------------------------------------------------------------
+# Enforcement mode
+# ---------------------------------------------------------------------------
+
+
+class TestEnforcementMode:
+
+    def test_authorized_call_returns_none(self, guard_enforcing):
+        result = guard_enforcing.pre_tool_call(
+            "read_file", {"path": "/data/report.txt"}, session_id="s1"
+        )
+        # Establish primary session
+        guard_enforcing._primary_session_id = "s1"
+        result = guard_enforcing.pre_tool_call(
+            "read_file", {"path": "/data/report.txt"}, session_id="s1"
+        )
+        assert result is None
+
+    def test_unauthorized_tool_returns_block(self, guard_enforcing):
+        guard_enforcing._primary_session_id = "s1"
+        result = guard_enforcing.pre_tool_call(
+            "terminal", {"command": "ls"}, session_id="s1"
+        )
+        assert result is not None
+        assert result["action"] == "block"
+        assert "terminal" in result["message"].lower() or result["message"]
+
+    def test_path_constraint_violation_blocks(self, guard_enforcing):
+        guard_enforcing._primary_session_id = "s1"
+        result = guard_enforcing.pre_tool_call(
+            "read_file", {"path": "/etc/passwd"}, session_id="s1"
+        )
+        assert result is not None
+        assert result["action"] == "block"
+
+    def test_audit_callback_fires_on_allow(self, guard_enforcing):
+        events = []
+        guard_enforcing._audit_callback = events.append
+        guard_enforcing._primary_session_id = "s1"
+        guard_enforcing.pre_tool_call(
+            "read_file", {"path": "/data/ok.txt"}, session_id="s1"
+        )
+        assert any(e.decision == "ALLOW" for e in events)
+
+    def test_audit_callback_fires_on_deny(self, guard_enforcing):
+        events = []
+        guard_enforcing._audit_callback = events.append
+        guard_enforcing._primary_session_id = "s1"
+        guard_enforcing.pre_tool_call(
+            "terminal", {"command": "ls"}, session_id="s1"
+        )
+        assert any(e.decision == "DENY" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Missing signing key
+# ---------------------------------------------------------------------------
+
+
+class TestMissingSigningKey:
+
+    def test_warrant_without_signing_key_hard_blocks(self, basic_warrant, root_key):
+        """Missing signing key returns a hard block — not a silent pass-through.
+
+        A misconfigured deployment that silently allows all calls defeats the
+        purpose of running Tenuo. Operators must notice the misconfiguration
+        immediately rather than discovering it after the fact in audit logs.
+        """
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=None,  # no key
+            trusted_roots=[root_key.public_key],
+        )
+        guard._primary_session_id = "s1"
+        result = guard.pre_tool_call("terminal", {"command": "rm -rf /"}, session_id="s1")
+        assert result is not None
+        assert result["action"] == "block"
+        assert "TENUO_SIGNING_KEY" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Expired warrant
+# ---------------------------------------------------------------------------
+
+
+class TestExpiredWarrant:
+
+    def test_expired_warrant_blocks(self, root_key, agent_key):
+        from tenuo import Warrant, Wildcard
+        expired_warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("read_file", path=Wildcard())
+            .ttl(1)  # 1 second
+            .mint(root_key)
+        )
+        import time
+        time.sleep(2)
+
+        guard = HermesGuard(
+            warrant=expired_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+        )
+        guard._primary_session_id = "s1"
+        result = guard.pre_tool_call("read_file", {"path": "/data/x"}, session_id="s1")
+        assert result is not None
+        assert result["action"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# on_denial="log" mode
+# ---------------------------------------------------------------------------
+
+
+class TestLogMode:
+
+    def test_log_mode_does_not_block_on_denial(self, basic_warrant, agent_key, root_key):
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+            on_denial="log",
+        )
+        guard._primary_session_id = "s1"
+        result = guard.pre_tool_call("terminal", {"command": "ls"}, session_id="s1")
+        assert result is None  # not blocked in log mode
+
+    def test_log_mode_still_emits_audit(self, basic_warrant, agent_key, root_key):
+        events = []
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+            on_denial="log",
+            audit_callback=events.append,
+        )
+        guard._primary_session_id = "s1"
+        guard.pre_tool_call("terminal", {"command": "ls"}, session_id="s1")
+        assert any(e.decision == "DENY" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Session warrant registry (gateway multi-user)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionWarrantRegistry:
+
+    def test_set_session_warrant_is_used_for_that_session(
+        self, basic_warrant, child_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(trusted_roots=[root_key.public_key])
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        warrant, key = guard._resolve_warrant("alice")
+        assert warrant is basic_warrant
+
+    def test_different_sessions_get_different_warrants(
+        self, basic_warrant, child_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(trusted_roots=[root_key.public_key])
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        guard.set_session_warrant("bob", child_warrant, agent_key)
+        alice_warrant, _ = guard._resolve_warrant("alice")
+        bob_warrant, _ = guard._resolve_warrant("bob")
+        assert alice_warrant is basic_warrant
+        assert bob_warrant is child_warrant
+
+    def test_clear_session_warrant_removes_it(
+        self, basic_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+        )
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        guard.clear_session_warrant("alice")
+        warrant, _ = guard._resolve_warrant("alice")
+        # Falls back to static warrant
+        assert warrant is basic_warrant
+
+    def test_on_session_end_clears_warrant(self, basic_warrant, agent_key, root_key):
+        guard = HermesGuard(trusted_roots=[root_key.public_key])
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        guard.on_session_end("alice")
+        with guard._session_lock:
+            assert "alice" not in guard._session_warrants
+
+    def test_set_session_warrant_stores_parent_for_chain(
+        self, basic_warrant, child_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(trusted_roots=[root_key.public_key])
+        guard.set_session_warrant(
+            "child", child_warrant, agent_key, parent_warrant=basic_warrant
+        )
+        with guard._session_lock:
+            assert guard._session_warrant_chains["child"] is basic_warrant
+        guard.clear_session_warrant("child")
+        with guard._session_lock:
+            assert "child" not in guard._session_warrant_chains
+
+
+# ---------------------------------------------------------------------------
+# delegate_task child warrant heuristic
+# ---------------------------------------------------------------------------
+
+
+class TestChildWarrantHeuristic:
+
+    def test_first_session_is_primary(self, guard_with_child):
+        guard_with_child.pre_tool_call("web_search", {"query": "test"}, session_id="parent")
+        assert guard_with_child._primary_session_id == "parent"
+
+    def test_child_session_without_pending_gets_static_warrant(self, guard_with_child, basic_warrant, child_warrant):
+        """A session with a different session_id but NO pending child warrant is a
+        concurrent parent session — it gets the static parent warrant, not _child_warrant.
+        Giving it _child_warrant without explicit delegation is a confused-deputy risk.
+        """
+        guard_with_child._primary_session_id = "parent"
+        warrant, _ = guard_with_child._resolve_warrant("child-1")
+        assert warrant is basic_warrant  # not child_warrant — no pending warrant registered
+
+    def test_child_with_pending_warrant_gets_attenuated_warrant(
+        self, guard_with_child, child_warrant
+    ):
+        """After delegate_task fires (pending warrants registered), child gets
+        the attenuated warrant — not the parent's full warrant.
+        """
+        guard_with_child._primary_session_id = "parent"
+        # Simulate delegate_task pre-registering a pending child warrant
+        with guard_with_child._pending_lock:
+            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        warrant, _ = guard_with_child._resolve_warrant("child-1")
+        assert warrant is child_warrant  # claimed from pending
+
+    def test_child_cannot_call_parent_only_tools_when_pending(
+        self, guard_with_child, child_warrant, agent_key, root_key
+    ):
+        """After delegation, child warrant (web_search only) blocks read_file."""
+        guard_with_child._primary_session_id = "parent"
+        # Register pending child warrant (as delegate_task interception would)
+        with guard_with_child._pending_lock:
+            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        result = guard_with_child.pre_tool_call(
+            "read_file", {"path": "/data/x"}, session_id="child-1"
+        )
+        assert result is not None
+        assert result["action"] == "block"
+
+    def test_child_can_call_allowed_tools(self, guard_with_child):
+        """Child warrant allows web_search."""
+        guard_with_child._primary_session_id = "parent"
+        result = guard_with_child.pre_tool_call(
+            "web_search", {"query": "hermes agent"}, session_id="child-1"
+        )
+        assert result is None
+
+    def test_parent_session_not_treated_as_child(
+        self, guard_with_child, basic_warrant
+    ):
+        """Primary session should use the parent warrant, not child_warrant."""
+        guard_with_child._primary_session_id = "parent"
+        warrant, _ = guard_with_child._resolve_warrant("parent")
+        assert warrant is basic_warrant
+
+    def test_explicit_session_warrant_overrides_heuristic(
+        self, guard_with_child, basic_warrant, agent_key
+    ):
+        """set_session_warrant overrides child heuristic for that session."""
+        guard_with_child._primary_session_id = "parent"
+        guard_with_child.set_session_warrant("child-explicit", basic_warrant, agent_key)
+        warrant, _ = guard_with_child._resolve_warrant("child-explicit")
+        assert warrant is basic_warrant  # explicit, not child_warrant
+
+    def test_delegate_task_pre_registers_child_warrants(
+        self, child_warrant, agent_key, root_key
+    ):
+        """pre_tool_call for delegate_task registers children only when authorized."""
+        from tenuo import Warrant, Wildcard
+        # Warrant that explicitly includes delegate_task
+        parent_warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("delegate_task", tasks=Wildcard())
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        guard = HermesGuard(
+            warrant=parent_warrant,
+            signing_key=agent_key,
+            child_warrant=child_warrant,
+            trusted_roots=[root_key.public_key],
+        )
+        guard._primary_session_id = "parent"
+        result = guard.pre_tool_call(
+            "delegate_task",
+            {"tasks": ["research A", "research B"]},
+            session_id="parent",
+        )
+        # delegate_task is authorized — children should be registered
+        assert result is None
+        with guard._pending_lock:
+            assert ("parent", 0) in guard._pending_child_warrants
+            assert ("parent", 1) in guard._pending_child_warrants
+
+    def test_delegate_task_denied_does_not_poison_pending_slots(
+        self, guard_with_child
+    ):
+        """If delegate_task is blocked, no child warrants should be pre-registered.
+
+        Pre-registering before authorization would allow a denied delegation to
+        poison pending slots — the next heuristic child session could claim a
+        warrant with no valid parent delegation ever having occurred.
+        """
+        guard_with_child._primary_session_id = "parent"
+        # delegate_task is NOT in basic_warrant → enforcement blocks it
+        result = guard_with_child.pre_tool_call(
+            "delegate_task",
+            {"tasks": [{"goal": "research A"}]},
+            session_id="parent",
+        )
+        assert result is not None
+        assert result["action"] == "block"
+        # No children should have been registered
+        with guard_with_child._pending_lock:
+            assert ("parent", 0) not in guard_with_child._pending_child_warrants
+
+
+# ---------------------------------------------------------------------------
+# Hook signature compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestHookSignatureCompatibility:
+    """Verify Hermes hook signatures work with **kwargs extras that Hermes may add."""
+
+    def test_pre_tool_call_accepts_extra_kwargs(self, guard_audit_only):
+        # Hermes may pass extra kwargs in future versions
+        result = guard_audit_only.pre_tool_call(
+            "web_search", {"query": "x"},
+            task_id="t1", session_id="s1", tool_call_id="tc1",
+        )
+        assert result is None
+
+    def test_post_tool_call_accepts_duration_ms(self, guard_audit_only):
+        mock_cp = MagicMock()
+        guard_audit_only._control_plane = mock_cp
+        guard_audit_only.post_tool_call(
+            "web_search", {"query": "x"}, '{"ok": true}',
+            task_id="t1", session_id="s1", tool_call_id="tc1", duration_ms=42,
+        )
+        mock_cp.emit_for_enforcement.assert_called_once()
+
+    def test_on_session_end_accepts_extra_kwargs(self, guard_audit_only):
+        # Should not raise even with unknown kwargs
+        guard_audit_only.on_session_end("s1")
+
+    def test_on_session_start_noop_when_no_child_warrant(
+        self, guard_audit_only
+    ):
+        guard_audit_only.on_session_start("child", parent_session_id="parent")
+        # No warrant configured — nothing registered
+        with guard_audit_only._session_lock:
+            assert "child" not in guard_audit_only._session_warrants
+
+    def test_no_crash_when_control_plane_none(self, basic_warrant, agent_key, root_key):
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+        )
+        guard._control_plane = None
+        guard._primary_session_id = "s1"
+        guard.post_tool_call("web_search", {"query": "x"}, '{}', session_id="s1")
+
+
+class TestPluginGuardGatewayProxy:
+    def test_set_session_warrant_proxies_to_inner_guard(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner)
+        pg.set_session_warrant("alice", warrant, agent_key)
+        w, k = inner._resolve_warrant("alice")
+        assert w is warrant
+        assert k is agent_key
+
+    def test_clear_session_warrant_proxies(self):
+        from tenuo import SigningKey, Warrant, Wildcard
+        from hermes_tenuo._guard import PluginGuard
+
+        root_key = SigningKey.generate()
+        agent_key = SigningKey.generate()
+        warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
+        )
+        inner = HermesGuard(trusted_roots=[root_key.public_key])
+        pg = PluginGuard(inner)
+        pg.set_session_warrant("alice", warrant, agent_key)
+        pg.clear_session_warrant("alice")
+        with inner._session_lock:
+            assert "alice" not in inner._session_warrants

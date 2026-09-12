@@ -1,0 +1,8 @@
+{
+  "name": "hermes-tenuo",
+  "description": "Cryptographic warrant enforcement for Hermes tool calls",
+  "author": "Tenuo AI",
+  "tags": ["security", "authorization", "warrants", "tenuo"],
+  "repo": "tenuo-ai/hermes-tenuo",
+  "ref": "REPLACE_WITH_RELEASE_COMMIT_SHA"
+}

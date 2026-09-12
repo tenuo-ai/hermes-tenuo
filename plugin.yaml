@@ -1,0 +1,25 @@
+name: hermes-tenuo
+version: 0.1.0
+description: >
+  Per-call authorization for Hermes Agent tool calls.
+  Each call is checked against a signed, expiring warrant before the
+  handler runs, including argument constraints.
+author: Tenuo AI
+license: Apache-2.0
+homepage: https://github.com/tenuo-ai/hermes-tenuo
+kind: standalone
+requires_hermes: ">=0.20"
+tags: [security, authorization, warrants, tenuo]
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - on_session_start
+  - on_session_end
+  - subagent_start
+requires_env:
+  - name: TENUO_WARRANT
+    description: "Base64-encoded warrant or path to a .warrant file. Required to activate enforcement (or set plugins.entries.hermes-tenuo.warrant)."
+    required: false
+  - name: TENUO_SIGNING_KEY
+    description: "Base64-encoded Ed25519 signing key matching the warrant holder (proof-of-possession)."
+    required: false
