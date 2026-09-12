@@ -8,6 +8,9 @@ author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
 kind: standalone
+# Hermes never installs plugin pip dependencies; `hermes plugins install` prints this list.
+python_dependencies:
+  - "tenuo>=0.3.0"
 requires_hermes: ">=0.20"
 tags: [security, authorization, warrants, tenuo]
 provides_hooks:
