@@ -292,18 +292,24 @@ class TestHookRegistration:
             assert ctx.registered("on_session_start")
             assert ctx.registered("on_session_end")
 
-    def test_unconfigured_register_warns_and_registers_nothing(
+    def test_unconfigured_register_warns_and_enforces_nothing(
         self, parent_warrant, agent_key, root_key, caplog
     ):
-        """Enabled-but-empty must be loud: WARNING, no enforcement hooks."""
+        """Enabled-but-empty must be loud (WARNING) and must not block anything.
+
+        The declared hooks are still registered, as no-ops, so the manifest
+        stays truthful for `hermes plugins list` and the catalog validator.
+        """
         import logging
         with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
             with _plugin_ctx(
                 _warrant_b64(parent_warrant), agent_key, root_key,
                 env_overrides={"TENUO_WARRANT": ""},
             ) as (ctx, _):
-                assert not ctx.registered("pre_tool_call")
-                assert not ctx.registered("subagent_start")
+                assert ctx.registered("pre_tool_call")
+                assert ctx.registered("subagent_start")
+                (pre,) = ctx.hooks["pre_tool_call"]
+                assert pre("terminal", {"command": "ls"}, session_id="s1") is None
         assert any("NOT enforced" in r.getMessage() for r in caplog.records)
 
 
@@ -653,3 +659,21 @@ class TestProfileAwareWarrantPath:
         )
         assert str(results[0]).startswith(str(profile_a))
         assert str(results[1]).startswith(str(profile_b))
+
+
+class TestUnconfiguredInstall:
+    """Enabled but no warrant: every declared hook is registered, as a no-op."""
+
+    def test_unconfigured_registers_declared_hooks_as_noops(self, monkeypatch):
+        import yaml
+        from pathlib import Path
+        import hermes_tenuo
+        monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: {})
+        ctx = MockCtx()
+        hermes_tenuo.register(ctx)
+        declared = yaml.safe_load((Path(hermes_tenuo.__file__).resolve().parents[1] / "plugin.yaml").read_text())["provides_hooks"]
+        for name in declared:
+            assert ctx.registered(name), name
+        # and they enforce nothing
+        (fn,) = ctx.hooks["pre_tool_call"]
+        assert fn("terminal", {"command": "ls"}, session_id="s1") is None
