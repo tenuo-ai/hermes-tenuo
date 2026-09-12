@@ -9,13 +9,18 @@ from tenuo import SigningKey, Subpath, Warrant, Wildcard
 from hermes_tenuo.hermes_guard import HermesGuard
 
 # Lines CI and the README both pin. Do not reword without updating both.
+# Denial lines print the real tool result first, then an editorial gloss after "←".
 CRON_ALLOW = "ALLOW  read_file  path=/data/reports/q3.csv"
 CRON_DENY_PASSWD = "DENY   read_file  path=/etc/passwd"
 CRON_DENY_TERMINAL = "DENY   terminal  command=ls"
 CHILD_ALLOW_SEARCH = "[researcher] ALLOW  web_search  query=AI papers 2026"
 CHILD_DENY_WRITE = "[researcher] DENY   write_file  path=/data/output/x.md"
-CHILD_SCENE = "Orchestrator grants web_search to the researcher. The chain is verified."
+CHILD_SCENE = "Same rule, after a handoff. The researcher was only granted web_search."
 VIEWER_DENY_REPORTS = "[viewer] DENY   read_file  path=/data/reports/q1.csv"
+CRON_WHY_OUTSIDE_DIR = "/etc/passwd is not under /data/reports"
+CRON_WHY_TERMINAL = "terminal is not on the slip"
+CHILD_WHY_WRITE = "the researcher was not granted write_file"
+VIEWER_WHY_REPORTS = "/data/reports is not on the viewer's slip"
 
 
 def _args_label(args: dict[str, Any]) -> str:
@@ -38,6 +43,7 @@ def _call(
     *,
     session_id: str = "",
     tag: str = "",
+    why: str = "",
 ) -> Optional[dict[str, Any]]:
     result = guard.pre_tool_call(tool, args, session_id=session_id)
     status = "DENY  " if result else "ALLOW "
@@ -49,18 +55,21 @@ def _call(
     lines.append(line.rstrip())
     if result:
         message = str(result.get("message") or "").strip()
-        if message:
+        if message and why:
+            lines.append(f"         {message}  ← {why}")
+        elif message:
             lines.append(f"         {message}")
     return result
 
 
 def render_demo() -> str:
     lines: list[str] = [
-        "Give each Hermes agent a signed, expiring permission slip.",
-        "Nothing outside it runs. No Hermes process, no API key.",
+        "A nightly job gets a permission slip: read /data/reports,",
+        "write /tmp/nightly, then stop. Nothing else runs.",
+        "No Hermes process, no API key.",
         "",
         "== Cron ==",
-        "Nightly job: read /data/reports, write /tmp/nightly, then stop.",
+        "The job does the work. Then it tries to leave the slip.",
     ]
 
     control = SigningKey.generate()
@@ -88,14 +97,31 @@ def render_demo() -> str:
         {"path": "/tmp/nightly/report.md", "content": "# Report"},
         session_id="cron",
     )
-    _call(lines, cron, "read_file", {"path": "/etc/passwd"}, session_id="cron")
-    _call(lines, cron, "terminal", {"command": "ls"}, session_id="cron")
+    _call(
+        lines,
+        cron,
+        "read_file",
+        {"path": "/etc/passwd"},
+        session_id="cron",
+        why=CRON_WHY_OUTSIDE_DIR,
+    )
+    _call(
+        lines,
+        cron,
+        "terminal",
+        {"command": "ls"},
+        session_id="cron",
+        why=CRON_WHY_TERMINAL,
+    )
 
     lines.extend(
         [
             "",
+            "That slip is a Tenuo warrant: signed, expiring, checked before",
+            "the handler runs. Same check, two more shapes:",
+            "",
             "== delegate_task ==",
-            "Orchestrator grants web_search to the researcher. The chain is verified.",
+            CHILD_SCENE,
         ]
     )
     orch_key = SigningKey.generate()
@@ -160,13 +186,14 @@ def render_demo() -> str:
         {"path": "/data/output/x.md", "content": "..."},
         session_id="researcher",
         tag="researcher",
+        why=CHILD_WHY_WRITE,
     )
 
     lines.extend(
         [
             "",
             "== Gateway ==",
-            "Analyst and viewer on the same server, different warrants.",
+            "Same server, two slips.",
         ]
     )
     gw_key = SigningKey.generate()
@@ -203,6 +230,7 @@ def render_demo() -> str:
         {"path": "/data/output/x.txt", "content": "hi"},
         session_id="session-analyst",
         tag="analyst",
+        why="write_file is not on the analyst's slip",
     )
     _call(
         lines,
@@ -219,6 +247,7 @@ def render_demo() -> str:
         {"path": "/data/reports/q1.csv"},
         session_id="session-viewer",
         tag="viewer",
+        why=VIEWER_WHY_REPORTS,
     )
     lines.append("")
     return "\n".join(lines)
