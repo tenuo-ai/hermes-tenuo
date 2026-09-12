@@ -46,10 +46,10 @@ def _env_secret(name: str) -> Optional[str]:
 
 
 def _get_plugin_entry(ctx: Any) -> dict:
-    """Read plugins.entries.hermes-tenuo from Hermes config.yaml."""
+    """Read plugins.entries.hermes-tenuo from Hermes config (see ``_home.load_hermes_config``)."""
     try:
-        from hermes_cli.config import load_config
-        config = load_config() or {}
+        from hermes_tenuo._home import load_hermes_config
+        config = load_hermes_config()
         plugins_cfg = config.get("plugins") or {}
         entries = plugins_cfg.get("entries") or {}
         entry = entries.get(_PLUGIN_KEY) or {}

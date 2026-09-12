@@ -32,12 +32,9 @@ _DEFAULT_REL = Path("tenuo") / "audit.jsonl"
 
 
 def default_audit_path() -> Path:
-    """``$HERMES_HOME/tenuo/audit.jsonl``, profile-aware when Hermes is importable."""
-    try:
-        from hermes_constants import get_hermes_home
-        return Path(get_hermes_home()) / _DEFAULT_REL
-    except Exception:
-        return Path(os.path.expanduser("~/.hermes")) / _DEFAULT_REL
+    """``$HERMES_HOME/tenuo/audit.jsonl`` (profile-aware inside Hermes; see ``_home.hermes_home``)."""
+    from hermes_tenuo._home import hermes_home
+    return hermes_home() / _DEFAULT_REL
 
 
 class LocalAuditLog:

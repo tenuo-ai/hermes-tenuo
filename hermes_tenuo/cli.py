@@ -174,29 +174,51 @@ def _mint_local(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Show current plugin configuration status."""
-    checks = [
-        ("TENUO_WARRANT",      "Warrant"),
-        ("TENUO_SIGNING_KEY",  "Signing key"),
-        ("TENUO_TRUSTED_ROOT", "Trusted root"),
+    """Show what the plugin will load, and where each value comes from."""
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry
+    from hermes_tenuo._home import config_path, hermes_cli_available
+
+    cfg_path = config_path()
+    entry = _get_plugin_entry(None)
+    via = "hermes_cli" if hermes_cli_available() else "plain read"
+    print(f"  Hermes home:  {cfg_path.parent}")
+    print(f"  Config file:  {cfg_path} ({'found, ' + via if cfg_path.is_file() else 'not found'})")
+    print()
+
+    signing_env = entry.get("signing_key_env", "TENUO_SIGNING_KEY")
+    rows = [
+        ("Warrant", entry.get("warrant"), _env_secret("TENUO_WARRANT"), "warrant", "TENUO_WARRANT"),
+        ("Signing key", None, _env_secret(signing_env), None, signing_env),
+        ("Trusted root", entry.get("trusted_root"), _env_secret("TENUO_TRUSTED_ROOT"), "trusted_root", "TENUO_TRUSTED_ROOT"),
     ]
     all_required = True
-    for env, label in checks:
-        val = os.environ.get(env)
-        required = "optional" not in label.lower()
-        if val:
-            print(f"  ✓  {label:30} set")
+    for label, cfg_val, env_val, cfg_key, env_name in rows:
+        if cfg_val:
+            source = f"config: {cfg_key}"
+            if isinstance(cfg_val, str) and cfg_val.startswith(("/", "~", ".")):
+                source += f" -> {os.path.expanduser(cfg_val)}"
+            print(f"  ✓  {label:14} set  ({source})")
+        elif env_val:
+            print(f"  ✓  {label:14} set  (env: {env_name})")
         else:
-            marker = "✗" if required else "—"
-            print(f"  {marker}  {label:30} not set")
-            if required:
-                all_required = False
+            hint = f"{cfg_key} or ${env_name}" if cfg_key else f"${env_name}"
+            print(f"  ✗  {label:14} not set  ({hint})")
+            all_required = False
 
     if all_required:
         print("\n  Ready for enforcement.")
     else:
         print("\n  Missing required config — enforcement will pass through.")
     return 0
+
+
+def _warrant_holder(warrant: Any):
+    """The holder public key of a warrant across tenuo builds (``holder_key`` since 0.3)."""
+    for attr in ("holder_key", "authorized_holder", "holder"):
+        value = getattr(warrant, attr, None)
+        if value is not None and hasattr(value, "to_bytes"):
+            return value
+    return None
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -244,9 +266,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 3. Hermes config — is the plugin enabled?
     config_entry: dict = {}
+    from hermes_tenuo._home import config_path, hermes_cli_available, load_hermes_config
+    if not hermes_cli_available():
+        note(f"hermes_cli not importable here — reading {config_path()} directly")
     try:
-        from hermes_cli.config import load_config
-        config = load_config() or {}
+        config = load_hermes_config()
         plugins_cfg = config.get("plugins") or {}
         enabled = plugins_cfg.get("enabled") or []
         check(
@@ -259,8 +283,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             note(f"plugins.entries.hermes-tenuo has {len(config_entry)} keys")
         else:
             note("plugins.entries.hermes-tenuo empty (falling back to env vars)")
-    except ImportError:
-        note("hermes_cli not importable here — skipping config.yaml checks")
+    except Exception as exc:
+        note(f"could not read Hermes config ({exc})")
 
     # 4. Configured? Enabled-but-empty is a silent no-op at runtime.
     from hermes_tenuo._config import _env_secret, load_warrant
@@ -316,8 +340,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             try:
                 from tenuo_core import SigningKey
                 key = SigningKey.from_bytes(base64.b64decode(signing_raw))
-                holder = getattr(warrant, "holder", None)
-                if holder is not None and key.public_key.to_bytes() == holder.to_bytes():
+                holder = _warrant_holder(warrant)
+                if holder is None:
+                    note("could not read the warrant holder from this tenuo build — holder match not checked")
+                elif key.public_key.to_bytes() == holder.to_bytes():
                     check(True, "signing key matches warrant holder")
                 else:
                     check(
@@ -399,17 +425,35 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant is valid and show its capabilities."""
-    from hermes_tenuo._config import _env_secret
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry
+    from hermes_tenuo._home import hermes_home
+
     warrant_raw = _env_secret("TENUO_WARRANT")
+    source = "env: TENUO_WARRANT"
     if not warrant_raw:
-        # Try reading from file
-        default_path = os.path.expanduser("~/.hermes/tenuo/warrant")
-        if os.path.exists(default_path):
-            with open(default_path) as f:
-                warrant_raw = f.read().strip()
+        cfg_val = _get_plugin_entry(None).get("warrant")
+        if cfg_val:
+            warrant_raw, source = str(cfg_val), "config: warrant"
+            if warrant_raw.startswith(("/", "~", ".")):
+                path = os.path.expanduser(warrant_raw)
+                source = f"config: warrant -> {path}"
+                if not os.path.exists(path):
+                    print(f"error: warrant path from config does not exist: {path}", file=sys.stderr)
+                    return 1
+                with open(path) as f:
+                    warrant_raw = f.read().strip()
+    if not warrant_raw:
+        default_path = hermes_home() / "tenuo" / "warrant"
+        if default_path.exists():
+            warrant_raw = default_path.read_text().strip()
+            source = f"file: {default_path}"
         else:
-            print("error: TENUO_WARRANT not set and ~/.hermes/tenuo/warrant not found", file=sys.stderr)
+            print(
+                f"error: no warrant found (TENUO_WARRANT, plugins.entries.hermes-tenuo.warrant, or {default_path})",
+                file=sys.stderr,
+            )
             return 1
+    print(f"Source:      {source}")
 
     try:
         from tenuo_core import Warrant
