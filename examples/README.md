@@ -13,4 +13,4 @@ python subagent_scope.py
 python gateway_multiuser.py
 ```
 
-Requires `tenuo>=0.2.3` and Hermes Agent 0.20.x.
+Requires `tenuo>=0.3.0` and Hermes Agent 0.20.x.

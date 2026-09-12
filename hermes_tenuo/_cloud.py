@@ -54,6 +54,11 @@ def parse_connect_token(token: str) -> Optional[ConnectTokenData]:
         # RawURL base64 (no padding) — add padding if needed
         padded = raw + "=" * (-len(raw) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        # tenuo>=0.3.0 requires connect-token version 1 (missing/v=0 rejected).
+        version = payload.get("v")
+        if version not in (1, "1"):
+            logger.debug("connect token missing or unsupported version: %r", version)
+            return None
         endpoint = payload.get("e", DEFAULT_BASE_URL)
         # Normalize: ensure /v1 suffix
         endpoint = endpoint.rstrip("/")

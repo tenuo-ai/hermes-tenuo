@@ -10,7 +10,7 @@ pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
 hermes plugins install tenuo-ai/hermes-tenuo
 ```
 
-Requires `tenuo>=0.2.3` (pulled in automatically) and **Hermes Agent 0.20.x**. Tested against upstream `NousResearch/hermes-agent` 0.20.x (August 2026) and the `tenuo-ai/hermes-agent` fork that includes `ToolRegistry.set_enforcement_fn`.
+Requires `tenuo>=0.3.0` (pulled in automatically) and **Hermes Agent 0.20.x**. Tested against upstream `NousResearch/hermes-agent` 0.20.x (September 2026) and the `tenuo-ai/hermes-agent` fork that includes `ToolRegistry.set_enforcement_fn`.
 
 To list this plugin in the Hermes community catalog, submit `docs/plugin-index-entry.json` with `ref` set to the install commit SHA.
 
@@ -110,6 +110,7 @@ Tracking issues / PRs: [hermes-agent#21849](https://github.com/NousResearch/herm
 - *Audit-only mode.* With `connect_token` set and no `warrant`, every tool call is logged to Tenuo Cloud but nothing is blocked. This is intentional for the warrant-builder on-ramp — **do not use in production without a warrant.**
 - *Denials are reported to the model, not the operator.* When a warrant blocks a tool, the message is delivered to the model as the tool result. Raise the `hermes_tenuo` log level to see operator-visible denial lines.
 - *Cloud approval vs hook timeout.* Hermes fails closed if `pre_tool_call` exceeds `plugins.hook_callback_timeout` (default 30s). Cloud approval polls for up to 5 minutes, so a slow human approval looks like a warrant denial unless you raise or disable that timeout. See **With Tenuo Cloud** below.
+- *Multiplexed profiles.* With `gateway.multiplex_profiles`, `TENUO_*` values in the process environment belong to the launch profile. Put per-profile keys in that profile's `.env`. An unscoped read is treated as unset, not as the launch profile's value.
 
 ## With Tenuo Cloud (optional)
 
@@ -169,6 +170,8 @@ HERMES_MANAGED_DIR=/opt/hermes/managed hermes chat
 ```
 
 Run `hermes-tenuo doctor` to confirm which warrant is loaded — managed-scope overrides show up in the config path reported there.
+
+Under `gateway.multiplex_profiles`, Tenuo credentials (`TENUO_WARRANT`, `TENUO_SIGNING_KEY`, `TENUO_CONNECT_TOKEN`, and the other `TENUO_*` names) are read through Hermes `get_secret`, not raw `os.environ`. Put them in the **routed profile's** `.env` or secret scope. A secondary profile does not inherit the launch profile's keys.
 
 ## License
 
