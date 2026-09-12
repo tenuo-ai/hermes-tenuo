@@ -164,3 +164,87 @@ class TestDoctorConfigured:
         assert "warrant loaded" not in out
         # May still fail other checks (entry point, enabled); configured itself passed
         assert "✓  plugin configured" in out or "plugin configured (warrant or connect_token)" in out
+
+
+class TestMintConstraints:
+    """--allow tool:arg=value produces real argument constraints, enforced locally."""
+
+    def test_parse_allow_value_types(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Exact, OneOf, Pattern, Subpath, Wildcard
+
+        tool, c, shown = parse_allow("read_file:path=/data")
+        assert tool == "read_file" and isinstance(c["path"], Subpath)
+        assert shown == {"path": "/data"}
+        _, c, _ = parse_allow("web_search:query=*")
+        assert isinstance(c["query"], Wildcard)
+        _, c, _ = parse_allow("web_search:query=acme*")
+        assert isinstance(c["query"], Pattern)
+        _, c, _ = parse_allow("git:action=status|diff|log")
+        assert isinstance(c["action"], OneOf)
+        _, c, _ = parse_allow("write_file:path=/tmp/out,mode=w")
+        assert isinstance(c["path"], Subpath) and isinstance(c["mode"], Exact)
+        tool, c, _ = parse_allow("web_search")
+        assert tool == "web_search" and c == {}
+
+    def test_parse_allow_rejects_malformed(self):
+        from hermes_tenuo.cli import parse_allow
+        with pytest.raises(ValueError):
+            parse_allow(":path=/data")
+        with pytest.raises(ValueError):
+            parse_allow("read_file:path")
+        with pytest.raises(ValueError):
+            parse_allow("read_file:=x")
+
+    def test_mint_malformed_allow_errors(self, capsys):
+        from hermes_tenuo.cli import cmd_mint
+        args = argparse.Namespace(ttl="1h", allow=["read_file:path"], output="env", trigger=None)
+        assert cmd_mint(args) != 0
+        assert "expected arg=value" in capsys.readouterr().err
+
+    def test_mint_full_output_lists_constraints(self, capsys):
+        from hermes_tenuo.cli import cmd_mint
+        args = argparse.Namespace(
+            ttl="1h", allow=["read_file:path=/data", "web_search"], output="full", trigger=None
+        )
+        assert cmd_mint(args) == 0
+        out = capsys.readouterr().out
+        assert "#   read_file  path=/data" in out
+        assert "#   web_search  (any arguments)" in out
+        assert "Cloud" not in out
+
+    def test_minted_constraints_are_enforced_by_guard(self, capsys):
+        """The warrant mint prints must deny out-of-scope arguments through HermesGuard."""
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.hermes_guard import HermesGuard
+        from tenuo import PublicKey, SigningKey, Warrant
+
+        args = argparse.Namespace(
+            ttl="1h",
+            allow=["read_file:path=/data", "web_search:query=*", "git:action=status|diff"],
+            output="env",
+            trigger=None,
+        )
+        assert cmd_mint(args) == 0
+        env = {}
+        for line in capsys.readouterr().out.splitlines():
+            if line.startswith("export "):
+                k, v = line[len("export "):].split("=", 1)
+                env[k] = v
+
+        guard = HermesGuard(
+            warrant=Warrant.from_bytes(base64.b64decode(env["TENUO_WARRANT"])),
+            signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
+            trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
+        )
+        call = lambda tool, a: guard.pre_tool_call(tool, a, session_id="s1")
+        assert call("read_file", {"path": "/data/q3.md"}) is None
+        assert call("web_search", {"query": "anything at all"}) is None
+        assert call("git", {"action": "diff"}) is None
+
+        denied_path = call("read_file", {"path": "/etc/passwd"})
+        assert denied_path and denied_path["action"] == "block"
+        denied_choice = call("git", {"action": "push"})
+        assert denied_choice and denied_choice["action"] == "block"
+        denied_tool = call("terminal", {"command": "ls"})
+        assert denied_tool and denied_tool["action"] == "block"

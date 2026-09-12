@@ -161,6 +161,26 @@ def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
         return None
 
 
+def get_audit_log_path(ctx: Any):
+    """Return the local audit log path, or None when disabled.
+
+    ``plugins.entries.hermes-tenuo.audit_log`` (or ``TENUO_AUDIT_LOG``) may be a
+    path, or ``false`` / ``off`` to disable. Unset means the default
+    ``$HERMES_HOME/tenuo/audit.jsonl``.
+    """
+    from hermes_tenuo.audit import default_audit_path
+    entry = _get_plugin_entry(ctx)
+    raw = entry.get("audit_log", None)
+    if raw is None:
+        raw = _env_secret("TENUO_AUDIT_LOG")
+    if raw is None or raw == "":
+        return default_audit_path()
+    if raw is False or (isinstance(raw, str) and raw.strip().lower() in ("false", "off", "no", "0", "none")):
+        return None
+    from pathlib import Path
+    return Path(str(raw)).expanduser()
+
+
 def get_on_denial(ctx: Any) -> str:
     """Return on_denial mode: 'block' (default) or 'log' (audit — log but don't block)."""
     entry = _get_plugin_entry(ctx)
