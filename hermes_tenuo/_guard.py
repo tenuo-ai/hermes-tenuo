@@ -16,6 +16,7 @@ logger = logging.getLogger("hermes_tenuo._guard")
 def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     """Read config and build the guard. Returns None if not configured."""
     from hermes_tenuo._config import (
+        get_audit_log_path,
         get_connect_token,
         get_child_warrant_raw,
         get_on_denial,
@@ -70,6 +71,14 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     # Load trigger_map for session warrant delivery
     trigger_map = _get_trigger_map(ctx)
 
+    # Local JSONL audit log: on by default, no Cloud needed.
+    audit_callback = None
+    audit_path = get_audit_log_path(ctx)
+    if audit_path is not None:
+        from hermes_tenuo.audit import LocalAuditLog
+        audit_callback = LocalAuditLog(audit_path)
+        logger.debug("hermes-tenuo: audit log at %s", audit_path)
+
     from hermes_tenuo.hermes_guard import HermesGuard
     guard = HermesGuard(
         warrant=warrant,
@@ -78,6 +87,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         trusted_roots=trusted_roots,
         approval_handler=approval_handler,
         on_denial=on_denial,
+        audit_callback=audit_callback,
     )
 
     return PluginGuard(guard, cloud_creds=cloud_creds, trigger_map=trigger_map)

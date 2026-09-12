@@ -6,14 +6,15 @@ tools and paths it needs, with a TTL that forces the job to finish on time.
 
 Usage:
     # 1. Install hermes-tenuo:
-    pip install hermes-tenuo
+    pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
 
-    # 2. Mint a warrant for this job (requires Tenuo Cloud):
-    export TENUO_WARRANT=$(hermes-tenuo mint \\
+    # 2. Mint a warrant for this job (local, no account needed). --output env
+    #    prints TENUO_WARRANT, TENUO_SIGNING_KEY and TENUO_TRUSTED_ROOT exports:
+    eval "$(hermes-tenuo mint --output env \\
       --ttl 1h \\
       --allow read_file:path=/data/reports \\
       --allow write_file:path=/tmp/nightly \\
-      --allow memory)
+      --allow memory)"
 
     # 3. Run the cron job:
     hermes run --task nightly_report

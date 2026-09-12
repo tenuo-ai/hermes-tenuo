@@ -6,17 +6,26 @@ Usage:
     hermes-tenuo mint --trigger trg-xyz --connect-token tc_...
     hermes-tenuo status
     hermes-tenuo verify
+    hermes-tenuo audit --last 20 --denied
 
-Local mint allows tools with open argument scope (Wildcard).
-For argument-level constraints (path restrictions, query allowlists, etc.),
-use the Cloud warrant builder — that is the authoritative source for
-constraint semantics and keeps constraint logic out of this CLI.
+Each --allow takes a tool name with optional argument constraints:
+
+    --allow web_search                      any arguments
+    --allow read_file:path=/data            path must stay under /data
+    --allow write_file:path=/tmp/out,mode=w exact mode, path under /tmp/out
+    --allow web_search:query=acme*          glob pattern
+    --allow git:action=status|diff|log      one of several values
+
+Value rules: ``*`` allows anything; ``a|b`` is a choice; a value containing
+``*`` or ``?`` is a glob; a value starting with ``/`` or ``~`` is a path
+prefix (Subpath, traversal-safe); anything else must match exactly.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import sys
 from typing import Any, Optional
@@ -132,44 +141,94 @@ def _print_cloud_mint_output(result: Any, output_format: str) -> None:
         print("# ── (the key registered with Cloud, matching the warrant holder)")
 
 
-def _mint_local(args: argparse.Namespace) -> int:
-    """Mint a warrant locally (no Cloud required).
+def _parse_constraint_value(value: str) -> Any:
+    """Map one ``arg=value`` string to a tenuo constraint (see module docstring)."""
+    from tenuo import Exact, OneOf, Pattern, Subpath, Wildcard
+    v = value.strip()
+    if v == "*":
+        return Wildcard()
+    if "|" in v:
+        choices = [c.strip() for c in v.split("|") if c.strip()]
+        if not choices:
+            raise ValueError("empty choice list")
+        return OneOf(choices)
+    if "*" in v or "?" in v:
+        return Pattern(v)
+    if v.startswith(("/", "~")):
+        return Subpath(os.path.expanduser(v))
+    return Exact(v)
 
-    Each --allow tool is permitted with Wildcard() on all arguments.
-    For argument-level constraints (path restrictions, query allowlists, etc.)
-    use the Cloud warrant builder — that is the authoritative source for
-    constraint semantics. Local mint is for dev/bootstrap use only.
+
+def parse_allow(spec: str) -> tuple[str, dict, dict]:
+    """Parse ``tool[:arg=value[,arg=value...]]``.
+
+    Returns ``(tool, constraints, display)`` where ``constraints`` maps
+    argument names to tenuo constraint objects and ``display`` keeps the raw
+    value strings for printing.
+    """
+    tool, _, rest = spec.strip().partition(":")
+    tool = tool.strip()
+    if not tool:
+        raise ValueError(f"--allow '{spec}': missing tool name")
+    constraints: dict = {}
+    display: dict = {}
+    for item in rest.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        arg, eq, value = item.partition("=")
+        arg, value = arg.strip(), value.strip()
+        if not eq or not arg or not value:
+            raise ValueError(f"--allow '{spec}': expected arg=value, got '{item}'")
+        try:
+            constraints[arg] = _parse_constraint_value(value)
+        except ValueError as exc:
+            raise ValueError(f"--allow '{spec}': {arg}: {exc}") from exc
+        display[arg] = value
+    return tool, constraints, display
+
+
+def _mint_local(args: argparse.Namespace) -> int:
+    """Mint a warrant locally. No network, no account.
+
+    Each ``--allow`` names a tool and, optionally, argument constraints
+    (``tool:arg=value,...``). A tool with no constraints is allowed with any
+    arguments. See :func:`parse_allow` for the value syntax.
     """
     try:
-        from tenuo import SigningKey, Warrant, Wildcard  # noqa: F401
+        from tenuo import SigningKey, Warrant  # noqa: F401
     except ImportError:
         print("error: tenuo is required. Install with: pip install tenuo", file=sys.stderr)
         return 1
+    from tenuo import SigningKey, Warrant
 
-    from tenuo import SigningKey, Warrant, Wildcard
+    if not args.allow:
+        print(
+            "error: at least one --allow TOOL is required, e.g. "
+            "--allow web_search --allow read_file:path=/data",
+            file=sys.stderr,
+        )
+        return 1
+
+    parsed = []
+    for spec in args.allow:
+        try:
+            parsed.append(parse_allow(spec))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     # Generate keys
     control_key = SigningKey.generate()
     agent_key = SigningKey.generate()
 
-    # Build warrant — each tool is allowed with Wildcard on all arguments
     builder = Warrant.mint_builder().holder(agent_key.public_key)
-
-    if not args.allow:
-        print(
-            "error: at least one --allow TOOL is required. "
-            "For argument-level constraints use Cloud's warrant builder.",
-            file=sys.stderr,
-        )
-        return 1
-
-    for tool in (args.allow or []):
-        builder = builder.capability(tool.strip(), **{})
+    for tool, constraints, _ in parsed:
+        builder = builder.capability(tool, **constraints)
 
     # Parse TTL
     ttl_seconds = _parse_ttl(args.ttl)
     builder = builder.ttl(ttl_seconds)
-
     warrant = builder.mint(control_key)
 
     # Encode
@@ -203,13 +262,16 @@ def _mint_local(args: argparse.Namespace) -> int:
         print()
         print(f"# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
-        caps = args.allow or []
-        if caps:
-            print(f"# Tools: {', '.join(t.strip() for t in caps)}")
+        print("# Tools:")
+        for tool, _, display in parsed:
+            if display:
+                shown = ", ".join(f"{k}={v}" for k, v in display.items())
+                print(f"#   {tool}  {shown}")
+            else:
+                print(f"#   {tool}  (any arguments)")
         print()
-        print("# Note: argument-level constraints require Cloud's warrant builder.")
-        print("# Local mint permits each tool with open argument scope (Wildcard).")
-
+        print("# Keep the signing key out of config files. The control key that")
+        print("# minted this warrant was not saved; mint again to change scope.")
     return 0
 
 
@@ -429,6 +491,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Print the local audit log (one line per tool call)."""
+    from hermes_tenuo.audit import default_audit_path, format_record, read_audit_log
+    path = getattr(args, "path", None) or default_audit_path()
+    records = read_audit_log(
+        path,
+        last=getattr(args, "last", None),
+        denied_only=bool(getattr(args, "denied", False)),
+    )
+    if getattr(args, "json", False):
+        for rec in records:
+            print(json.dumps(rec, ensure_ascii=False, default=str))
+        return 0
+    if not records:
+        print(f"No audit records at {path}")
+        return 0
+    for rec in records:
+        print(format_record(rec))
+    denied = sum(1 for r in records if r.get("decision") == "DENY")
+    print(f"\n{len(records)} calls, {denied} denied  ({path})")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant is valid and show its capabilities."""
     from hermes_tenuo._config import _env_secret
@@ -504,10 +589,11 @@ def main() -> None:
     mint_p = subparsers.add_parser("mint", help="Mint a warrant and print config")
     mint_p.add_argument("--ttl", default="24h", metavar="DURATION",
                         help="Warrant TTL, e.g. 30m, 1h, 7d (default: 24h)")
-    mint_p.add_argument("--allow", action="append", metavar="TOOL",
-                        help="Allow a tool by name (repeat for multiple). "
-                             "Examples: --allow web_search --allow read_file. "
-                             "For argument-level constraints use Cloud's warrant builder.")
+    mint_p.add_argument("--allow", action="append", metavar="TOOL[:ARG=VALUE,...]",
+                        help="Allow a tool, optionally constraining its arguments (repeatable). "
+                             "Examples: --allow web_search  --allow read_file:path=/data  "
+                             "--allow git:action=status|diff. Values: '*' any, 'a|b' choice, "
+                             "glob with '*'/'?', '/path' prefix, otherwise exact match.")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
     mint_p.add_argument("--trigger", metavar="TRIGGER_ID",
@@ -525,6 +611,13 @@ def main() -> None:
     # doctor
     subparsers.add_parser("doctor", help="End-to-end install check: plugin discovery, warrant, enforcement path")
 
+    # audit
+    audit_p = subparsers.add_parser("audit", help="Show the local audit log (what the agent called, what was denied)")
+    audit_p.add_argument("--last", type=int, metavar="N", help="Only the most recent N calls")
+    audit_p.add_argument("--denied", action="store_true", help="Only denied calls")
+    audit_p.add_argument("--json", action="store_true", help="Raw JSON lines instead of the table")
+    audit_p.add_argument("--path", metavar="FILE", help="Audit log file (default: $HERMES_HOME/tenuo/audit.jsonl)")
+
     args = parser.parse_args()
 
     if args.command == "mint":
@@ -535,6 +628,8 @@ def main() -> None:
         sys.exit(cmd_verify(args))
     elif args.command == "doctor":
         sys.exit(cmd_doctor(args))
+    elif args.command == "audit":
+        sys.exit(cmd_audit(args))
     else:
         parser.print_help()
         sys.exit(0)
