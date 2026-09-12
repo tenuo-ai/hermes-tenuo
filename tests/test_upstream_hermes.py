@@ -100,7 +100,7 @@ def _run(mode: str, configured: bool, tmp_path: Path) -> dict:
         [sys.executable, "-c", _DRIVER], cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
-    line = next(l for l in proc.stdout.splitlines() if l.startswith("RESULT "))
+    line = next(row for row in proc.stdout.splitlines() if row.startswith("RESULT "))
     result = json.loads(line[len("RESULT "):])
     result["stderr"] = proc.stderr
     return result

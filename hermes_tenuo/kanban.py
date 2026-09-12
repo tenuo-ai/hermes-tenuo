@@ -10,7 +10,7 @@ Convention:
     via a direct kanban_db write (bypassing the agent path because the denial
     is a system event, not an agent action).
 
-This module is the pure-utility layer. The CLI (hermes-tenuo kanban …)
+This module is the pure-utility layer. ``hermes-tenuo mint --task``
 and the plugin wiring in _config.py / _guard.py call into here.
 
 Credential scoping in worker subprocesses

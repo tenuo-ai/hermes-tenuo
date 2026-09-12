@@ -67,25 +67,26 @@ def _looks_like_path(s: str) -> bool:
     )
 
 
-def get_warrant_raw(ctx: Any) -> Optional[str]:
-    """Return raw warrant: base64 string or path to warrant file.
+def resolve_warrant_text(ctx: Any) -> tuple[Optional[str], str]:
+    """Return ``(raw, source)`` using the same order the plugin loads at runtime.
 
-    When this process is a kanban worker (HERMES_KANBAN_TASK set), a staged
-    per-task warrant takes precedence over the global warrant. Workers are
-    scoped to their task, period — the install-wide warrant does not apply.
+    Kanban workers prefer the staged task warrant and never inherit the
+    install-wide value. A configured path that does not exist raises
+    ``FileNotFoundError``.
     """
-    from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw
+    from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw, task_warrant_path
 
     task_id = current_task_id()
     if task_id:
+        path = task_warrant_path(task_id)
         task_raw = load_task_warrant_raw(task_id)
         if task_raw:
             logger.info(
                 "loaded task warrant for kanban worker (task_id=%s)", task_id,
             )
-            return task_raw
+            return task_raw, f"file: {path} (kanban {task_id})"
         # Fail closed: a kanban worker scoped to a task must not inherit the
-        # install-wide warrant.  Returning None here causes build_plugin_guard
+        # install-wide warrant. Returning None here causes build_plugin_guard
         # to return None (no warrant), and register() will
         # install a block-all pre_tool_call hook so the worker cannot proceed.
         logger.error(
@@ -93,17 +94,33 @@ def get_warrant_raw(ctx: Any) -> Optional[str]:
             "Stage a warrant at ~/.hermes/tenuo/warrants/%s.warrant before dispatching.",
             task_id, task_id,
         )
-        return None
+        return None, f"kanban: {path} (missing)"
 
     entry = _get_plugin_entry(ctx)
-    raw = entry.get("warrant") or _env_secret("TENUO_WARRANT")
+    if entry.get("warrant"):
+        raw = str(entry.get("warrant"))
+        source = "config: warrant"
+    else:
+        raw = _env_secret("TENUO_WARRANT")
+        source = "env: TENUO_WARRANT"
     if not raw:
-        return None
+        return None, "none"
     if _looks_like_path(raw):
         path = Path(raw).expanduser()
-        if path.exists():
-            return path.read_text().strip()
-    return raw
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        return path.read_text().strip(), f"{source} -> {path}"
+    return raw, source
+
+
+def get_warrant_raw(ctx: Any) -> Optional[str]:
+    """Return raw warrant: base64 string or contents of a warrant file."""
+    try:
+        raw, _ = resolve_warrant_text(ctx)
+        return raw
+    except FileNotFoundError as exc:
+        logger.warning("hermes-tenuo: warrant path does not exist: %s", exc)
+        return None
 
 
 def get_child_warrant_raw(ctx: Any) -> Optional[str]:
@@ -177,6 +194,26 @@ def get_on_denial(ctx: Any) -> str:
     """Return on_denial mode: 'block' (default) or 'log' (audit — log but don't block)."""
     entry = _get_plugin_entry(ctx)
     return entry.get("on_denial", "block")
+
+
+def get_require_session_warrant(ctx: Any) -> Optional[bool]:
+    """Return the session-warrant gate, or None for the auto default.
+
+    Auto (unset) turns the gate on once ``set_session_warrant`` has been
+    used. ``true`` / ``false`` override that.
+    """
+    entry = _get_plugin_entry(ctx)
+    raw = entry.get("require_session_warrant")
+    if raw is None:
+        raw = _env_secret("TENUO_REQUIRE_SESSION_WARRANT")
+    if raw is None or raw == "":
+        return None
+    if raw is True or (isinstance(raw, str) and raw.strip().lower() in ("true", "on", "yes", "1")):
+        return True
+    if raw is False or (isinstance(raw, str) and raw.strip().lower() in ("false", "off", "no", "0")):
+        return False
+    logger.warning("hermes-tenuo: unknown require_session_warrant value %r — using auto", raw)
+    return None
 
 
 def load_warrant(raw: Optional[str]):

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import os
 
 import pytest
 
@@ -71,10 +70,10 @@ class TestMintLocal:
     def test_mint_warrant_is_valid_tenuo_warrant(self):
         """The minted warrant must be decodable by tenuo_core."""
         from hermes_tenuo.cli import cmd_mint
-        import io, sys
+        import io
+        import sys
         args = argparse.Namespace(
-            ttl="1h", allow=["web_search"], output="env"        )
-        captured = []
+            ttl="1h", allow=["web_search"], output="env")
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         cmd_mint(args)
@@ -99,6 +98,33 @@ class TestMintLocal:
         assert _parse_ttl("7d") == 604800
         assert _parse_ttl("90s") == 90
         assert _parse_ttl("3600") == 3600
+
+    def test_parse_ttl_rejects_invalid(self):
+        from hermes_tenuo.cli import _parse_ttl
+        for bad in ("abc", "0", "-1h", "0s"):
+            with pytest.raises(ValueError, match="--ttl"):
+                _parse_ttl(bad)
+
+    def test_mint_invalid_ttl_is_one_line(self, capsys):
+        from hermes_tenuo.cli import cmd_mint
+        args = argparse.Namespace(ttl="abc", allow=["web_search"], output="env")
+        assert cmd_mint(args) == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error: --ttl 'abc'")
+        assert "Traceback" not in err
+
+    def test_mint_task_writes_kanban_path(self, capsys, tmp_path, monkeypatch):
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.kanban import task_warrant_path
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+        args = argparse.Namespace(
+            ttl="1h", allow=["web_search"], output="env", task="card-9"
+        )
+        assert cmd_mint(args) == 0
+        path = task_warrant_path("card-9")
+        assert path.is_file()
+        assert path.read_text().strip()
+        assert f"Wrote task warrant: {path}" in capsys.readouterr().out
 
 
 class TestStatus:
@@ -202,7 +228,8 @@ class TestMintConstraints:
             signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
             trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
         )
-        call = lambda tool, a: guard.pre_tool_call(tool, a, session_id="s1")
+        def call(tool, a):
+            return guard.pre_tool_call(tool, a, session_id="s1")
         assert call("read_file", {"path": "/data/q3.md"}) is None
         assert call("web_search", {"query": "anything at all"}) is None
         assert call("git", {"action": "diff"}) is None

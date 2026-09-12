@@ -66,7 +66,7 @@ def session_start(session_id: str, user_role: str) -> None:
         guard.set_session_warrant(session_id, warrant, gateway_signing_key)
         print(f"  Session {session_id} ({user_role}): warrant registered")
     else:
-        print(f"  Session {session_id} (unknown): no warrant — calls are not enforced")
+        print(f"  Session {session_id} (unknown): no warrant — calls are blocked")
 
 
 def session_end(session_id: str) -> None:

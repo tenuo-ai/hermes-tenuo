@@ -37,7 +37,7 @@ class HermesAuditEvent:
     """Record of a single authorization decision."""
     tool: str
     args: Dict[str, Any]
-    decision: str           # "ALLOW" | "DENY" | "AUDIT"
+    decision: str           # "ALLOW" | "DENY"
     reason: str
     session_id: str = ""
     task_id: str = ""
@@ -100,7 +100,9 @@ class HermesGuard:
         The single-agent child heuristic is not safe when sessions run
         concurrently. Call ``set_session_warrant(session_id, warrant)``
         with that user's own warrant when a session starts, and
-        ``clear_session_warrant`` when it ends.
+        ``clear_session_warrant`` when it ends. After any session warrant
+        exists, calls from a session with none are blocked
+        (``require_session_warrant``, on by default).
     """
 
     def __init__(
@@ -113,6 +115,7 @@ class HermesGuard:
         on_denial: str = "block",   # "block" | "log"
         audit_callback: Optional[AuditCallback] = None,
         approval_handler: Optional[Callable] = None,
+        require_session_warrant: Optional[bool] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
@@ -122,6 +125,8 @@ class HermesGuard:
         self._on_denial = on_denial
         self._audit_callback = audit_callback
         self._approval_handler = approval_handler
+        # None = on once set_session_warrant has been used; True/False override.
+        self._require_session_warrant = require_session_warrant
         self._audit_only_warned = False  # warn once when running without a warrant
         self._uses_session_warrants = False  # set by set_session_warrant (gateway)
 
@@ -154,6 +159,14 @@ class HermesGuard:
     @property
     def has_warrant(self) -> bool:
         return self._static_warrant is not None
+
+    @property
+    def _session_warrant_required(self) -> bool:
+        if self._require_session_warrant is False:
+            return False
+        if self._require_session_warrant is True:
+            return True
+        return self._uses_session_warrants
 
     # ------------------------------------------------------------------
     # Session warrant management (gateway multi-user)
@@ -235,7 +248,7 @@ class HermesGuard:
                     # (CLI / cron) where one parent runs at a time.
                     # For multi-user gateways, use set_session_warrant() per
                     # session instead — explicit session warrants bypass this
-                    # branch entirely (see _resolve_warrant L174-177).
+                    # branch entirely (the session-registry lookup above).
                     # subagent_start (wired Jun 2026) injects child warrants before
                     # the first tool call, making this path a fallback for older builds.
                     pending = self._claim_child_warrant(self._primary_session_id)
@@ -304,7 +317,10 @@ class HermesGuard:
                     for candidate in (f"tool:{bare}", bare):
                         if candidate in parent_tools:
                             keep.add(candidate)
-            elif toolsets and resolution_failed:
+            elif not toolsets:
+                # No toolsets specified → child keeps the parent's tools
+                keep = parent_tools
+            elif resolution_failed:
                 # Hermes toolsets module unavailable — match toolset names as prefixes
                 # e.g. "web" matches "tool:web_search", "tool:web_extract"
                 keep = set()
@@ -313,15 +329,17 @@ class HermesGuard:
                         bare = t.removeprefix("tool:")
                         if bare == ts or bare.startswith(ts + "_") or bare.startswith(ts):
                             keep.add(t)
-                if not keep:
-                    keep = parent_tools  # full fallback if nothing matched
             else:
-                # No toolsets specified (or Hermes toolsets module unavailable)
-                # → child gets all parent tools
-                keep = parent_tools
+                # Toolsets were named but none resolved to a parent tool
+                # (typo, empty toolset). Do not widen the child to the parent.
+                keep = set()
 
             if not keep:
-                logger.debug("hermes-tenuo: no overlapping tools for child — using static child_warrant")
+                logger.warning(
+                    "hermes-tenuo: toolsets %s matched no parent tools — "
+                    "not widening the child to the parent's full scope",
+                    toolsets,
+                )
                 return self._child_warrant
 
             # Build attenuated child via attenuate_builder:
@@ -522,12 +540,20 @@ class HermesGuard:
                 if self._primary_session_id is None:
                     self._primary_session_id = session_id
 
-        # Audit-only mode: no warrant on this call — pass through.
-        # The plugin-style warning is only for an unconfigured guard. A
-        # gateway that already called set_session_warrant() is configured;
-        # a session without a warrant is just that session, not audit-only.
+        # No warrant on this call. An unconfigured single-agent guard is a
+        # documented no-op. A gateway that already called set_session_warrant
+        # is configured: unknown sessions fail closed unless the operator
+        # sets require_session_warrant=False.
         if warrant is None:
-            if not self._audit_only_warned and not self._uses_session_warrants:
+            if self._session_warrant_required:
+                return {
+                    "action": "block",
+                    "message": (
+                        "tenuo: no warrant for this session — "
+                        "require_session_warrant is on"
+                    ),
+                }
+            if not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
                     "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "

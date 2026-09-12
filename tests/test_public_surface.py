@@ -64,6 +64,15 @@ def test_catalog_entry_matches_manifest():
     assert not (ROOT / "docs" / "plugin-index-entry.json").exists()
 
 
+def test_package_and_plugin_versions_agree():
+    import re
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    plugin = (ROOT / "plugin.yaml").read_text()
+    py_ver = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+    yaml_ver = re.search(r"^version:\s*(.+)$", plugin, re.M).group(1).strip()
+    assert py_ver == yaml_ver == "0.1.1"
+
+
 def test_readme_keeps_listing_strategy_out():
     text = (ROOT / "README.md").read_text().lower()
     assert "catalog" not in text

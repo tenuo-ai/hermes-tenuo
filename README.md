@@ -25,6 +25,9 @@ The job does the work. Then it tries to leave the slip.
          Constraint 'path' not satisfied: value does not match constraint  ← /etc/passwd is not under /data/reports
   DENY   terminal  command=ls
          Tool 'terminal' is not authorized  ← terminal is not on the slip
+  (one second later)
+  DENY   read_file  path=/data/reports/q3.csv
+         Warrant has expired  ← the job window ended
 
 That slip is a Tenuo warrant: signed, expiring, checked before
 the handler runs. Same check, two more shapes:
@@ -173,7 +176,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
 | **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | Per-user permissions, isolated per session, cleared on session end |
-| **Kanban workers** | Drop `~/.hermes/tenuo/warrants/<task_id>.warrant` | The worker loads its own warrant; a denial auto-blocks the task on the board |
+| **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
 Runnable versions of the first three live in
@@ -250,9 +253,9 @@ that threat model.
 
 ```bash
 hermes-tenuo demo        # local allow/deny transcript (no Hermes process)
-hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--output full|yaml|env]
+hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--task ID] [--output full|yaml|env]
 hermes-tenuo status      # what the plugin will load from config and env
-hermes-tenuo verify      # decode and check the current warrant
+hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
 ```
@@ -273,6 +276,7 @@ variable equivalent.
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
 | `on_denial` | | `block` (default) or `log`. |
+| `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
 
 Keep secret key material in env vars or a secrets manager, never in
