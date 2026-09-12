@@ -1,6 +1,7 @@
 # hermes-tenuo
 
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
+[![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)
 
 **Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
 
@@ -77,7 +78,7 @@ pip install "tenuo>=0.3.0"   # Hermes does not install plugin dependencies
 
 To run the latest unreleased code instead: `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
 
-Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026).
+Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through the plugin loader of upstream Hermes `main`, both install routes; the badge above is its latest result.
 The pip route installs `tenuo>=0.3.0` for you; the directory route needs the
 extra `pip install` line above.
 
