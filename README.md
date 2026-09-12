@@ -59,9 +59,12 @@ Constraint 'path' not satisfied: value does not match constraint
 **1. Install.**
 
 ```bash
-hermes plugins install tenuo-ai/hermes-tenuo
-# or, into the venv Hermes uses:
+# into the venv Hermes uses (pulls in tenuo):
 pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+
+# or as a directory plugin under ~/.hermes/plugins:
+hermes plugins install tenuo-ai/hermes-tenuo
+pip install "tenuo>=0.3.0"   # Hermes does not install plugin dependencies
 ```
 
 Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026)
