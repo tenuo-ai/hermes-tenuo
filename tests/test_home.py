@@ -66,9 +66,10 @@ def test_status_reports_config_sources(tmp_path, monkeypatch, capsys):
     assert cmd_status(argparse.Namespace()) == 0
     out = capsys.readouterr().out
     assert str(home / "config.yaml") in out and "found" in out
-    assert "Warrant        set  (config: warrant" in out
+    assert "Warrant        set  (config: warrant, file)" in out
     assert "Signing key    set  (env: TENUO_SIGNING_KEY)" in out
-    assert "Trusted root   set  (config: trusted_root)" in out
+    assert "Trusted root   set  (config: trusted_root, inline)" in out
+    assert "~/w.warrant" not in out and "abc" not in out  # values are never echoed
     assert "Ready for enforcement" in out
 
 
