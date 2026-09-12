@@ -54,6 +54,22 @@ def _register_skills(ctx: Any) -> None:
                 logger.debug("hermes-tenuo: skill %s not registered (%s)", child.name, exc)
 
 
+def _passthrough_hook(*_args: Any, **_kwargs: Any) -> None:
+    """No-op hook body for an unconfigured install: observe nothing, block nothing."""
+    return None
+
+
+def _register_passthrough_hooks(ctx: Any) -> None:
+    """Register every hook plugin.yaml declares, as no-ops.
+
+    Keeps the manifest truthful (``hermes plugins list`` and the catalog
+    validator see the declared hooks) while the plugin stays a documented
+    no-op until a warrant is configured.
+    """
+    for name in ("pre_tool_call", "post_tool_call", "on_session_start", "on_session_end", "subagent_start"):
+        ctx.register_hook(name, _passthrough_hook)
+
+
 def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
     """Install a block-all enforcement hook for a kanban worker with no warrant."""
     deny_msg = (
@@ -110,6 +126,7 @@ def register(ctx: Any) -> None:
                 "tool calls are NOT enforced. Set TENUO_WARRANT (or warrant: in "
                 "config) to enforce. Run `hermes-tenuo doctor` to verify."
             )
+            _register_passthrough_hooks(ctx)
         return
 
     # Primary enforcement: register directly with ToolRegistry for universal

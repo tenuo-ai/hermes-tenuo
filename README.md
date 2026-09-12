@@ -1,5 +1,7 @@
 # hermes-tenuo
 
+[![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
+
 **Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
 
 A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant sits in front of every
@@ -305,8 +307,12 @@ Everything above works without an account. Details at [tenuo.ai](https://tenuo.a
 
 ## Listing in the Hermes plugin catalog
 
-Submit `docs/plugin-index-entry.json` with `ref` set to the commit you want
-reviewed. Catalog installs pin that commit.
+[`docs/plugin-catalog-entry.yaml`](docs/plugin-catalog-entry.yaml) is the
+entry in Hermes's catalog schema. To list the plugin, open a PR to
+`NousResearch/hermes-agent` adding it as `plugin-catalog/hermes-tenuo.yaml`
+with `sha` set to the tagged release commit. Their rules: the pinned commit
+must be at least two weeks old, the submitter must own the repo, and the
+declared hooks must match what `register()` registers at that commit.
 
 ## License
 
