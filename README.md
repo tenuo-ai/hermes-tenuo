@@ -67,8 +67,9 @@ hermes plugins install tenuo-ai/hermes-tenuo
 pip install "tenuo>=0.3.0"   # Hermes does not install plugin dependencies
 ```
 
-Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026)
-and `tenuo>=0.3.0`, which is pulled in automatically.
+Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026).
+The pip route installs `tenuo>=0.3.0` for you; the directory route needs the
+extra `pip install` line above.
 
 **2. Mint a warrant.** This generates a key pair and a warrant, and prints
 the exact config block to paste.

@@ -123,6 +123,7 @@ class HermesGuard:
         self._audit_callback = audit_callback
         self._approval_handler = approval_handler
         self._audit_only_warned = False  # warn once when running without a warrant
+        self._uses_session_warrants = False  # set by set_session_warrant (gateway)
 
         # Session warrant registry: session_id → (warrant, signing_key)
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
@@ -174,6 +175,7 @@ class HermesGuard:
         """
         with self._session_lock:
             self._session_warrants[session_id] = (warrant, signing_key)
+            self._uses_session_warrants = True
             if parent_warrant is not None:
                 self._session_warrant_chains[session_id] = parent_warrant
         logger.debug("hermes-tenuo: registered warrant for session %s", session_id)
@@ -520,9 +522,12 @@ class HermesGuard:
                 if self._primary_session_id is None:
                     self._primary_session_id = session_id
 
-        # Audit-only mode: no warrant configured — pass through, emit later
+        # Audit-only mode: no warrant on this call — pass through.
+        # The plugin-style warning is only for an unconfigured guard. A
+        # gateway that already called set_session_warrant() is configured;
+        # a session without a warrant is just that session, not audit-only.
         if warrant is None:
-            if not self._audit_only_warned:
+            if not self._audit_only_warned and not self._uses_session_warrants:
                 self._audit_only_warned = True
                 logger.warning(
                     "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "

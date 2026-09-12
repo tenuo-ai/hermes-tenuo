@@ -166,6 +166,19 @@ class TestFailClosed:
         audit_warnings = [r for r in caplog.records if "AUDIT-ONLY" in r.getMessage()]
         assert len(audit_warnings) == 1
 
+    def test_gateway_session_without_warrant_is_not_audit_only_warning(
+        self, parent_warrant, agent_key, cloud_key, caplog
+    ):
+        """A gateway that uses set_session_warrant is not an unconfigured plugin."""
+        import logging
+
+        guard = HermesGuard(trusted_roots=[cloud_key.public_key])
+        guard.set_session_warrant("alice", parent_warrant, agent_key)
+        with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
+            assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="alice") is None
+            assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve") is None
+        assert not any("AUDIT-ONLY" in r.getMessage() for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Trusted root management — lock-protected setter

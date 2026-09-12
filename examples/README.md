@@ -3,9 +3,9 @@
 No Hermes process and no API key. Start here:
 
 ```bash
-pip install -e ..
+pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
 hermes-tenuo demo
-# or: python demo.py
+# or, from this directory: python demo.py
 ```
 
 That prints the cron, `delegate_task` (a `grant_builder` hop), and gateway
