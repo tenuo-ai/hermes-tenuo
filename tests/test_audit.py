@@ -44,8 +44,8 @@ class TestLocalAuditLog:
         denied = guard.pre_tool_call("read_file", {"path": "/etc/passwd"}, session_id="s1", tool_call_id="c2")
         assert denied and denied["action"] == "block"
 
-        lines = [json.loads(l) for l in log_path.read_text().splitlines()]
-        assert [l["decision"] for l in lines] == ["ALLOW", "ALLOW", "DENY"]
+        lines = [json.loads(row) for row in log_path.read_text().splitlines()]
+        assert [row["decision"] for row in lines] == ["ALLOW", "ALLOW", "DENY"]
 
         records = read_audit_log(log_path)
         assert [r["tool_call_id"] for r in records] == ["c1", "c2"]
@@ -156,7 +156,7 @@ class TestPostHookAfterBlock:
         denied = guard.pre_tool_call("terminal", {"command": "date"}, session_id="s1", tool_call_id="c1")
         assert denied and denied["action"] == "block"
         guard.post_tool_call("terminal", {"command": "date"}, denied["message"], session_id="s1", tool_call_id="c1", duration_ms=0)
-        records = [json.loads(l) for l in log_path.read_text().splitlines()]
+        records = [json.loads(row) for row in log_path.read_text().splitlines()]
         assert [r["decision"] for r in records] == ["DENY", "DENY"]
         assert records[1]["reason"] == denied["message"]
         merged = read_audit_log(log_path)

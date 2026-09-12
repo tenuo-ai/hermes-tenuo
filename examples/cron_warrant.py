@@ -6,7 +6,9 @@
       --allow write_file:path=/tmp/nightly \
       --allow memory)"
 
-    hermes run --task nightly_report
+    hermes cron create "0 2 * * *" \
+      "Write tonight's report from /data/reports into /tmp/nightly" \
+      --name nightly_report
 
 Or run this file to see the same checks without Hermes:
 

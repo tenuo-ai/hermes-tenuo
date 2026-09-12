@@ -8,7 +8,7 @@ guard being correctly wired up for real enforcement.
 
 import base64
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -85,7 +85,6 @@ class TestGetSigningKey:
 
     def test_custom_signing_key_env_name(self, agent_key_b64):
         from hermes_tenuo._config import get_signing_key
-        config = {"plugins": {"entries": {"hermes-tenuo": {"signing_key_env": "MY_KEY"}}}}
         with patch("hermes_tenuo._config._get_plugin_entry", return_value={"signing_key_env": "MY_KEY"}):
             with patch.dict(os.environ, {"MY_KEY": agent_key_b64}):
                 key = get_signing_key(FakeCtx())
@@ -197,6 +196,35 @@ class TestLoadWarrant:
         assert load_warrant("notvalidbase64!!!") is None
 
 
+class TestGetRequireSessionWarrant:
+
+    def test_auto_when_unset(self):
+        from hermes_tenuo._config import get_require_session_warrant
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
+            assert get_require_session_warrant(FakeCtx()) is None
+
+    def test_true_from_config(self):
+        from hermes_tenuo._config import get_require_session_warrant
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={"require_session_warrant": True}):
+            assert get_require_session_warrant(FakeCtx()) is True
+
+    def test_false_from_env(self):
+        from hermes_tenuo._config import get_require_session_warrant
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
+            with patch.dict(os.environ, {"TENUO_REQUIRE_SESSION_WARRANT": "false"}):
+                assert get_require_session_warrant(FakeCtx()) is False
+
+    def test_unknown_value_does_not_log_raw(self, caplog):
+        import logging
+        from hermes_tenuo._config import get_require_session_warrant
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
+            with patch.dict(os.environ, {"TENUO_REQUIRE_SESSION_WARRANT": "maybe"}):
+                with caplog.at_level(logging.WARNING, logger="hermes_tenuo._config"):
+                    assert get_require_session_warrant(FakeCtx()) is None
+        assert "maybe" not in caplog.text
+        assert "using auto" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # build_plugin_guard integration tests
 # ---------------------------------------------------------------------------
@@ -304,3 +332,5 @@ class TestMintCLI:
         assert _parse_ttl("30m") == 1800
         assert _parse_ttl("7d") == 604800
         assert _parse_ttl("90s") == 90
+        with pytest.raises(ValueError):
+            _parse_ttl("abc")

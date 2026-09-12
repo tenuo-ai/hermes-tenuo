@@ -30,8 +30,8 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, List, Optional
-from unittest.mock import MagicMock, patch
+from typing import Any, Optional
+from unittest.mock import patch
 
 import pytest
 
@@ -377,7 +377,6 @@ class TestEnforcementBehavior:
         guard_inner._primary_session_id = "s1"
         guard = PluginGuard(guard_inner)
 
-        enforcement_fn_store = []
         mock_reg = _EnforcementRegistry()
 
         # Simulate what register() does when it finds set_enforcement_fn

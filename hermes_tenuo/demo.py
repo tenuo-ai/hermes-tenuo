@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 from tenuo import SigningKey, Subpath, Warrant, Wildcard
@@ -13,12 +14,14 @@ from hermes_tenuo.hermes_guard import HermesGuard
 CRON_ALLOW = "ALLOW  read_file  path=/data/reports/q3.csv"
 CRON_DENY_PASSWD = "DENY   read_file  path=/etc/passwd"
 CRON_DENY_TERMINAL = "DENY   terminal  command=ls"
+CRON_DENY_EXPIRED = "DENY   read_file  path=/data/reports/q3.csv"
 CHILD_ALLOW_SEARCH = "[researcher] ALLOW  web_search  query=AI papers 2026"
 CHILD_DENY_WRITE = "[researcher] DENY   write_file  path=/data/output/x.md"
 CHILD_SCENE = "Same rule, after a handoff. The researcher was only granted web_search."
 VIEWER_DENY_REPORTS = "[viewer] DENY   read_file  path=/data/reports/q1.csv"
 CRON_WHY_OUTSIDE_DIR = "/etc/passwd is not under /data/reports"
 CRON_WHY_TERMINAL = "terminal is not on the slip"
+CRON_WHY_EXPIRED = "the job window ended"
 CHILD_WHY_WRITE = "the researcher was not granted write_file"
 VIEWER_WHY_REPORTS = "/data/reports is not on the viewer's slip"
 
@@ -55,6 +58,8 @@ def _call(
     lines.append(line.rstrip())
     if result:
         message = str(result.get("message") or "").strip()
+        if "has expired" in message:
+            message = "Warrant has expired"
         if message and why:
             lines.append(f"         {message}  ← {why}")
         elif message:
@@ -80,7 +85,7 @@ def render_demo() -> str:
         .capability("read_file", path=Subpath("/data/reports"))
         .capability("write_file", path=Subpath("/tmp/nightly"), content=Wildcard())
         .capability("memory", action=Wildcard(), key=Wildcard())
-        .ttl(3600)
+        .ttl(1)
         .mint(control)
     )
     cron = HermesGuard(
@@ -112,6 +117,16 @@ def render_demo() -> str:
         {"command": "ls"},
         session_id="cron",
         why=CRON_WHY_TERMINAL,
+    )
+    time.sleep(1.2)
+    lines.append("  (one second later)")
+    _call(
+        lines,
+        cron,
+        "read_file",
+        {"path": "/data/reports/q3.csv"},
+        session_id="cron",
+        why=CRON_WHY_EXPIRED,
     )
 
     lines.extend(

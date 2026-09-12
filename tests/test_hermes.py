@@ -14,11 +14,11 @@ Covers:
 - Post-tool-call audit events fire for every call including audit-only mode
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from hermes_tenuo.hermes_guard import HermesAuditEvent, HermesGuard
+from hermes_tenuo.hermes_guard import HermesGuard
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +432,31 @@ class TestChildWarrantHeuristic:
         with guard._pending_lock:
             assert ("parent", 0) in guard._pending_child_warrants
             assert ("parent", 1) in guard._pending_child_warrants
+
+    def test_unknown_toolset_does_not_widen_child(
+        self, basic_warrant, child_warrant, agent_key, root_key
+    ):
+        """A misspelled toolset must not grant the child the parent's full scope."""
+        guard = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            child_warrant=child_warrant,
+            trusted_roots=[root_key.public_key],
+        )
+        child = guard._attenuate_for_toolsets(
+            basic_warrant, ["no_such_toolset"], agent_key
+        )
+        assert child is child_warrant
+        assert set(child.tools or []) != set(basic_warrant.tools or [])
+
+        bare = HermesGuard(
+            warrant=basic_warrant,
+            signing_key=agent_key,
+            trusted_roots=[root_key.public_key],
+        )
+        assert bare._attenuate_for_toolsets(
+            basic_warrant, ["no_such_toolset"], agent_key
+        ) is None
 
     def test_delegate_task_denied_does_not_poison_pending_slots(
         self, guard_with_child

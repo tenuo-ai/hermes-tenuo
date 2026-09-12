@@ -178,18 +178,26 @@ in flight. User B's session must not be treated as a child of User A.
 
 Role examples: admin (`read_file` under `/data` + write), analyst
 (reports + search), viewer (`/data/public` + search). Unknown user →
-no warrant → plugin does not enforce; fail closed by refusing to
-start the session instead.
+no warrant → blocked once any session warrant has been set
+(`require_session_warrant`, on by default). Set
+`require_session_warrant: false` only if unknown sessions should
+pass through.
 
 `examples/gateway_multiuser.py` is the runnable form.
 
 ## Pattern: kanban worker
 
-Drop `~/.hermes/tenuo/warrants/<task_id>.warrant` before dispatch.
-A worker with no file is blocked entirely — it must not fall back to
-the install-wide warrant. A denial marks the task blocked on the board.
+Mint onto the path the worker loads:
 
-Mint each task like a cron: tools + paths + TTL for that card only.
+```bash
+hermes-tenuo mint --task <task_id> --ttl 2h \
+  --allow read_file:path=/data/that-card
+```
+
+That writes `~/.hermes/tenuo/warrants/<task_id>.warrant` for the
+current holder (`TENUO_SIGNING_KEY` if set). A worker with no file
+is blocked entirely — it must not fall back to the install-wide
+warrant. A denial marks the task blocked on the board.
 
 ## Tighten from reality
 

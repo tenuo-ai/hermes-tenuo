@@ -28,7 +28,7 @@ import base64
 import json
 import os
 import sys
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -116,16 +116,30 @@ def _mint_local(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-    # Generate keys
+    # Generate keys. Reuse TENUO_SIGNING_KEY as the holder when set so a
+    # kanban worker inherits a key that matches the file mint --task writes.
     control_key = SigningKey.generate()
-    agent_key = SigningKey.generate()
+    from hermes_tenuo._config import _env_secret
+
+    existing_key = _env_secret("TENUO_SIGNING_KEY")
+    if existing_key:
+        try:
+            agent_key = SigningKey.from_bytes(base64.b64decode(existing_key))
+        except Exception as exc:
+            print(f"error: TENUO_SIGNING_KEY is set but could not be loaded: {exc}", file=sys.stderr)
+            return 1
+    else:
+        agent_key = SigningKey.generate()
 
     builder = Warrant.mint_builder().holder(agent_key.public_key)
     for tool, constraints, _ in parsed:
         builder = builder.capability(tool, **constraints)
 
-    # Parse TTL
-    ttl_seconds = _parse_ttl(args.ttl)
+    try:
+        ttl_seconds = _parse_ttl(args.ttl)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     builder = builder.ttl(ttl_seconds)
     warrant = builder.mint(control_key)
 
@@ -142,7 +156,7 @@ def _mint_local(args: argparse.Namespace) -> int:
         print("# Add to ~/.hermes/config.yaml under plugins.entries.hermes-tenuo:")
         print(f"warrant: {warrant_b64}")
         print(f"trusted_root: {trusted_root_b64}")
-        print(f"# Export before running hermes:")
+        print("# Export before running hermes:")
         print(f"# export TENUO_SIGNING_KEY={signing_key_b64}")
     else:  # "full" default
         print("# ── Hermes config (add to ~/.hermes/config.yaml) ────────────────")
@@ -153,12 +167,12 @@ def _mint_local(args: argparse.Namespace) -> int:
         print("    hermes-tenuo:")
         print(f"      warrant: {warrant_b64}")
         print(f"      trusted_root: {trusted_root_b64}")
-        print(f"      signing_key_env: TENUO_SIGNING_KEY")
+        print("      signing_key_env: TENUO_SIGNING_KEY")
         print()
         print("# ── Signing key (export before running hermes) ───────────────────")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
         print()
-        print(f"# ── Warrant details ─────────────────────────────────────────────")
+        print("# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
         print("# Tools:")
         for tool, _, display in parsed:
@@ -170,12 +184,25 @@ def _mint_local(args: argparse.Namespace) -> int:
         print()
         print("# Keep the signing key out of config files. The control key that")
         print("# minted this warrant was not saved; mint again to change scope.")
+
+    task_id = getattr(args, "task", None)
+    if task_id:
+        from hermes_tenuo.kanban import task_warrant_path
+
+        path = task_warrant_path(task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(warrant_b64)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        print(f"# Wrote task warrant: {path}")
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show what the plugin will load, and where each value comes from."""
-    from hermes_tenuo._config import _env_secret, _get_plugin_entry
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry, _looks_like_path
     from hermes_tenuo._home import config_path, hermes_cli_available
 
     cfg_path = config_path()
@@ -196,7 +223,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         if cfg_val:
             # Never echo the value: a warrant or root is credential material. Say only
             # whether the config points at a file or carries the value inline.
-            kind = "file" if isinstance(cfg_val, str) and cfg_val.startswith(("/", "~", ".")) else "inline"
+            kind = "file" if isinstance(cfg_val, str) and _looks_like_path(cfg_val) else "inline"
             print(f"  ✓  {label:14} set  (config: {cfg_key}, {kind})")
         elif env_val:
             print(f"  ✓  {label:14} set  (env: {env_name})")
@@ -286,21 +313,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         note(f"could not read Hermes config ({exc})")
 
-    # 4. Configured? Enabled-but-empty is a silent no-op at runtime.
-    from hermes_tenuo._config import _env_secret, load_warrant
+    # 4. Configured? Same resolution the plugin uses (kanban task first).
+    from hermes_tenuo._config import _env_secret, load_warrant, resolve_warrant_text
 
-    raw = (
-        config_entry.get("warrant")
-        or _env_secret("TENUO_WARRANT")
-    )
-    if raw and (raw.startswith("/") or raw.startswith("~") or raw.startswith(".")):
-        path = os.path.expanduser(raw)
-        if os.path.exists(path):
-            with open(path) as fh:
-                raw = fh.read().strip()
-        else:
-            check(False, f"warrant path does not exist: {path}")
-            raw = None
+    try:
+        raw, warrant_source = resolve_warrant_text(None)
+    except FileNotFoundError as exc:
+        check(False, f"warrant path does not exist: {exc}")
+        raw, warrant_source = None, "none"
+    if warrant_source.startswith("kanban:"):
+        note(warrant_source)
+    elif warrant_source not in ("none",):
+        note(f"warrant source: {warrant_source}")
 
     warrant = load_warrant(raw) if raw else None
     configured = warrant is not None
@@ -424,25 +448,19 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Verify the current warrant is valid and show its capabilities."""
-    from hermes_tenuo._config import _env_secret, _get_plugin_entry
+    """Verify the current warrant against trusted_root and show its capabilities."""
+    from hermes_tenuo._config import get_trusted_roots, resolve_warrant_text
     from hermes_tenuo._home import hermes_home
 
-    warrant_raw = _env_secret("TENUO_WARRANT")
-    source = "env: TENUO_WARRANT"
+    try:
+        warrant_raw, source = resolve_warrant_text(None)
+    except FileNotFoundError as exc:
+        print(f"error: warrant path does not exist: {exc}", file=sys.stderr)
+        return 1
     if not warrant_raw:
-        cfg_val = _get_plugin_entry(None).get("warrant")
-        if cfg_val:
-            warrant_raw, source = str(cfg_val), "config: warrant"
-            if warrant_raw.startswith(("/", "~", ".")):
-                path = os.path.expanduser(warrant_raw)
-                source = f"config: warrant -> {path}"
-                if not os.path.exists(path):
-                    print(f"error: warrant path from config does not exist: {path}", file=sys.stderr)
-                    return 1
-                with open(path) as f:
-                    warrant_raw = f.read().strip()
-    if not warrant_raw:
+        if source.startswith("kanban:"):
+            print(f"error: no staged task warrant ({source})", file=sys.stderr)
+            return 1
         default_path = hermes_home() / "tenuo" / "warrant"
         if default_path.exists():
             warrant_raw = default_path.read_text().strip()
@@ -471,6 +489,24 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print(f"Warrant ID:  {getattr(warrant, 'id', 'unknown')}")
     print(f"Expired:     {'YES ✗' if expired else 'no ✓'}")
 
+    roots = get_trusted_roots(None)
+    if not roots:
+        print("Signature:   not checked (no trusted_root)")
+    else:
+        valid = False
+        for root in roots:
+            try:
+                if warrant.verify(root.to_bytes()):
+                    valid = True
+                    break
+            except Exception:
+                continue
+        if valid:
+            print("Signature:   valid ✓")
+        else:
+            print("Signature:   INVALID ✗  (does not match trusted_root)")
+            return 1
+
     try:
         tools = warrant.tools
         if tools is None:
@@ -480,7 +516,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
-    return 0
+    return 0 if not expired else 1
 
 
 # ---------------------------------------------------------------------------
@@ -488,17 +524,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _parse_ttl(ttl: str) -> int:
-    ttl = ttl.strip().lower()
-    if ttl.endswith("s"):
-        return int(float(ttl[:-1]))
-    elif ttl.endswith("m"):
-        return int(float(ttl[:-1]) * 60)
-    elif ttl.endswith("h"):
-        return int(float(ttl[:-1]) * 3600)
-    elif ttl.endswith("d"):
-        return int(float(ttl[:-1]) * 86400)
-    else:
-        return int(float(ttl))
+    raw = ttl.strip().lower()
+    try:
+        if raw.endswith("s"):
+            seconds = int(float(raw[:-1]))
+        elif raw.endswith("m"):
+            seconds = int(float(raw[:-1]) * 60)
+        elif raw.endswith("h"):
+            seconds = int(float(raw[:-1]) * 3600)
+        elif raw.endswith("d"):
+            seconds = int(float(raw[:-1]) * 86400)
+        else:
+            seconds = int(float(raw))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"--ttl '{ttl}': expected a duration like 30m, 1h, 7d, or a positive number of seconds"
+        ) from exc
+    if seconds <= 0:
+        raise ValueError(f"--ttl '{ttl}': must be greater than 0")
+    return seconds
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +565,9 @@ def main() -> None:
                              "Examples: --allow web_search  --allow read_file:path=/data  "
                              "--allow git:action=status|diff. Values: '*' any, 'a|b' choice, "
                              "glob with '*'/'?', '/path' prefix, otherwise exact match.")
+    mint_p.add_argument("--task", metavar="ID",
+                        help="Write the warrant to $HERMES_HOME/tenuo/warrants/<ID>.warrant "
+                             "(kanban worker path). Reuses TENUO_SIGNING_KEY as the holder when set.")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
 
@@ -528,7 +575,7 @@ def main() -> None:
     subparsers.add_parser("status", help="Show current configuration status")
 
     # verify
-    subparsers.add_parser("verify", help="Verify and inspect the current warrant")
+    subparsers.add_parser("verify", help="Verify signature, expiry, and inspect the current warrant")
 
     # doctor
     subparsers.add_parser("doctor", help="End-to-end install check: plugin discovery, warrant, enforcement path")

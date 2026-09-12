@@ -41,7 +41,8 @@ def test_default_paths_follow_hermes_home(tmp_path, monkeypatch):
 def test_plain_config_read_when_hermes_cli_absent(tmp_path, monkeypatch):
     from hermes_tenuo._config import _get_plugin_entry, get_trusted_roots, get_warrant_raw
     from hermes_tenuo._home import load_hermes_config
-    home = tmp_path / "h"; home.mkdir()
+    home = tmp_path / "h"
+    home.mkdir()
     root, agent, w = _mint()
     (home / "config.yaml").write_text(
         "plugins:\n  enabled:\n    - hermes-tenuo\n  entries:\n    hermes-tenuo:\n"
@@ -57,7 +58,8 @@ def test_plain_config_read_when_hermes_cli_absent(tmp_path, monkeypatch):
 
 def test_status_reports_config_sources(tmp_path, monkeypatch, capsys):
     from hermes_tenuo.cli import cmd_status
-    home = tmp_path / "h"; home.mkdir()
+    home = tmp_path / "h"
+    home.mkdir()
     (home / "config.yaml").write_text(
         "plugins:\n  entries:\n    hermes-tenuo:\n      warrant: ~/w.warrant\n      trusted_root: abc\n"
     )
@@ -75,7 +77,8 @@ def test_status_reports_config_sources(tmp_path, monkeypatch, capsys):
 
 def test_verify_reads_config_then_home_file(tmp_path, monkeypatch, capsys):
     from hermes_tenuo.cli import cmd_verify
-    home = tmp_path / "h"; (home / "tenuo").mkdir(parents=True)
+    home = tmp_path / "h"
+    (home / "tenuo").mkdir(parents=True)
     root, agent, w = _mint()
     b64 = base64.b64encode(w.to_bytes()).decode()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -88,12 +91,18 @@ def test_verify_reads_config_then_home_file(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert f"Source:      file: {home / 'tenuo' / 'warrant'}" in out and "Expired:     no" in out
 
-    other = tmp_path / "other.warrant"; other.write_text(b64)
+    other = tmp_path / "other.warrant"
+    other.write_text(b64)
     (home / "config.yaml").write_text(f"plugins:\n  entries:\n    hermes-tenuo:\n      warrant: {other}\n")
     assert cmd_verify(argparse.Namespace()) == 0
     assert f"Source:      config: warrant -> {other}" in capsys.readouterr().out
 
     monkeypatch.setenv("TENUO_WARRANT", b64)
+    assert cmd_verify(argparse.Namespace()) == 0
+    # Same order as the plugin: config wins over env.
+    assert f"Source:      config: warrant -> {other}" in capsys.readouterr().out
+
+    (home / "config.yaml").unlink()
     assert cmd_verify(argparse.Namespace()) == 0
     assert "Source:      env: TENUO_WARRANT" in capsys.readouterr().out
 
@@ -104,7 +113,8 @@ def test_suite_never_touches_real_home():
 
 
 def _configured_home(tmp_path, monkeypatch, signing_key):
-    home = tmp_path / "h"; home.mkdir(exist_ok=True)
+    home = tmp_path / "h"
+    home.mkdir(exist_ok=True)
     root, agent, w = _mint()
     (home / "config.yaml").write_text(
         "plugins:\n  enabled:\n    - hermes-tenuo\n  entries:\n    hermes-tenuo:\n"
@@ -114,6 +124,51 @@ def _configured_home(tmp_path, monkeypatch, signing_key):
     monkeypatch.setenv("HERMES_HOME", str(home))
     key = agent if signing_key == "matching" else root
     monkeypatch.setenv("TENUO_SIGNING_KEY", base64.b64encode(key.secret_key_bytes()).decode())
+
+
+def test_verify_rejects_untrusted_issuer(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo.cli import cmd_verify
+    from tenuo import SigningKey
+    home = tmp_path / "h"
+    (home / "tenuo").mkdir(parents=True)
+    root, agent, w = _mint()
+    other = SigningKey.generate()
+    (home / "config.yaml").write_text(
+        "plugins:\n  entries:\n    hermes-tenuo:\n"
+        f"      warrant: {base64.b64encode(w.to_bytes()).decode()}\n"
+        f"      trusted_root: {base64.b64encode(other.public_key.to_bytes()).decode()}\n"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert cmd_verify(argparse.Namespace()) == 1
+    assert "Signature:   INVALID" in capsys.readouterr().out
+
+
+def test_doctor_uses_kanban_task_warrant(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo.cli import cmd_doctor
+    from hermes_tenuo.kanban import task_warrant_path
+    home = tmp_path / "h"
+    home.mkdir()
+    root, agent, w = _mint()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "card-1")
+    (home / "config.yaml").write_text(
+        "plugins:\n  enabled:\n    - hermes-tenuo\n  entries:\n    hermes-tenuo:\n"
+        f"      warrant: {base64.b64encode(w.to_bytes()).decode()}\n"
+        f"      trusted_root: {base64.b64encode(root.public_key.to_bytes()).decode()}\n"
+    )
+    monkeypatch.setenv("TENUO_SIGNING_KEY", base64.b64encode(agent.secret_key_bytes()).decode())
+    cmd_doctor(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "kanban:" in out
+    assert "plugin configured" in out and "✗" in out
+
+    path = task_warrant_path("card-1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(base64.b64encode(w.to_bytes()).decode())
+    cmd_doctor(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "kanban card-1" in out
+    assert "✓  plugin configured" in out
 
 
 def test_doctor_holder_match_true_positive(tmp_path, monkeypatch, capsys):

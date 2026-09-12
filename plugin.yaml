@@ -1,5 +1,5 @@
 name: hermes-tenuo
-version: 0.1.0
+version: 0.1.1
 description: >
   Per-call authorization for Hermes Agent tool calls.
   Each call is checked against a signed, expiring warrant before the

@@ -17,7 +17,6 @@ Invariants tested:
     I8  No escalation:  Child cannot access tools the parent never had
 """
 
-import base64
 import pytest
 
 from hermes_tenuo.hermes_guard import HermesGuard
@@ -166,18 +165,35 @@ class TestFailClosed:
         audit_warnings = [r for r in caplog.records if "AUDIT-ONLY" in r.getMessage()]
         assert len(audit_warnings) == 1
 
-    def test_gateway_session_without_warrant_is_not_audit_only_warning(
+    def test_gateway_session_without_warrant_is_blocked(
         self, parent_warrant, agent_key, cloud_key, caplog
     ):
-        """A gateway that uses set_session_warrant is not an unconfigured plugin."""
+        """Once any session warrant exists, a session with none is blocked."""
         import logging
 
         guard = HermesGuard(trusted_roots=[cloud_key.public_key])
         guard.set_session_warrant("alice", parent_warrant, agent_key)
         with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
             assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="alice") is None
-            assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve") is None
+            eve = guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve")
+        assert eve is not None and eve["action"] == "block"
+        assert "no warrant for this session" in eve["message"]
         assert not any("AUDIT-ONLY" in r.getMessage() for r in caplog.records)
+
+    def test_require_session_warrant_false_allows_unknown_session(
+        self, parent_warrant, agent_key, cloud_key
+    ):
+        guard = HermesGuard(
+            trusted_roots=[cloud_key.public_key],
+            require_session_warrant=False,
+        )
+        guard.set_session_warrant("alice", parent_warrant, agent_key)
+        assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve") is None
+
+    def test_unconfigured_guard_still_passes_through(self):
+        """No warrant and no session registry remains the documented no-op."""
+        guard = HermesGuard()
+        assert guard.pre_tool_call("terminal", {"command": "ls"}, session_id="s1") is None
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +241,6 @@ class TestMonotonicity:
 
     def test_attenuate_builder_enforces_tool_subset(self, parent_warrant, agent_key, cloud_key):
         """attenuate_builder cannot add tools the parent doesn't have."""
-        from tenuo import Warrant, Wildcard
-        other_key = agent_key  # reuse for simplicity
         b = parent_warrant.attenuate_builder()
         b.inherit_all()
         b.with_tools(["tool:web_search"])
@@ -446,7 +460,7 @@ class TestChainIntegrity:
 
     def test_fake_parent_in_chain_blocks(self, agent_key, cloud_key):
         """A child warrant presented with a fake parent (not its actual ancestor) is rejected."""
-        from tenuo import Warrant, SigningKey, Wildcard, Subpath
+        from tenuo import Warrant, SigningKey, Wildcard
 
         attacker_key = SigningKey.generate()
 
@@ -524,7 +538,7 @@ class TestNoEscalation:
     def test_child_tool_blocked_for_unauthorized_tool(self, agent_key, cloud_key):
         """Even if child warrant somehow contains an escalated tool, enforcement rejects it
         when the warrant chain is verified against the parent that didn't have the tool."""
-        from tenuo import Warrant, Wildcard, SigningKey
+        from tenuo import Warrant, Wildcard
         # This test verifies that warrant_chain enforcement (check_chain) catches
         # escalation even if the child object was constructed with extra tools.
         # We can't easily construct a "valid but escalated" child with attenuate_builder

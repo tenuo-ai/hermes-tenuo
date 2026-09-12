@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from hermes_tenuo.hermes_guard import HermesGuard
+
 logger = logging.getLogger("hermes_tenuo._guard")
 
 
@@ -19,6 +21,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         get_audit_log_path,
         get_child_warrant_raw,
         get_on_denial,
+        get_require_session_warrant,
         get_signing_key,
         get_trusted_roots,
         get_warrant_raw,
@@ -42,7 +45,6 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         audit_callback = LocalAuditLog(audit_path)
         logger.debug("hermes-tenuo: audit log at %s", audit_path)
 
-    from hermes_tenuo.hermes_guard import HermesGuard
     guard = HermesGuard(
         warrant=warrant,
         signing_key=signing_key,
@@ -50,6 +52,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         trusted_roots=trusted_roots,
         on_denial=on_denial,
         audit_callback=audit_callback,
+        require_session_warrant=get_require_session_warrant(ctx),
     )
 
     return PluginGuard(guard)
@@ -58,7 +61,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
 class PluginGuard:
     """Adapts Hermes hook signatures to HermesGuard methods."""
 
-    def __init__(self, guard: "HermesGuard"):
+    def __init__(self, guard: HermesGuard):
         self._guard = guard
 
     @property
