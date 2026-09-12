@@ -31,7 +31,17 @@ import pytest
 pytest.importorskip("hermes_cli.plugins")
 
 ROOT = Path(__file__).resolve().parents[1]
-_IGNORE = shutil.ignore_patterns(".git", ".venv", "venv", "build", "dist", "*.egg-info", "__pycache__", ".pytest_cache")
+_IGNORE = shutil.ignore_patterns(
+    ".git",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    "__pycache__",
+    ".pytest_cache",
+    "hermes-agent",  # workflow checks Hermes out here; do not copy it into the fake plugin
+)
 
 
 def _plugin_installed() -> bool:
