@@ -69,7 +69,8 @@ def cmd_mint(args: argparse.Namespace) -> int:
 
 def _mint_from_trigger(args: argparse.Namespace) -> int:
     """Mint via Tenuo Cloud trigger: POST /v1/triggers/{id}/fire."""
-    token = getattr(args, "connect_token", None) or os.environ.get("TENUO_CONNECT_TOKEN")
+    from hermes_tenuo._config import _env_secret
+    token = getattr(args, "connect_token", None) or _env_secret("TENUO_CONNECT_TOKEN")
     if not token:
         print(
             "error: --trigger requires a connect token. "
@@ -305,13 +306,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         note("hermes_cli not importable here — skipping config.yaml checks")
 
     # 4. Configured? Enabled-but-empty is a silent no-op at runtime.
-    from hermes_tenuo._config import load_warrant
+    from hermes_tenuo._config import _env_secret, load_warrant
 
     raw = (
         config_entry.get("warrant")
-        or os.environ.get("TENUO_WARRANT")
+        or _env_secret("TENUO_WARRANT")
     )
-    connect_token = config_entry.get("connect_token") or os.environ.get("TENUO_CONNECT_TOKEN")
+    connect_token = config_entry.get("connect_token") or _env_secret("TENUO_CONNECT_TOKEN")
     if raw and (raw.startswith("/") or raw.startswith("~") or raw.startswith(".")):
         path = os.path.expanduser(raw)
         if os.path.exists(path):
@@ -353,10 +354,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             note("could not determine warrant expiry")
 
         # 6. Signing key + holder match
-        signing_raw = os.environ.get(
-            config_entry.get("signing_key_env", "TENUO_SIGNING_KEY"),
-            os.environ.get("TENUO_SIGNING_KEY"),
-        )
+        key_env = config_entry.get("signing_key_env", "TENUO_SIGNING_KEY")
+        signing_raw = _env_secret(key_env) or _env_secret("TENUO_SIGNING_KEY")
         if signing_raw:
             try:
                 from tenuo_core import SigningKey
@@ -376,7 +375,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
 
         # 7. Trusted root (required for enforcement)
-        trusted = config_entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
+        trusted = config_entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
         check(
             bool(trusted),
             "trusted_root set",
@@ -432,7 +431,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant is valid and show its capabilities."""
-    warrant_raw = os.environ.get("TENUO_WARRANT")
+    from hermes_tenuo._config import _env_secret
+    warrant_raw = _env_secret("TENUO_WARRANT")
     if not warrant_raw:
         # Try reading from file
         default_path = os.path.expanduser("~/.hermes/tenuo/warrant")

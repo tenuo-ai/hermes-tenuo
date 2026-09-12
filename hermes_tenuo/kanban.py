@@ -15,11 +15,14 @@ and the plugin wiring in _config.py / _guard.py call into here.
 
 Credential scoping in worker subprocesses
 ------------------------------------------
-Hermes's kanban_db._default_spawn builds the worker env with
-``env = dict(os.environ)`` and passes it to Popen without a sanitization
-filter (unlike cron scripts, which strip credential vars). As a result,
-every env var visible to the dispatcher — including TENUO_SIGNING_KEY,
-TENUO_CONNECT_TOKEN, and TENUO_WARRANT — is inherited by worker subprocesses.
+On a single-profile Hermes, kanban_db._default_spawn copies ``os.environ``
+into the worker, so TENUO_SIGNING_KEY / TENUO_CONNECT_TOKEN / TENUO_WARRANT
+are inherited from the dispatcher.
+
+Under ``gateway.multiplex_profiles`` (Hermes #108748), that copy is
+scrubbed and the worker is given the *routed* profile's secret scope.
+``_config._env_secret`` reads those names through ``get_secret``, so a
+secondary profile never sees the launch profile's Tenuo credentials.
 
 TENUO_SIGNING_KEY: intentionally forwarded. The worker needs it to produce
   Proof-of-Possession signatures against its per-task warrant. The key

@@ -133,6 +133,61 @@ class TestGetTrustedRoots:
         assert len(roots) == 1
 
 
+class TestEnvSecret:
+
+    def test_falls_back_to_os_environ_without_secret_scope(self, monkeypatch):
+        from hermes_tenuo._config import _env_secret
+        monkeypatch.setenv("TENUO_WARRANT", "from-environ")
+        import sys
+        with patch.dict(sys.modules, {"agent": None, "agent.secret_scope": None}):
+            assert _env_secret("TENUO_WARRANT") == "from-environ"
+
+    def test_uses_get_secret_when_available(self):
+        from hermes_tenuo._config import _env_secret
+
+        class _Scope:
+            UnscopedSecretError = RuntimeError
+
+            @staticmethod
+            def get_secret(name, default=None):
+                return {"TENUO_SIGNING_KEY": "from-scope"}.get(name, default)
+
+        import sys
+        from types import ModuleType
+        agent_mod = ModuleType("agent")
+        scope_mod = ModuleType("agent.secret_scope")
+        scope_mod.UnscopedSecretError = _Scope.UnscopedSecretError
+        scope_mod.get_secret = _Scope.get_secret
+        with patch.dict(sys.modules, {"agent": agent_mod, "agent.secret_scope": scope_mod}):
+            assert _env_secret("TENUO_SIGNING_KEY") == "from-scope"
+
+    def test_unscoped_multiplex_does_not_read_os_environ(self, monkeypatch):
+        from hermes_tenuo._config import _env_secret
+        monkeypatch.setenv("TENUO_CONNECT_TOKEN", "launch-profile-token")
+
+        class UnscopedSecretError(RuntimeError):
+            pass
+
+        def _raise(name, default=None):
+            raise UnscopedSecretError(name)
+
+        import sys
+        from types import ModuleType
+        agent_mod = ModuleType("agent")
+        scope_mod = ModuleType("agent.secret_scope")
+        scope_mod.UnscopedSecretError = UnscopedSecretError
+        scope_mod.get_secret = _raise
+        with patch.dict(sys.modules, {"agent": agent_mod, "agent.secret_scope": scope_mod}):
+            assert _env_secret("TENUO_CONNECT_TOKEN") is None
+
+    def test_get_connect_token_uses_env_secret(self):
+        from hermes_tenuo._config import get_connect_token
+        with patch("hermes_tenuo._config._get_plugin_entry", return_value={}):
+            with patch("hermes_tenuo._config._env_secret", return_value="tc_scoped") as mock_secret:
+                assert get_connect_token(FakeCtx()) == "tc_scoped"
+                mock_secret.assert_called_with("TENUO_CONNECT_TOKEN")
+
+
 class TestLoadWarrant:
 
     def test_loads_valid_warrant(self, warrant_b64):

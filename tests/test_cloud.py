@@ -67,6 +67,16 @@ class TestParseConnectToken:
         creds = parse_connect_token(token)
         assert creds.registration_token == "reg_abc"
 
+    def test_rejects_missing_or_unsupported_version(self):
+        """tenuo>=0.3.0 requires connect-token version 1."""
+        from hermes_tenuo._cloud import parse_connect_token
+        def _token(payload):
+            raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+            return f"tenuo_ct_{raw}"
+        assert parse_connect_token(_token({"e": "https://api.tenuo.ai", "k": "tc_x"})) is None
+        assert parse_connect_token(_token({"v": 0, "e": "https://api.tenuo.ai", "k": "tc_x"})) is None
+        assert parse_connect_token(_token({"v": 2, "e": "https://api.tenuo.ai", "k": "tc_x"})) is None
+
 
 # ---------------------------------------------------------------------------
 # fire_trigger

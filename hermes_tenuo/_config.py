@@ -3,7 +3,7 @@ Config resolution for hermes-tenuo.
 
 Priority order for each setting:
   1. Hermes config.yaml: plugins.entries.hermes-tenuo.<key>
-  2. Environment variable fallback
+  2. Environment / profile secret scope (see ``_env_secret``)
 """
 
 from __future__ import annotations
@@ -17,6 +17,32 @@ from typing import Any, List, Optional
 logger = logging.getLogger("hermes_tenuo._config")
 
 _PLUGIN_KEY = "hermes-tenuo"
+
+
+def _env_secret(name: str) -> Optional[str]:
+    """Resolve a Tenuo credential without leaking another Hermes profile's env.
+
+    Under ``gateway.multiplex_profiles`` (Hermes #108319 / #108748, Sep 2026)
+    profile secrets live in a contextvar scope, not ``os.environ``. Reading
+    ``os.environ`` on a secondary-profile turn would return the launch
+    profile's ``TENUO_*`` values. ``get_secret`` is fail-closed: a miss or
+    an unscoped read never falls through to another profile.
+
+    On older Hermes (no ``agent.secret_scope``) or single-profile runs,
+    this is ``os.environ.get``.
+    """
+    try:
+        from agent.secret_scope import UnscopedSecretError, get_secret
+    except ImportError:
+        return os.environ.get(name)
+    try:
+        return get_secret(name)
+    except UnscopedSecretError:
+        logger.debug(
+            "hermes-tenuo: %s unscoped under multiplex — treating as unset",
+            name,
+        )
+        return None
 
 
 def _get_plugin_entry(ctx: Any) -> dict:
@@ -37,7 +63,7 @@ def get_connect_token(ctx: Any) -> Optional[str]:
     entry = _get_plugin_entry(ctx)
     return (
         entry.get("connect_token")
-        or os.environ.get("TENUO_CONNECT_TOKEN")
+        or _env_secret("TENUO_CONNECT_TOKEN")
     )
 
 
@@ -78,7 +104,7 @@ def get_warrant_raw(ctx: Any) -> Optional[str]:
         return None
 
     entry = _get_plugin_entry(ctx)
-    raw = entry.get("warrant") or os.environ.get("TENUO_WARRANT")
+    raw = entry.get("warrant") or _env_secret("TENUO_WARRANT")
     if not raw:
         return None
     if _looks_like_path(raw):
@@ -91,7 +117,7 @@ def get_warrant_raw(ctx: Any) -> Optional[str]:
 def get_child_warrant_raw(ctx: Any) -> Optional[str]:
     """Return child warrant for delegate_task subagents."""
     entry = _get_plugin_entry(ctx)
-    raw = entry.get("child_warrant") or os.environ.get("TENUO_CHILD_WARRANT")
+    raw = entry.get("child_warrant") or _env_secret("TENUO_CHILD_WARRANT")
     if not raw:
         return None
     if _looks_like_path(raw):
@@ -105,7 +131,7 @@ def get_signing_key(ctx: Any):
     """Return SigningKey from env or config, or None."""
     entry = _get_plugin_entry(ctx)
     key_env = entry.get("signing_key_env", "TENUO_SIGNING_KEY")
-    raw = os.environ.get(key_env)
+    raw = _env_secret(key_env)
     if not raw:
         return None
     try:
@@ -119,7 +145,7 @@ def get_signing_key(ctx: Any):
 def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
     """Return list of trusted PublicKeys from env or config, or None."""
     entry = _get_plugin_entry(ctx)
-    raw = entry.get("trusted_root") or os.environ.get("TENUO_TRUSTED_ROOT")
+    raw = entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
     if not raw:
         return None
     try:
