@@ -49,7 +49,8 @@ Analyst and viewer on the same server, different warrants.
 ```
 
 That `DENY` line is the tool result Hermes gives the model. The handler
-never runs:
+never runs. For a recorded session with a real model and a planted prompt
+injection, see [docs/walkthrough.md](docs/walkthrough.md).
 
 ```text
 read_file  path=/etc/passwd
