@@ -1,29 +1,34 @@
-"""
-hermes-tenuo: Tenuo authorization plugin for Hermes Agent.
+"""hermes-tenuo: Tenuo authorization plugin for Hermes Agent.
 
-Hermes plugin entry point. Hermes calls register(ctx) at startup.
-
-Install:
-    pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
-
-Enable in ~/.hermes/config.yaml:
-    plugins:
-      enabled:
-        - hermes-tenuo
-      entries:
-        hermes-tenuo:
-          warrant: ~/.hermes/tenuo/warrant
-          # connect_token: tc_live_...   # optional: Tenuo Cloud
+Hermes calls ``register(ctx)`` at startup. See ``hermes-tenuo demo``
+for a transcript with no Hermes process.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from hermes_tenuo.hermes_guard import HermesGuard, HermesAuditEvent  # noqa: F401
 
 logger = logging.getLogger("hermes_tenuo")
+
+
+def _register_skills(ctx: Any) -> None:
+    skills_dir = Path(__file__).parent / "skills"
+    if not skills_dir.is_dir():
+        return
+    register_skill = getattr(ctx, "register_skill", None)
+    if register_skill is None:
+        return
+    for child in sorted(skills_dir.iterdir()):
+        skill_md = child / "SKILL.md"
+        if child.is_dir() and skill_md.is_file():
+            try:
+                register_skill(child.name, skill_md)
+            except Exception as exc:
+                logger.debug("hermes-tenuo: skill %s not registered (%s)", child.name, exc)
 
 
 def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
@@ -61,6 +66,7 @@ def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
 
 def register(ctx: Any) -> None:
     """Called by Hermes plugin loader at startup."""
+    _register_skills(ctx)
     from hermes_tenuo._guard import build_plugin_guard
 
     guard = build_plugin_guard(ctx)

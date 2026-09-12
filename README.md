@@ -2,28 +2,58 @@
 
 **Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
 
-Hermes agents run unattended: cron jobs, `delegate_task` subagents, gateway
-users on Telegram or Discord, kanban workers. Each one gets the full tool set,
-so one poisoned web page or one over-eager subagent has the same blast radius
-as you do at the keyboard.
+A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant sits in front of every
+Hermes tool call. Each call is checked at the argument level before the
+handler runs. Authority is traced across `delegate_task` and gateway
+sessions. Keys, warrants, and decisions stay local.
 
-hermes-tenuo puts a [Tenuo](https://github.com/tenuo-ai/tenuo) **warrant** in
-front of every tool call. A warrant is a signed grant that says which tools
-this agent may call, with which arguments, until when. The plugin checks each
-call against it before the handler runs. The agent cannot widen its own
-warrant, a subagent can only receive a narrower one, and when the TTL ends the
-job ends with it.
+See it without installing Hermes or talking to a model:
 
-```text
-read_file  path=/data/q3.md      ✓ allowed
-read_file  path=/etc/passwd      ✗ Constraint 'path' not satisfied
-terminal   command=ls            ✗ Tool 'terminal' is not authorized
+```bash
+pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+hermes-tenuo demo
 ```
 
-Everything runs locally: keys, warrants, and every decision. No account, no
-network, no proxy, no changes to your tools. It is a normal Hermes plugin.
+```text
+Give each Hermes agent a signed, expiring permission slip.
+Nothing outside it runs. No Hermes process, no API key.
 
-## Quickstart (two minutes)
+== Cron ==
+Nightly job: read /data/reports, write /tmp/nightly, then stop.
+  ALLOW  read_file  path=/data/reports/q3.csv
+  ALLOW  write_file  path=/tmp/nightly/report.md
+  DENY   read_file  path=/etc/passwd
+         Constraint 'path' not satisfied: value does not match constraint
+  DENY   terminal  command=ls
+         Tool 'terminal' is not authorized
+
+== delegate_task ==
+Authority is traced across the child session.
+  [orchestrator] ALLOW  read_file  path=/data/input.csv
+  [orchestrator] ALLOW  delegate_task  task=research q3  context=web_search only
+  [researcher] ALLOW  web_search  query=AI papers 2026
+  [researcher] DENY   write_file  path=/data/output/x.md
+         Tool 'write_file' is not authorized
+
+== Gateway ==
+Analyst and viewer on the same server, different warrants.
+  [analyst] ALLOW  read_file  path=/data/reports/q1.csv
+  [analyst] DENY   write_file  path=/data/output/x.txt
+         Tool 'write_file' is not authorized
+  [viewer] ALLOW  read_file  path=/data/public/faq.md
+  [viewer] DENY   read_file  path=/data/reports/q1.csv
+         Constraint 'path' not satisfied: value does not match constraint
+```
+
+That `DENY` line is the tool result Hermes gives the model. The handler
+never runs:
+
+```text
+read_file  path=/etc/passwd
+Constraint 'path' not satisfied: value does not match constraint
+```
+
+## Install into Hermes
 
 **1. Install.**
 
@@ -68,13 +98,9 @@ hermes-tenuo doctor
 hermes
 ```
 
-Ask the agent to read `/etc/passwd` or run a shell command. It gets a denial
-as the tool result and the handler never executes:
-
-```text
-Constraint 'path' not satisfied: value does not match constraint
-Tool 'terminal' is not authorized
-```
+Ask the agent to read `/etc/passwd`. It gets the same denial as the tool
+result. Load `skill_view("hermes-tenuo:tenuo-scope")` to mint a warrant
+for a cron job, a `delegate_task` child, or a gateway session.
 
 ## Scoping arguments
 
@@ -129,7 +155,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | Scenario | What you do | What you get |
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
-| **Subagents via `delegate_task`** | Set `child_warrant` to a narrower warrant | Every child session gets the narrow warrant automatically; a researcher cannot suddenly `write_file` |
+| **Subagents via `delegate_task`** | Set `child_warrant` | Authority is traced across the child session; a researcher cannot suddenly `write_file` |
 | **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | Per-user permissions, isolated per session, cleared on session end |
 | **Kanban workers** | Drop `~/.hermes/tenuo/warrants/<task_id>.warrant` | The worker loads its own warrant; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
@@ -207,6 +233,7 @@ that threat model.
 ## CLI
 
 ```bash
+hermes-tenuo demo        # local allow/deny transcript (no Hermes process)
 hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--output full|yaml|env]
 hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # decode and check the current warrant

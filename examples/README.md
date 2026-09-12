@@ -1,16 +1,19 @@
 # Examples
 
+No Hermes process and no API key. Start here:
+
 ```bash
-pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
-# or, from a clone:
 pip install -e ..
+hermes-tenuo demo
+# or: python demo.py
+```
 
-hermes-tenuo mint --allow read_file:path=/data --allow web_search --ttl 1h --output full
-hermes-tenuo doctor
+That prints the cron, `delegate_task`, and gateway scenes. The longer scripts below are the same `HermesGuard.pre_tool_call` path, one file per scene.
 
+```bash
 python cron_warrant.py
 python subagent_scope.py
 python gateway_multiuser.py
 ```
 
-Requires `tenuo>=0.3.0` and Hermes Agent 0.20.x.
+Requires `tenuo>=0.3.0`.

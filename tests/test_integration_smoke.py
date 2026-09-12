@@ -91,6 +91,10 @@ class MockCtx:
 
     def __init__(self):
         self.hooks: dict[str, list] = {}
+        self.skills: dict[str, Any] = {}
+
+    def register_skill(self, name: str, path: Any) -> None:
+        self.skills[name] = path
 
     def register_hook(self, name: str, fn) -> None:
         self.hooks.setdefault(name, []).append(fn)
@@ -225,6 +229,10 @@ class TestHookRegistration:
             assert ctx.registered("pre_tool_call"), (
                 "pre_tool_call hook must be registered on the hook-only path"
             )
+            assert "tenuo-scope" in ctx.skills
+            skill_md = Path(ctx.skills["tenuo-scope"])
+            assert skill_md.is_file()
+            assert skill_md.name == "SKILL.md"
 
     def test_pre_tool_call_registered_post_32719(
         self, parent_warrant, agent_key, root_key
