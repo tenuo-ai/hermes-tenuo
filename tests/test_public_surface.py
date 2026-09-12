@@ -62,3 +62,9 @@ def test_catalog_entry_matches_manifest():
     declared_env = [e["name"] if isinstance(e, dict) else e for e in manifest["requires_env"]]
     assert entry["capabilities"]["requires_env"] == declared_env
     assert not (ROOT / "docs" / "plugin-index-entry.json").exists()
+
+
+def test_readme_keeps_listing_strategy_out():
+    text = (ROOT / "README.md").read_text().lower()
+    assert "catalog" not in text
+    assert "plugin-catalog" not in text

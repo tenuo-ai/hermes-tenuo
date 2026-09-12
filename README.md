@@ -301,18 +301,35 @@ Pin `warrant`, `trusted_root`, and `on_denial`. Leave `signing_key_env` to
 the environment. Override the managed directory with `HERMES_MANAGED_DIR` for
 containers or non-standard layouts.
 
-## A hosted control plane (optional)
+## Connecting a control plane (optional)
 
-Everything above works without an account. Details at [tenuo.ai](https://tenuo.ai).
+Everything above runs from files and environment variables on one machine.
+That is the right shape for one developer and a handful of agents. Once you
+run a fleet of Hermes agents, cron jobs, and gateway users, the hard part
+stops being the check itself and becomes operating the authority around it:
+who may mint production warrants, how keys rotate, how a bad warrant is
+pulled back before its TTL ends, and where you look when something was
+denied at 3 a.m. A Tenuo control plane takes that over.
 
-## Listing in the Hermes plugin catalog
+When `TENUO_CONNECT_TOKEN` is set, the Tenuo SDK inside this plugin connects
+on its own and every allow and deny decision from every Hermes agent streams
+there, with nothing else to configure. On top of that stream the control
+plane gives you:
 
-[`docs/plugin-catalog-entry.yaml`](docs/plugin-catalog-entry.yaml) is the
-entry in Hermes's catalog schema. To list the plugin, open a PR to
-`NousResearch/hermes-agent` adding it as `plugin-catalog/hermes-tenuo.yaml`
-with `sha` set to the tagged release commit. Their rules: the pinned commit
-must be at least two weeks old, the submitter must own the repo, and the
-declared hooks must match what `register()` registers at that commit.
+- **Revocation before expiry.** Pull a warrant, a key, or an agent the moment
+  something looks wrong instead of waiting for the TTL. Revocation lists are
+  published to every verifier.
+- **Central issuance and rotation.** Mint per-job warrants from policy rather
+  than by hand, and rotate root and holder keys on a schedule without
+  touching each agent's environment.
+- **Human approval gates.** Route calls to sensitive tools to a person, so
+  the agent can proceed only with a signed approval.
+- **One searchable audit trail.** Signed receipts from every agent, session,
+  and profile in one place, instead of one `audit.jsonl` per machine.
+
+Tenuo Cloud is the managed version of that control plane. See
+[tenuo.ai](https://tenuo.ai) for access, or the Tenuo repo for running your
+own.
 
 ## License
 
