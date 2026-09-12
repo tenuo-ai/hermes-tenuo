@@ -25,3 +25,19 @@ def test_skill_is_local_only():
     assert "hermes-tenuo mint" in text
     assert "Cloud" not in text
     assert "connect_token" not in text
+
+
+def test_skill_covers_delegation_practices():
+    text = (ROOT / "hermes_tenuo" / "skills" / "tenuo-scope" / "SKILL.md").read_text()
+    for needle in (
+        "Decide the pattern first",
+        "Issuer ≠ agent",
+        "child_warrant",
+        "grant_builder",
+        "set_session_warrant",
+        "warrants/<task_id>.warrant",
+        "on_denial: log",
+        "Do not hand a child the parent's warrant",
+        "Anti-patterns",
+    ):
+        assert needle in text, needle
