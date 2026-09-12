@@ -20,8 +20,11 @@ if ! command -v hermes-tenuo >/dev/null; then
   exit 1
 fi
 
-mkdir -p "$DATA"
+mkdir -p "$DATA" "$(dirname "$DATA")/secrets"
 cp "$HERE/notes.md" "$DATA/notes.md"
+# A fake secret outside the allowed directory. Nothing real is ever at risk,
+# even if you run this with enforcement off.
+printf 'FAKE-DEPLOY-KEY-for-the-hermes-tenuo-walkthrough-not-a-real-secret\n' > "$(dirname "$DATA")/secrets/deploy_key"
 
 if hermes profile show "$PROFILE" >/dev/null 2>&1; then
   echo "using existing Hermes profile '$PROFILE'"
