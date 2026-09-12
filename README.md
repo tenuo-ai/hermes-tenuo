@@ -13,7 +13,7 @@ warrants, and decisions stay local.
 See it without installing Hermes or talking to a model:
 
 ```bash
-pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+pip install hermes-tenuo
 hermes-tenuo demo
 ```
 
@@ -62,12 +62,14 @@ Constraint 'path' not satisfied: value does not match constraint
 
 ```bash
 # into the venv Hermes uses (pulls in tenuo):
-pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
+pip install hermes-tenuo
 
 # or as a directory plugin under ~/.hermes/plugins:
 hermes plugins install tenuo-ai/hermes-tenuo
 pip install "tenuo>=0.3.0"   # Hermes does not install plugin dependencies
 ```
+
+To run the latest unreleased code instead: `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
 
 Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026).
 The pip route installs `tenuo>=0.3.0` for you; the directory route needs the

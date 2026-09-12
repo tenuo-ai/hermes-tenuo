@@ -259,7 +259,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(
             bool(registered),
             "plugin entry point hermes_agent.plugins:hermes-tenuo registered",
-            'reinstall: pip install --force-reinstall "git+https://github.com/tenuo-ai/hermes-tenuo.git"',
+            'reinstall: pip install --force-reinstall hermes-tenuo',
         )
     except Exception as exc:
         note(f"could not check entry points ({exc})")
