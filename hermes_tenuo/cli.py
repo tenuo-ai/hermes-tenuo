@@ -7,6 +7,7 @@ Usage:
     hermes-tenuo status
     hermes-tenuo verify
     hermes-tenuo audit --last 20 --denied
+    hermes-tenuo demo
 
 Each --allow takes a tool name with optional argument constraints:
 
@@ -618,6 +619,8 @@ def main() -> None:
     audit_p.add_argument("--json", action="store_true", help="Raw JSON lines instead of the table")
     audit_p.add_argument("--path", metavar="FILE", help="Audit log file (default: $HERMES_HOME/tenuo/audit.jsonl)")
 
+    subparsers.add_parser("demo", help="Print a local allow/deny transcript (no Hermes process)")
+
     args = parser.parse_args()
 
     if args.command == "mint":
@@ -630,6 +633,9 @@ def main() -> None:
         sys.exit(cmd_doctor(args))
     elif args.command == "audit":
         sys.exit(cmd_audit(args))
+    elif args.command == "demo":
+        from hermes_tenuo.demo import main as cmd_demo
+        sys.exit(cmd_demo())
     else:
         parser.print_help()
         sys.exit(0)

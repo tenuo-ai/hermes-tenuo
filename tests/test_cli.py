@@ -42,6 +42,20 @@ class TestMintLocal:
         assert "warrant: " in out
         assert "trusted_root: " in out
 
+    def test_demo_command(self, capsys):
+        from hermes_tenuo.cli import main
+        import sys
+        old = sys.argv
+        sys.argv = ["hermes-tenuo", "demo"]
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 0
+        finally:
+            sys.argv = old
+        out = capsys.readouterr().out
+        assert "DENY   read_file  path=/etc/passwd" in out
+
     def test_mint_full_output(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(

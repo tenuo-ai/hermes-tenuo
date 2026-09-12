@@ -1,41 +1,18 @@
-"""
-Tenuo Hermes Agent Integration
+"""Warrant checks for Hermes Agent tool calls.
 
-Provides warrant-based authorization for Hermes Agent tool calls via the
-Hermes plugin hook system.
+``HermesGuard.pre_tool_call`` runs on every tool name and argument dict
+before the handler. It returns ``{"action": "block", "message": ...}``
+or ``None``. ``post_tool_call`` writes the local audit record.
 
-Primary usage is through the hermes-tenuo plugin package (pip install hermes-tenuo).
-HermesGuard can also be used directly for programmatic setups.
+Typical use is the plugin entry point. You can also construct
+``HermesGuard`` in tests and scripts (see ``hermes-tenuo demo``).
 
-Architecture:
-    Every Hermes tool call flows through handle_function_call() in model_tools.py,
-    which fires pre_tool_call hooks before dispatch and post_tool_call hooks after.
-    HermesGuard.pre_tool_call() enforces the warrant; post_tool_call() emits audit
-    events to Tenuo Cloud.
-
-Audit-first on-ramp:
-    Set TENUO_CONNECT_TOKEN to start streaming tool calls to Cloud immediately.
-    Enforcement activates once TENUO_WARRANT is set (or warrant= is passed directly).
-    Cloud's warrant builder learns from real call patterns and generates tight warrants.
-
-    Install:
-        pip install hermes-tenuo
-
-    Minimal config (~/.hermes/config.yaml):
-        plugins:
-          enabled:
-            - hermes-tenuo
-          entries:
-            hermes-tenuo:
-              connect_token: tc_live_...
-
-Security invariants:
-    - Agents are warrant consumers, never warrant requesters.
-    - TENUO_WARRANT must not be set from within agent tool context.
-    - Child warrants for delegate_task subagents are pre-registered by the
-      plugin before delegate_task runs, keyed by (parent_session_id, task_index).
-    - Children inherit the child_warrant config or an attenuated warrant —
-      never the parent's root warrant.
+Invariants:
+    - Agents consume warrants; they do not mint them.
+    - ``delegate_task`` children get a session warrant via ``subagent_start``
+      or ``set_session_warrant``. Authority is traced across that hop.
+    - Concurrent gateway sessions must use ``set_session_warrant`` per
+      session. The single-agent child heuristic is not safe there.
 """
 
 from __future__ import annotations
@@ -102,50 +79,24 @@ def _format_denial_reason(result: Any, tool_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 class HermesGuard:
-    """
-    Authorization guard for Hermes Agent tool calls.
+    """Authorization guard for Hermes Agent tool calls.
 
-    Wires into Hermes's pre_tool_call and post_tool_call plugin hooks.
-    In audit-only mode (no warrant configured), every tool call is logged
-    to Tenuo Cloud for warrant builder learning. Enforcement activates
-    once a warrant is present.
+    Wires into ``pre_tool_call`` and ``post_tool_call``. Without a warrant,
+    calls pass through and a warning is logged. With a warrant, each call
+    is checked before the handler runs.
 
-    Deployment modes
-    ----------------
     Single-agent (CLI / cron):
-        Provide `warrant` + `signing_key`. One session runs at a time.
-        delegate_task subagents are detected by the _primary_session_id
-        heuristic: the first session_id seen is the parent; all others
-        are treated as children and receive attenuated warrants.
+        Pass ``warrant`` and ``signing_key``. One session at a time.
 
-    Multi-user gateway (Slack / Telegram / Discord bot):
-        The _primary_session_id heuristic is NOT safe for concurrent
-        sessions — User B's independent session would be misidentified as
-        a child of User A. For gateway deployments, call
-        ``fire_session_warrant(session_id, trigger_id)`` for each user
-        session before it runs tools. Explicit session warrants take
-        precedence over the heuristic and are safe to use concurrently.
+    ``delegate_task``:
+        After the parent call is allowed, ``subagent_start`` (or
+        ``set_session_warrant``) attaches the child session warrant.
+        Authority is traced across that hop.
 
-        Example::
-
-            @bot.message_handler
-            def on_message(msg):
-                guard.fire_session_warrant(
-                    session_id=str(msg.chat.id),
-                    trigger_id="trg-telegram-user",
-                )
-                hermes.run(session_id=str(msg.chat.id), ...)
-
-        The Permanent Fix: Hermes firing ``on_session_start`` with
-        ``parent_session_id`` would allow exact child detection with no
-        heuristics. The hook is wired and ready (see ``on_session_start``);
-        it is awaiting a Hermes-side change to emit it.
-
-    delegate_task interception:
-        When tool_name == "delegate_task", the guard pre-registers
-        attenuated child warrants keyed by (parent_session_id, task_index)
-        so children never inherit the parent's root authority. Registration
-        happens only after delegate_task is authorized.
+    Multi-user gateway:
+        The single-agent child heuristic is not safe when sessions run
+        concurrently. Call ``set_session_warrant(session_id, warrant)``
+        when a session starts and ``clear_session_warrant`` when it ends.
     """
 
     def __init__(
