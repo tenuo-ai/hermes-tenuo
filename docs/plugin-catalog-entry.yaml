@@ -5,7 +5,7 @@
 # register() registers at that commit.
 name: hermes-tenuo
 repo: https://github.com/tenuo-ai/hermes-tenuo
-sha: f17cbd175744e5a4c934872633c02f39b4ee6f4f   # v0.1.0 — refresh with `git rev-parse v0.1.0` before submitting
+sha: 03a022f40504da107d69d1d8e5f8645d67a644c0   # v0.1.0 — refresh with `git rev-parse v0.1.0` before submitting
 description: Per-call authorization for Hermes tool calls. Each call is checked against a signed, expiring warrant, arguments included, before the handler runs.
 maintainer: tenuo-ai
 tier: community
