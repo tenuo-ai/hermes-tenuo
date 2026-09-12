@@ -1,11 +1,13 @@
 # Entry for the Hermes plugin catalog (NousResearch/hermes-agent, plugin-catalog/).
 # Submit as a PR adding this file as plugin-catalog/hermes-tenuo.yaml.
-# Rules that apply (plugin-catalog/README.md there): exact 40-hex sha, pinned commit
-# at least two weeks old, submitted by the repo owner, capabilities must match what
-# register() registers at that commit.
+# The sha below is a placeholder on purpose: fill it at submission time with
+#   git rev-parse v0.1.0
+# so this file never drifts from the tag. Their rules: exact 40-hex sha, pinned
+# commit at least two weeks old, submitted by the repo owner, capabilities must
+# match what register() registers at that commit.
 name: hermes-tenuo
 repo: https://github.com/tenuo-ai/hermes-tenuo
-sha: 03a022f40504da107d69d1d8e5f8645d67a644c0   # v0.1.0 — refresh with `git rev-parse v0.1.0` before submitting
+sha: 0000000000000000000000000000000000000000   # placeholder: git rev-parse v0.1.0
 description: Per-call authorization for Hermes tool calls. Each call is checked against a signed, expiring warrant, arguments included, before the handler runs.
 maintainer: tenuo-ai
 tier: community
