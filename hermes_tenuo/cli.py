@@ -194,10 +194,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     all_required = True
     for label, cfg_val, env_val, cfg_key, env_name in rows:
         if cfg_val:
-            source = f"config: {cfg_key}"
-            if isinstance(cfg_val, str) and cfg_val.startswith(("/", "~", ".")):
-                source += f" -> {os.path.expanduser(cfg_val)}"
-            print(f"  ✓  {label:14} set  ({source})")
+            # Never echo the value: a warrant or root is credential material. Say only
+            # whether the config points at a file or carries the value inline.
+            kind = "file" if isinstance(cfg_val, str) and cfg_val.startswith(("/", "~", ".")) else "inline"
+            print(f"  ✓  {label:14} set  (config: {cfg_key}, {kind})")
         elif env_val:
             print(f"  ✓  {label:14} set  (env: {env_name})")
         else:
