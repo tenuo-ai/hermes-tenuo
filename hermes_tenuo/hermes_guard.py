@@ -604,6 +604,7 @@ class HermesGuard:
             # *policy* denials from the Rust core (result.allowed=False). Internal
             # failures (bad warrant, expired key, crypto error) should never silently
             # allow execution, regardless of the on_denial setting.
+            self._remember_decision(tool_call_id, False, f"Authorization error: {exc}")
             return {"action": "block", "message": f"Authorization error: {exc}"}
 
         if self._control_plane is not None:
@@ -618,16 +619,28 @@ class HermesGuard:
 
         if not result.allowed:
             reason = _format_denial_reason(result, tool_name)
+            # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
+            # so the post record must carry this decision, not "post-dispatch".
+            self._remember_decision(tool_call_id, False, reason)
             if self._on_denial == "log":
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
-                # Store the real decision so post_tool_call records DENY, not ALLOW
-                if tool_call_id:
-                    with self._pre_decisions_lock:
-                        self._pre_decisions[tool_call_id] = (False, reason)
                 return None
             return {"action": "block", "message": reason}
 
+        self._remember_decision(tool_call_id, True, "")
         return None
+
+    _MAX_PENDING_DECISIONS = 2048
+
+    def _remember_decision(self, tool_call_id: str, allowed: bool, reason: str) -> None:
+        """Stash the pre-hook decision for post_tool_call. Bounded: an older Hermes
+        that never fires post for a blocked call must not leak memory."""
+        if not tool_call_id:
+            return
+        with self._pre_decisions_lock:
+            self._pre_decisions[tool_call_id] = (allowed, reason)
+            while len(self._pre_decisions) > self._MAX_PENDING_DECISIONS:
+                self._pre_decisions.pop(next(iter(self._pre_decisions)))
 
     # ------------------------------------------------------------------
     # Hook: post_tool_call
@@ -663,9 +676,9 @@ class HermesGuard:
             self._emit_audit(tool_name, args, True, "audit-only", session_id, task_id, tool_call_id, duration_ms)
             return
 
-        # If enforcement ran in pre_tool_call, post_tool_call records timing.
-        # Retrieve the pre-hook decision if stored (covers on_denial:log where a
-        # denied call was allowed through — post must reflect DENY, not ALLOW).
+        # The pre hook already decided; this record adds timing. Without a stored
+        # decision (no tool_call_id, or a call that skipped the pre hook) the
+        # handler did run, so it is an ALLOW tagged "post-dispatch".
         allowed = True
         reason = "post-dispatch"
         if tool_call_id:

@@ -141,3 +141,54 @@ class TestAuditCli:
         from hermes_tenuo.cli import cmd_audit
         assert cmd_audit(argparse.Namespace(path=str(tmp_path / "none.jsonl"), last=None, denied=False, json=False)) == 0
         assert "No audit records" in capsys.readouterr().out
+
+
+class TestPostHookAfterBlock:
+    """Hermes 0.21+ fires post_tool_call even for a blocked call."""
+
+    def test_post_record_keeps_the_denial(self, tmp_path, keys_and_warrant):
+        from hermes_tenuo.audit import LocalAuditLog, read_audit_log
+        from hermes_tenuo.hermes_guard import HermesGuard
+        root, agent, w = keys_and_warrant
+        log_path = tmp_path / "audit.jsonl"
+        guard = HermesGuard(warrant=w, signing_key=agent, trusted_roots=[root.public_key],
+                            audit_callback=LocalAuditLog(log_path))
+        denied = guard.pre_tool_call("terminal", {"command": "date"}, session_id="s1", tool_call_id="c1")
+        assert denied and denied["action"] == "block"
+        guard.post_tool_call("terminal", {"command": "date"}, denied["message"], session_id="s1", tool_call_id="c1", duration_ms=0)
+        records = [json.loads(l) for l in log_path.read_text().splitlines()]
+        assert [r["decision"] for r in records] == ["DENY", "DENY"]
+        assert records[1]["reason"] == denied["message"]
+        merged = read_audit_log(log_path)
+        assert len(merged) == 1 and merged[0]["decision"] == "DENY"
+        assert read_audit_log(log_path, denied_only=True)[0]["tool"] == "terminal"
+
+    def test_allow_then_post_has_timing(self, tmp_path, keys_and_warrant):
+        from hermes_tenuo.audit import LocalAuditLog, read_audit_log
+        from hermes_tenuo.hermes_guard import HermesGuard
+        root, agent, w = keys_and_warrant
+        log_path = tmp_path / "audit.jsonl"
+        guard = HermesGuard(warrant=w, signing_key=agent, trusted_roots=[root.public_key],
+                            audit_callback=LocalAuditLog(log_path))
+        assert guard.pre_tool_call("read_file", {"path": "/data/x"}, session_id="s1", tool_call_id="c2") is None
+        guard.post_tool_call("read_file", {"path": "/data/x"}, "ok", session_id="s1", tool_call_id="c2", duration_ms=7)
+        (rec,) = read_audit_log(log_path)
+        assert rec["decision"] == "ALLOW" and rec["duration_ms"] == 7
+
+    def test_reader_never_softens_a_denial(self, tmp_path):
+        from hermes_tenuo.audit import read_audit_log
+        p = tmp_path / "audit.jsonl"
+        p.write_text(
+            json.dumps({"decision": "DENY", "reason": "nope", "tool": "terminal", "tool_call_id": "x"}) + "\n"
+            + json.dumps({"decision": "ALLOW", "reason": "post-dispatch", "tool": "terminal", "tool_call_id": "x", "duration_ms": 3}) + "\n"
+        )
+        (rec,) = read_audit_log(p)
+        assert rec["decision"] == "DENY" and rec["reason"] == "nope" and rec["duration_ms"] == 3
+
+    def test_pending_decisions_are_bounded(self, keys_and_warrant):
+        from hermes_tenuo.hermes_guard import HermesGuard
+        root, agent, w = keys_and_warrant
+        guard = HermesGuard(warrant=w, signing_key=agent, trusted_roots=[root.public_key])
+        for i in range(guard._MAX_PENDING_DECISIONS + 50):
+            guard.pre_tool_call("terminal", {"command": "x"}, session_id="s1", tool_call_id=f"c{i}")
+        assert len(guard._pre_decisions) == guard._MAX_PENDING_DECISIONS

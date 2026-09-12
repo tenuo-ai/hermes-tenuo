@@ -89,7 +89,14 @@ def read_audit_log(
                 order.append(key)
                 merged[key] = rec
             else:
-                merged[key] = {**merged[key], **rec}
+                # Later records add timing; they never soften a denial. A DENY
+                # from the pre hook stays DENY even if a post record says ALLOW.
+                prev = merged[key]
+                combined = {**prev, **rec}
+                if prev.get("decision") == "DENY" and rec.get("decision") != "DENY":
+                    combined["decision"] = "DENY"
+                    combined["reason"] = prev.get("reason") or rec.get("reason")
+                merged[key] = combined
     records = [merged[k] for k in order]
     if denied_only:
         records = [r for r in records if r.get("decision") == "DENY"]
