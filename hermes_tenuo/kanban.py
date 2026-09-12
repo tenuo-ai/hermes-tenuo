@@ -50,23 +50,12 @@ CapabilitySpec = Tuple[str, dict]
 
 # Default fallback — used when hermes_constants is not importable (unit tests,
 # standalone scripts).  Production code always goes through _warrants_dir().
-_DEFAULT_WARRANTS_DIR = Path("~/.hermes/tenuo/warrants").expanduser()
 
 
 def _warrants_dir() -> Path:
-    """Return the warrants directory, rooted in the active Hermes profile home.
-
-    Uses hermes_constants.get_hermes_home() so that per-profile cron workers
-    (whose HERMES_HOME is set to the profile's directory since upstream #53570)
-    find their warrants under the correct profile root rather than the shared
-    default home.  Falls back to ~/.hermes/tenuo/warrants when hermes_constants
-    is not importable (non-Hermes environments, unit tests).
-    """
-    try:
-        from hermes_constants import get_hermes_home
-        return get_hermes_home() / "tenuo" / "warrants"
-    except Exception:
-        return _DEFAULT_WARRANTS_DIR
+    """``$HERMES_HOME/tenuo/warrants`` (profile-aware; see ``_home.hermes_home``)."""
+    from hermes_tenuo._home import hermes_home
+    return hermes_home() / "tenuo" / "warrants"
 
 
 def task_warrant_path(task_id: str) -> Path:
