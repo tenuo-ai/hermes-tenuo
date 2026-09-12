@@ -8,7 +8,7 @@ from hermes_tenuo.demo import (
     CRON_ALLOW,
     CRON_DENY_PASSWD,
     CRON_DENY_TERMINAL,
-    CRON_WHY_PASSWD,
+    CRON_WHY_OUTSIDE_DIR,
     CRON_WHY_TERMINAL,
     VIEWER_DENY_REPORTS,
     VIEWER_WHY_REPORTS,
@@ -29,7 +29,7 @@ def test_demo_transcript_pins():
     assert "Same server, two slips." in out
     assert CRON_ALLOW in out
     assert CRON_DENY_PASSWD in out
-    assert CRON_WHY_PASSWD in out
+    assert CRON_WHY_OUTSIDE_DIR in out
     assert "Constraint 'path' not satisfied" not in out
     assert CRON_DENY_TERMINAL in out
     assert CRON_WHY_TERMINAL in out

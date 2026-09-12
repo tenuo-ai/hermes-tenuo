@@ -16,7 +16,7 @@ CHILD_ALLOW_SEARCH = "[researcher] ALLOW  web_search  query=AI papers 2026"
 CHILD_DENY_WRITE = "[researcher] DENY   write_file  path=/data/output/x.md"
 CHILD_SCENE = "Same rule, after a handoff. The researcher was only granted web_search."
 VIEWER_DENY_REPORTS = "[viewer] DENY   read_file  path=/data/reports/q1.csv"
-CRON_WHY_PASSWD = "/etc/passwd is not under /data/reports"
+CRON_WHY_OUTSIDE_DIR = "/etc/passwd is not under /data/reports"
 CRON_WHY_TERMINAL = "terminal is not on the slip"
 CHILD_WHY_WRITE = "the researcher was not granted write_file"
 VIEWER_WHY_REPORTS = "/data/reports is not on the viewer's slip"
@@ -100,7 +100,7 @@ def render_demo() -> str:
         "read_file",
         {"path": "/etc/passwd"},
         session_id="cron",
-        why=CRON_WHY_PASSWD,
+        why=CRON_WHY_OUTSIDE_DIR,
     )
     _call(
         lines,
