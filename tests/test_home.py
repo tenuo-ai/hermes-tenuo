@@ -143,6 +143,38 @@ def test_verify_rejects_untrusted_issuer(tmp_path, monkeypatch, capsys):
     assert "Signature:   INVALID" in capsys.readouterr().out
 
 
+def test_verify_accepts_matching_root_and_reports_unchecked_without_one(tmp_path, monkeypatch, capsys):
+    """The positive half of the signature check.
+
+    Without this, a regression that rejected every root would still pass
+    the untrusted-issuer test above.
+    """
+    from hermes_tenuo.cli import cmd_verify
+    home = tmp_path / "h"
+    (home / "tenuo").mkdir(parents=True)
+    root, agent, w = _mint()
+    b64 = base64.b64encode(w.to_bytes()).decode()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    # Matching trusted_root: valid, exit 0.
+    (home / "config.yaml").write_text(
+        "plugins:\n  entries:\n    hermes-tenuo:\n"
+        f"      warrant: {b64}\n"
+        f"      trusted_root: {base64.b64encode(root.public_key.to_bytes()).decode()}\n"
+    )
+    assert cmd_verify(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "Signature:   valid" in out and "INVALID" not in out
+
+    # No trusted_root anywhere: says so explicitly rather than claiming valid.
+    (home / "config.yaml").write_text(
+        f"plugins:\n  entries:\n    hermes-tenuo:\n      warrant: {b64}\n"
+    )
+    assert cmd_verify(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "Signature:   not checked (no trusted_root)" in out and "valid" not in out.split("Signature:")[1]
+
+
 def test_doctor_uses_kanban_task_warrant(tmp_path, monkeypatch, capsys):
     from hermes_tenuo.cli import cmd_doctor
     from hermes_tenuo.kanban import task_warrant_path
