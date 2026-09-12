@@ -14,6 +14,7 @@ CRON_DENY_PASSWD = "DENY   read_file  path=/etc/passwd"
 CRON_DENY_TERMINAL = "DENY   terminal  command=ls"
 CHILD_ALLOW_SEARCH = "[researcher] ALLOW  web_search  query=AI papers 2026"
 CHILD_DENY_WRITE = "[researcher] DENY   write_file  path=/data/output/x.md"
+CHILD_SCENE = "Orchestrator grants web_search to the researcher. The chain is verified."
 VIEWER_DENY_REPORTS = "[viewer] DENY   read_file  path=/data/reports/q1.csv"
 
 
@@ -94,10 +95,11 @@ def render_demo() -> str:
         [
             "",
             "== delegate_task ==",
-            "Authority is traced across the child session.",
+            "Orchestrator grants web_search to the researcher. The chain is verified.",
         ]
     )
     orch_key = SigningKey.generate()
+    researcher_key = SigningKey.generate()
     orch_warrant = (
         Warrant.mint_builder()
         .holder(orch_key.public_key)
@@ -109,16 +111,15 @@ def render_demo() -> str:
         .mint(control)
     )
     child_warrant = (
-        Warrant.mint_builder()
-        .holder(orch_key.public_key)
+        orch_warrant.grant_builder()
         .capability("web_search", query=Wildcard())
+        .holder(researcher_key.public_key)
         .ttl(600)
-        .mint(control)
+        .grant(orch_key)
     )
     orch = HermesGuard(
         warrant=orch_warrant,
         signing_key=orch_key,
-        child_warrant=child_warrant,
         trusted_roots=[control.public_key],
         on_denial="block",
     )
@@ -138,8 +139,12 @@ def render_demo() -> str:
         session_id="orchestrator",
         tag="orchestrator",
     )
-    # Same injection subagent_start performs after delegate_task is allowed.
-    orch.set_session_warrant("researcher", child_warrant, orch_key)
+    orch.set_session_warrant(
+        "researcher",
+        child_warrant,
+        researcher_key,
+        parent_warrant=orch_warrant,
+    )
     _call(
         lines,
         orch,

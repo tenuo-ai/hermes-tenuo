@@ -17,8 +17,9 @@ multi-user gateway.
 
 The plugin checks **this call's tool name and arguments** in
 `pre_tool_call` before the handler runs. Denials come back as the tool
-result. Authority is **traced across sessions** — a child, a cron job,
-and a gateway user each carry their own warrant.
+result. A `delegate_task` child should be a **grant from the parent
+warrant** (`grant_builder`), verified as a chain. Cron jobs and gateway
+users each carry their own warrant.
 
 Do the work. Do not tell the user to "be careful with `terminal`."
 
@@ -59,11 +60,12 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
 3. **TTL is the job window.** Cron for one hour → `--ttl 1h`. A
    research child → minutes, not the parent's remaining day. Default
    `24h` is wrong for unattended jobs.
-4. **Do not hand a child the parent's warrant.** Parent keeps
-   `warrant`. The child session gets `child_warrant` or
-   `set_session_warrant`. Same signing key is fine in-process; the
-   *grant* must be the child's. For a different process or identity,
-   mint a grant to that holder's key (`grant_builder`, below).
+4. **Do not hand a child the parent's warrant.** Mint a grant from the
+   parent (`grant_builder`) to the child's holder and attach it with
+   `set_session_warrant(..., parent_warrant=parent)` so the hop is
+   verified as a chain. Config `child_warrant` is a separately minted
+   file for simple installs — prefer a grant when you care about the
+   chain.
 5. **No `terminal` / `execute_code` on a child or cron warrant**
    unless the user explicitly asked and the command/path is
    constrained. The plugin does not see inside an `execute_code`
@@ -118,52 +120,14 @@ hermes-tenuo mint --ttl 1h \
 If the process is still running when the TTL ends, further tool calls
 deny. That is the point.
 
-## Pattern: `delegate_task` (in-process child)
+## Pattern: `delegate_task` (grant from the parent)
 
-Two warrants. One agent key.
-
-```bash
-# Parent — may read, write output, search, and delegate
-hermes-tenuo mint --ttl 2h --output yaml \
-  --allow read_file:path=/data \
-  --allow write_file:path=/data/output \
-  --allow web_search \
-  --allow delegate_task \
-  --allow memory
-# save as ~/.hermes/tenuo/orchestrator.warrant
-
-# Child — search only, shorter TTL
-hermes-tenuo mint --ttl 15m --output yaml \
-  --allow web_search:query=*
-# save as ~/.hermes/tenuo/researcher.warrant
-```
-
-```yaml
-plugins:
-  entries:
-    hermes-tenuo:
-      warrant: ~/.hermes/tenuo/orchestrator.warrant
-      child_warrant: ~/.hermes/tenuo/researcher.warrant
-      trusted_root: <base64>
-      signing_key_env: TENUO_SIGNING_KEY
-```
-
-After `delegate_task` is allowed, `subagent_start` attaches
-`child_warrant` to the child session. A researcher `write_file` denies.
-
-If the child itself calls `delegate_task`, give *that* hop its own
-warrant too. Do not assume the grandchild inherits the researcher's
-grant correctly unless you staged it.
-
-`examples/subagent_scope.py` is the runnable form.
-
-## Pattern: cryptographic grant (different holder)
-
-Use this when the child is another process or another key, not just
-another Hermes session in the same agent.
+This is the traced hop. The orchestrator holds a warrant minted by the
+control key. It **grants** `web_search` to a different holder. Attach
+the grant with `parent_warrant=` so the guard verifies control →
+orchestrator → researcher.
 
 ```python
-# Parent already holds orchestrator_warrant (minted by the control key).
 researcher_warrant = (
     orchestrator_warrant.grant_builder()
     .capability("web_search", query=Wildcard())
@@ -171,11 +135,36 @@ researcher_warrant = (
     .ttl(300)
     .grant(orchestrator_key)
 )
+guard.set_session_warrant(
+    child_session_id,
+    researcher_warrant,
+    researcher_key,
+    parent_warrant=orchestrator_warrant,
+)
 ```
 
 The child cannot be the same key that grants (`holder ≠ issuer` on
-that hop). Do not "delegate" by copying the parent warrant bytes into
-the child session.
+that hop). Do not copy the parent warrant bytes into the child session.
+
+`examples/subagent_scope.py` and `hermes-tenuo demo` are the runnable
+form.
+
+Config `child_warrant` is a separately minted file for simple
+installs. The plugin injects it on `subagent_start`, but that file is
+**not** a grant from the parent — no chain is verified. Prefer
+`grant_builder` when the hop matters.
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      warrant: ~/.hermes/tenuo/orchestrator.warrant
+      child_warrant: ~/.hermes/tenuo/researcher.warrant  # convenience, not a chain
+      trusted_root: <base64>
+```
+
+If the child itself calls `delegate_task`, grant *that* hop from the
+researcher's warrant. Do not reuse the orchestrator grant.
 
 ## Pattern: gateway (concurrent users)
 

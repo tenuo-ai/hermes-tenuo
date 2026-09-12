@@ -92,9 +92,11 @@ class MockCtx:
     def __init__(self):
         self.hooks: dict[str, list] = {}
         self.skills: dict[str, Any] = {}
+        self.skill_descriptions: dict[str, Any] = {}
 
-    def register_skill(self, name: str, path: Any) -> None:
+    def register_skill(self, name: str, path: Any, description: Any = None) -> None:
         self.skills[name] = path
+        self.skill_descriptions[name] = description
 
     def register_hook(self, name: str, fn) -> None:
         self.hooks.setdefault(name, []).append(fn)
@@ -233,6 +235,9 @@ class TestHookRegistration:
             skill_md = Path(ctx.skills["tenuo-scope"])
             assert skill_md.is_file()
             assert skill_md.name == "SKILL.md"
+            desc = ctx.skill_descriptions["tenuo-scope"]
+            assert desc
+            assert "warrant" in desc.lower() or "delegat" in desc.lower()
 
     def test_pre_tool_call_registered_post_32719(
         self, parent_warrant, agent_key, root_key

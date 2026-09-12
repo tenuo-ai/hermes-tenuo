@@ -9,10 +9,12 @@ Typical use is the plugin entry point. You can also construct
 
 Invariants:
     - Agents consume warrants; they do not mint them.
-    - ``delegate_task`` children get a session warrant via ``subagent_start``
-      or ``set_session_warrant``. Authority is traced across that hop.
+    - ``delegate_task`` children get a grant from the parent (``grant_builder``
+      or attenuation). Pass ``parent_warrant`` into ``set_session_warrant``
+      so the hop is verified as a chain.
     - Concurrent gateway sessions must use ``set_session_warrant`` per
-      session. The single-agent child heuristic is not safe there.
+      session with independently minted warrants. The single-agent child
+      heuristic is not safe there.
 """
 
 from __future__ import annotations
@@ -89,14 +91,16 @@ class HermesGuard:
         Pass ``warrant`` and ``signing_key``. One session at a time.
 
     ``delegate_task``:
-        After the parent call is allowed, ``subagent_start`` (or
-        ``set_session_warrant``) attaches the child session warrant.
-        Authority is traced across that hop.
+        After the parent call is allowed, attach a grant from the parent
+        warrant (``grant_builder`` or ``subagent_start`` attenuation) with
+        ``set_session_warrant(..., parent_warrant=parent)`` so the chain
+        is verified.
 
     Multi-user gateway:
         The single-agent child heuristic is not safe when sessions run
         concurrently. Call ``set_session_warrant(session_id, warrant)``
-        when a session starts and ``clear_session_warrant`` when it ends.
+        with that user's own warrant when a session starts, and
+        ``clear_session_warrant`` when it ends.
     """
 
     def __init__(
@@ -159,14 +163,25 @@ class HermesGuard:
         session_id: str,
         warrant: Any,
         signing_key: Optional[Any] = None,
+        *,
+        parent_warrant: Optional[Any] = None,
     ) -> None:
+        """Attach a warrant to *session_id*.
+
+        Pass *parent_warrant* when *warrant* is a ``grant_builder`` child so
+        ``enforce_tool_call`` verifies the delegation chain. Omit it for
+        independently minted session warrants (gateway roles).
+        """
         with self._session_lock:
             self._session_warrants[session_id] = (warrant, signing_key)
+            if parent_warrant is not None:
+                self._session_warrant_chains[session_id] = parent_warrant
         logger.debug("hermes-tenuo: registered warrant for session %s", session_id)
 
     def clear_session_warrant(self, session_id: str) -> None:
         with self._session_lock:
             self._session_warrants.pop(session_id, None)
+            self._session_warrant_chains.pop(session_id, None)
 
     def set_trusted_roots(self, roots: Optional[List[Any]]) -> None:
         """Thread-safe replacement of the trusted root set.

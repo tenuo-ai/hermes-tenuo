@@ -4,8 +4,9 @@
 
 A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant sits in front of every
 Hermes tool call. Each call is checked at the argument level before the
-handler runs. Authority is traced across `delegate_task` and gateway
-sessions. Keys, warrants, and decisions stay local.
+handler runs. A `delegate_task` child is a grant from the parent warrant,
+verified as a chain. Gateway users each carry their own warrant. Keys,
+warrants, and decisions stay local.
 
 See it without installing Hermes or talking to a model:
 
@@ -28,7 +29,7 @@ Nightly job: read /data/reports, write /tmp/nightly, then stop.
          Tool 'terminal' is not authorized
 
 == delegate_task ==
-Authority is traced across the child session.
+Orchestrator grants web_search to the researcher. The chain is verified.
   [orchestrator] ALLOW  read_file  path=/data/input.csv
   [orchestrator] ALLOW  delegate_task  task=research q3  context=web_search only
   [researcher] ALLOW  web_search  query=AI papers 2026
@@ -63,8 +64,8 @@ hermes plugins install tenuo-ai/hermes-tenuo
 pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"
 ```
 
-Requires Hermes Agent 0.20.x (tested against upstream, September 2026) and
-`tenuo>=0.3.0`, which is pulled in automatically.
+Requires Hermes Agent 0.20 or newer (tested against upstream, September 2026)
+and `tenuo>=0.3.0`, which is pulled in automatically.
 
 **2. Mint a warrant.** This generates a key pair and a warrant, and prints
 the exact config block to paste.
@@ -155,7 +156,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | Scenario | What you do | What you get |
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
-| **Subagents via `delegate_task`** | Set `child_warrant` | Authority is traced across the child session; a researcher cannot suddenly `write_file` |
+| **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
 | **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | Per-user permissions, isolated per session, cleared on session end |
 | **Kanban workers** | Drop `~/.hermes/tenuo/warrants/<task_id>.warrant` | The worker loads its own warrant; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |

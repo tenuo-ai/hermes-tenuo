@@ -3,6 +3,7 @@
 from hermes_tenuo.demo import (
     CHILD_ALLOW_SEARCH,
     CHILD_DENY_WRITE,
+    CHILD_SCENE,
     CRON_ALLOW,
     CRON_DENY_PASSWD,
     CRON_DENY_TERMINAL,
@@ -17,6 +18,7 @@ def test_demo_transcript_pins():
     assert "No Hermes process, no API key." in out
     assert "== Cron ==" in out
     assert "== delegate_task ==" in out
+    assert CHILD_SCENE in out
     assert "== Gateway ==" in out
     assert CRON_ALLOW in out
     assert CRON_DENY_PASSWD in out

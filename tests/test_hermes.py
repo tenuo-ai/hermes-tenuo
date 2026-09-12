@@ -315,6 +315,19 @@ class TestSessionWarrantRegistry:
         with guard._session_lock:
             assert "alice" not in guard._session_warrants
 
+    def test_set_session_warrant_stores_parent_for_chain(
+        self, basic_warrant, child_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(trusted_roots=[root_key.public_key])
+        guard.set_session_warrant(
+            "child", child_warrant, agent_key, parent_warrant=basic_warrant
+        )
+        with guard._session_lock:
+            assert guard._session_warrant_chains["child"] is basic_warrant
+        guard.clear_session_warrant("child")
+        with guard._session_lock:
+            assert "child" not in guard._session_warrant_chains
+
 
 # ---------------------------------------------------------------------------
 # delegate_task child warrant heuristic

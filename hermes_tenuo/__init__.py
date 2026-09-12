@@ -15,6 +15,23 @@ from hermes_tenuo.hermes_guard import HermesGuard, HermesAuditEvent  # noqa: F40
 logger = logging.getLogger("hermes_tenuo")
 
 
+def _skill_description(skill_md: Path) -> str | None:
+    """Read ``description`` from SKILL.md YAML frontmatter."""
+    text = skill_md.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end < 0:
+        return None
+    for line in text[4:end].splitlines():
+        if line.startswith("description:"):
+            raw = line.split(":", 1)[1].strip()
+            if len(raw) >= 2 and raw[0] in "'\"" and raw[-1] == raw[0]:
+                raw = raw[1:-1]
+            return raw or None
+    return None
+
+
 def _register_skills(ctx: Any) -> None:
     skills_dir = Path(__file__).parent / "skills"
     if not skills_dir.is_dir():
@@ -25,8 +42,14 @@ def _register_skills(ctx: Any) -> None:
     for child in sorted(skills_dir.iterdir()):
         skill_md = child / "SKILL.md"
         if child.is_dir() and skill_md.is_file():
+            description = _skill_description(skill_md)
             try:
-                register_skill(child.name, skill_md)
+                register_skill(child.name, skill_md, description=description)
+            except TypeError:
+                try:
+                    register_skill(child.name, skill_md)
+                except Exception as exc:
+                    logger.debug("hermes-tenuo: skill %s not registered (%s)", child.name, exc)
             except Exception as exc:
                 logger.debug("hermes-tenuo: skill %s not registered (%s)", child.name, exc)
 

@@ -232,9 +232,13 @@ class PluginGuard:
         session_id: str,
         warrant: Any,
         signing_key: Optional[Any] = None,
+        *,
+        parent_warrant: Optional[Any] = None,
     ) -> None:
-        """Forward to HermesGuard.set_session_warrant (gateway use)."""
-        self._guard.set_session_warrant(session_id, warrant, signing_key)
+        """Forward to HermesGuard.set_session_warrant (gateway / child grant)."""
+        self._guard.set_session_warrant(
+            session_id, warrant, signing_key, parent_warrant=parent_warrant
+        )
 
     def clear_session_warrant(self, session_id: str) -> None:
         """Forward to HermesGuard.clear_session_warrant (gateway use)."""
