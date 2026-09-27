@@ -70,12 +70,8 @@ def _register_passthrough_hooks(ctx: Any) -> None:
         ctx.register_hook(name, _passthrough_hook)
 
 
-def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
-    """Install a block-all enforcement hook for a kanban worker with no warrant."""
-    deny_msg = (
-        f"hermes-tenuo: kanban worker '{task_id}' has no warrant — "
-        "tool call blocked. Stage a task warrant before dispatching."
-    )
+def _register_block_all(ctx: Any, deny_msg: str) -> None:
+    """Install a block-all enforcement hook (fail closed)."""
 
     # Prefer ToolRegistry.set_enforcement_fn for bypass-immune coverage.
     try:
@@ -91,7 +87,7 @@ def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
                 raise _exc_cls(deny_msg)
 
             _tr.set_enforcement_fn(_block_all_fn)
-            logger.info("hermes-tenuo: block-all registered via ToolRegistry for kanban worker %s", task_id)
+            logger.info("hermes-tenuo: block-all registered via ToolRegistry (%s)", deny_msg)
             return
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry unavailable for block-all (%s), falling back to hook", exc)
@@ -100,15 +96,21 @@ def _register_kanban_block_all(ctx: Any, task_id: str) -> None:
         return {"action": "block", "message": deny_msg}
 
     ctx.register_hook("pre_tool_call", _block_all_hook)
-    logger.info("hermes-tenuo: block-all hook registered for kanban worker %s", task_id)
+    logger.info("hermes-tenuo: block-all hook registered (%s)", deny_msg)
 
 
 def register(ctx: Any) -> None:
     """Called by Hermes plugin loader at startup."""
     _register_skills(ctx)
-    from hermes_tenuo._guard import build_plugin_guard
+    from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
 
-    guard = build_plugin_guard(ctx)
+    try:
+        guard = build_plugin_guard(ctx)
+    except WarrantLoadError as exc:
+        # A configured-but-corrupt warrant must never degrade to passthrough.
+        logger.error("hermes-tenuo: %s — registering block-all enforcement", exc)
+        _register_block_all(ctx, f"hermes-tenuo: {exc}")
+        return
     if guard is None:
         from hermes_tenuo.kanban import current_task_id
         kanban_task = current_task_id()
@@ -119,7 +121,11 @@ def register(ctx: Any) -> None:
                 "hermes-tenuo: kanban worker %s has no warrant — registering block-all enforcement",
                 kanban_task,
             )
-            _register_kanban_block_all(ctx, kanban_task)
+            _register_block_all(
+                ctx,
+                f"hermes-tenuo: kanban worker '{kanban_task}' has no warrant — "
+                "tool call blocked. Stage a task warrant before dispatching.",
+            )
         else:
             logger.warning(
                 "hermes-tenuo: plugin loaded but no warrant is set — "

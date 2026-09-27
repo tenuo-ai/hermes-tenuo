@@ -579,6 +579,20 @@ class TestKanbanFailClosed:
                 block_fn("web_search", {}, session_id="s1")
 
 
+class TestCorruptWarrantFailsClosed:
+    """A configured-but-undecodable TENUO_WARRANT must block, not degrade to audit-only."""
+
+    def test_corrupt_warrant_blocks_every_tool(self, agent_key, root_key):
+        with _plugin_ctx(
+            "not-a-warrant!!", agent_key, root_key,
+            has_registry_enforcement_fn=False,
+        ) as (ctx, _):
+            for tool in ["web_search", "read_file", "terminal"]:
+                result = ctx.call_hook("pre_tool_call", tool_name=tool, args={}, session_id="s1")
+                assert result is not None and result.get("action") == "block", f"corrupt warrant must block {tool}"
+                assert "could not be loaded" in result["message"]
+
+
 # ---------------------------------------------------------------------------
 # TestProfileAwareWarrantPath
 # ---------------------------------------------------------------------------
