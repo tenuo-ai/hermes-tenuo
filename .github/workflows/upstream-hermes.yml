@@ -51,6 +51,6 @@ jobs:
         run: pip install . pytest
       - name: Install only tenuo (directory route)
         if: matrix.route == 'directory'
-        run: pip install "tenuo>=0.3.0" pytest
+        run: pip install "tenuo>=0.3.1" pytest
       - name: Load through Hermes's plugin loader
         run: python -m pytest tests/test_upstream_hermes.py -q -rs --tb=short

@@ -289,8 +289,9 @@ class HermesGuard:
     ) -> Optional[Any]:
         """Attenuate the parent warrant to only the tools in the given Hermes toolsets.
 
-        Uses parent_warrant.attenuate_builder() with inherit_all() so all parent
-        constraints are preserved — the child cannot exceed the parent's scope.
+        Uses parent_warrant.attenuate_builder() with inherit_all() and
+        retain_tools() so parent constraints are kept and the child cannot
+        exceed the parent's scope.
         """
         try:
             # Resolve toolset names → Hermes tool names
@@ -343,11 +344,12 @@ class HermesGuard:
                 return self._child_warrant
 
             # Build attenuated child via attenuate_builder:
-            # inherit_all() preserves all parent constraints (avoids monotonicity violations)
-            # with_tools() whitelists only the requested tools
+            # inherit_all() copies the parent's constraints, then retain_tools()
+            # keeps only the requested subset. with_tools() adds tools, so after
+            # inherit_all() it cannot narrow.
             b = parent_warrant.attenuate_builder()
             b.inherit_all()
-            b.with_tools(sorted(keep))
+            b.retain_tools(sorted(keep))
             # TTL is capped at parent's remaining lifetime by the Rust core
             # (I3: child.exp <= parent.exp) — passing 3600 is a requested maximum.
             b.with_ttl(3600)
