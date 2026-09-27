@@ -243,7 +243,7 @@ class TestMonotonicity:
         """attenuate_builder cannot add tools the parent doesn't have."""
         b = parent_warrant.attenuate_builder()
         b.inherit_all()
-        b.with_tools(["tool:web_search"])
+        b.retain_tools(["tool:web_search"])
         b.with_ttl(60)
         child = b.delegate(agent_key)
         # Child should only have web_search, not read_file
@@ -255,7 +255,7 @@ class TestMonotonicity:
         """A tool dropped in attenuation is blocked for the child session."""
         b = parent_warrant.attenuate_builder()
         b.inherit_all()
-        b.with_tools(["tool:web_search"])  # drop read_file
+        b.retain_tools(["tool:web_search"])  # drop read_file
         b.with_ttl(60)
         child = b.delegate(agent_key)
 
@@ -283,7 +283,7 @@ class TestMonotonicity:
         """Parent retains its full scope; child's restriction doesn't affect parent."""
         b = parent_warrant.attenuate_builder()
         b.inherit_all()
-        b.with_tools(["tool:web_search"])
+        b.retain_tools(["tool:web_search"])
         b.with_ttl(60)
         child = b.delegate(agent_key)
 
@@ -527,8 +527,8 @@ class TestNoEscalation:
         # Try to create a child with terminal (not in parent) via attenuate_builder
         b = parent.attenuate_builder()
         b.inherit_all()
-        # with_tools only whitelists from what parent already has — terminal isn't there
-        b.with_tools(["tool:web_search", "tool:terminal"])
+        # retain_tools keeps only names the parent already has — terminal isn't there
+        b.retain_tools(["tool:web_search", "tool:terminal"])
         b.with_ttl(60)
         child = b.delegate(agent_key)
         # Child should not have terminal even though we asked for it

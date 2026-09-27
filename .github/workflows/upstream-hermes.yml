@@ -37,18 +37,20 @@ jobs:
           path: hermes-agent
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Hermes installs its runtime dependencies only on Python 3.14.
+          python-version: "3.14"
       - name: Install Hermes from source
         run: |
           python -m pip install --upgrade pip
           pip install -e ./hermes-agent
           python -c "import hermes_cli, importlib.metadata as m; print('hermes-agent', m.version('hermes-agent'))"
+          python -c "import hermes_cli.plugins"
           git -C hermes-agent log -1 --format='upstream %h %ad %s' --date=short
       - name: Install the plugin (entrypoint route)
         if: matrix.route == 'entrypoint'
         run: pip install . pytest
       - name: Install only tenuo (directory route)
         if: matrix.route == 'directory'
-        run: pip install "tenuo>=0.3.0" pytest
+        run: pip install "tenuo>=0.3.1" pytest
       - name: Load through Hermes's plugin loader
         run: python -m pytest tests/test_upstream_hermes.py -q -rs --tb=short
