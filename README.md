@@ -21,8 +21,8 @@ No Hermes process, no API key.
 The job does the work. Then it tries to leave the slip.
   ALLOW  read_file  path=/data/reports/q3.csv
   ALLOW  write_file  path=/tmp/nightly/report.md
-  DENY   read_file  path=/etc/passwd
-         Constraint 'path' not satisfied: value does not match constraint  ← /etc/passwd is not under /data/reports
+  DENY   read_file  path=/opt/private/payroll.csv
+         Constraint 'path' not satisfied: value does not match constraint  ← /opt/private/payroll.csv is not under /data/reports
   DENY   terminal  command=ls
          Tool 'terminal' is not authorized  ← terminal is not on the slip
   (one second later)
@@ -59,7 +59,7 @@ The plugin returns the denial as the tool result, so the model sees why
 the handler never ran:
 
 ```text
-read_file  path=/etc/passwd
+read_file  path=/opt/private/payroll.csv
 Constraint 'path' not satisfied: value does not match constraint
 ```
 
@@ -117,7 +117,7 @@ hermes-tenuo doctor
 hermes
 ```
 
-Ask the agent to read `/etc/passwd`. It gets the same denial as the tool
+Ask the agent to read `/opt/private/payroll.csv`. It gets the same denial as the tool
 result. Load `skill_view("hermes-tenuo:tenuo-scope")` to mint a warrant
 for a cron job, a `delegate_task` child, or a gateway session.
 

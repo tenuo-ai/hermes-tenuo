@@ -12,14 +12,14 @@ from hermes_tenuo.hermes_guard import HermesGuard
 # Lines CI and the README both pin. Do not reword without updating both.
 # Denial lines print the real tool result first, then an editorial gloss after "←".
 CRON_ALLOW = "ALLOW  read_file  path=/data/reports/q3.csv"
-CRON_DENY_PASSWD = "DENY   read_file  path=/etc/passwd"
+CRON_DENY_PASSWD = "DENY   read_file  path=/opt/private/payroll.csv"
 CRON_DENY_TERMINAL = "DENY   terminal  command=ls"
 CRON_DENY_EXPIRED = "DENY   read_file  path=/data/reports/q3.csv"
 CHILD_ALLOW_SEARCH = "[researcher] ALLOW  web_search  query=AI papers 2026"
 CHILD_DENY_WRITE = "[researcher] DENY   write_file  path=/data/output/x.md"
 CHILD_SCENE = "Same rule, after a handoff. The researcher was only granted web_search."
 VIEWER_DENY_REPORTS = "[viewer] DENY   read_file  path=/data/reports/q1.csv"
-CRON_WHY_OUTSIDE_DIR = "/etc/passwd is not under /data/reports"
+CRON_WHY_OUTSIDE_DIR = "/opt/private/payroll.csv is not under /data/reports"
 CRON_WHY_TERMINAL = "terminal is not on the slip"
 CRON_WHY_EXPIRED = "the job window ended"
 CHILD_WHY_WRITE = "the researcher was not granted write_file"
@@ -106,7 +106,7 @@ def render_demo() -> str:
         lines,
         cron,
         "read_file",
-        {"path": "/etc/passwd"},
+        {"path": "/opt/private/payroll.csv"},
         session_id="cron",
         why=CRON_WHY_OUTSIDE_DIR,
     )
