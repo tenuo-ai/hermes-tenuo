@@ -70,7 +70,7 @@ def test_package_and_plugin_versions_agree():
     plugin = (ROOT / "plugin.yaml").read_text()
     py_ver = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
     yaml_ver = re.search(r"^version:\s*(.+)$", plugin, re.M).group(1).strip()
-    assert py_ver == yaml_ver == "0.1.1"
+    assert py_ver == yaml_ver == "0.1.2"
 
 
 def test_readme_keeps_listing_strategy_out():
