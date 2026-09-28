@@ -15,8 +15,15 @@ from hermes_tenuo.hermes_guard import HermesGuard
 logger = logging.getLogger("hermes_tenuo._guard")
 
 
+class WarrantLoadError(ValueError):
+    """A warrant is configured but cannot be decoded — never degrade to passthrough."""
+
+
 def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
-    """Read config and build the guard. Returns None if not configured."""
+    """Read config and build the guard. Returns None if not configured.
+
+    Raises WarrantLoadError when a warrant IS configured but unloadable.
+    """
     from hermes_tenuo._config import (
         get_audit_log_path,
         get_child_warrant_raw,
@@ -33,6 +40,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         return None
 
     warrant = load_warrant(warrant_raw)
+    if warrant is None:
+        raise WarrantLoadError(
+            "TENUO_WARRANT is set but could not be loaded — "
+            "every tool call is blocked until the warrant is fixed"
+        )
     child_warrant = load_warrant(get_child_warrant_raw(ctx))
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)

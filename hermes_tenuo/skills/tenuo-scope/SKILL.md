@@ -21,7 +21,7 @@ result. A `delegate_task` child should be a **grant from the parent
 warrant** (`grant_builder`), verified as a chain. Cron jobs and gateway
 users each carry their own warrant.
 
-Do the work. Do not tell the user to "be careful with `terminal`."
+Do the work. Skip generic "be careful with `terminal`" caveats — the warrant enforces scope.
 
 ## When to use
 
