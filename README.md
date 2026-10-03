@@ -76,13 +76,13 @@ pip install hermes-tenuo
 
 # or as a directory plugin under ~/.hermes/plugins:
 hermes plugins install tenuo-ai/hermes-tenuo
-pip install "tenuo>=0.3.1"   # Hermes does not install plugin dependencies
+pip install "tenuo>=0.3.2"   # Hermes does not install plugin dependencies
 ```
 
 To run the latest unreleased code instead: `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
 
 Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through the plugin loader of upstream Hermes `main`, both install routes; the badge above is its latest result.
-The pip route installs `tenuo>=0.3.1` for you; the directory route needs the
+The pip route installs `tenuo>=0.3.2` for you; the directory route needs the
 extra `pip install` line above.
 
 **2. Mint a warrant.** This generates a key pair and a warrant, and prints
