@@ -23,4 +23,4 @@ python gateway_multiuser.py
 A recorded Hermes session with a planted prompt injection is
 [`docs/walkthrough.md`](../docs/walkthrough.md) (`examples/walkthrough/setup.sh`).
 
-Requires `tenuo>=0.3.1`.
+Requires `tenuo>=0.3.2`.

@@ -49,7 +49,7 @@ except ModuleNotFoundError as exc:
     if exc.name in ("tenuo", "tenuo_core"):
         raise ModuleNotFoundError(
             "hermes-tenuo needs the 'tenuo' package, which Hermes does not install for "
-            "plugins. Run: pip install 'tenuo>=0.3.1' in the environment Hermes uses."
+            "plugins. Run: pip install 'tenuo>=0.3.2' in the environment Hermes uses."
         ) from exc
     raise
 
