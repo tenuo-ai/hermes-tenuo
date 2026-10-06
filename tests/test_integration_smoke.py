@@ -614,6 +614,14 @@ class TestCorruptWarrantFailsClosed:
         ) as (ctx, _):
             self._assert_blocks_all(ctx, "empty")
 
+    def test_unreadable_warrant_path_blocks_every_tool(self, agent_key, root_key, tmp_path):
+        # A directory exists but read_text() raises; that must not escape register().
+        with _plugin_ctx(
+            str(tmp_path), agent_key, root_key,
+            has_registry_enforcement_fn=False,
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "cannot be read")
+
     def test_missing_child_warrant_path_blocks_every_tool(
         self, parent_warrant, agent_key, root_key
     ):

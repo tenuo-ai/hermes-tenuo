@@ -314,26 +314,58 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         note(f"could not read Hermes config ({exc})")
 
     # 4. Configured? Same resolution the plugin uses (kanban task first).
-    from hermes_tenuo._config import _env_secret, load_warrant, resolve_warrant_text
+    from hermes_tenuo._config import (
+        _env_secret,
+        get_child_warrant_raw,
+        load_warrant,
+        resolve_warrant_text,
+    )
 
+    blocks = "the plugin blocks every tool call until this is fixed"
+    # Mirrors build_plugin_guard: a configured warrant that cannot be used
+    # installs block-all, it never degrades to passthrough.
+    problem = None
     try:
         raw, warrant_source = resolve_warrant_text(None)
     except FileNotFoundError as exc:
-        check(False, f"warrant path does not exist: {exc}")
-        raw, warrant_source = None, "none"
+        raw, warrant_source = None, "missing"
+        problem = f"warrant path does not exist: {exc}"
+    except OSError as exc:
+        raw, warrant_source = None, "unreadable"
+        problem = f"warrant path cannot be read: {exc}"
     if warrant_source.startswith("kanban:"):
         note(warrant_source)
-    elif warrant_source not in ("none",):
+    elif warrant_source not in ("none", "missing", "unreadable"):
         note(f"warrant source: {warrant_source}")
 
     warrant = load_warrant(raw) if raw else None
-    configured = warrant is not None
-    check(
-        configured,
-        "plugin configured (warrant)",
-        "set TENUO_WARRANT / warrant: — until then the plugin loads and does "
-        "not enforce (startup WARNING). Run doctor after install.",
-    )
+    if problem is None and not raw and warrant_source.startswith("kanban:"):
+        problem = "kanban worker has no staged task warrant"
+    elif problem is None and not raw and warrant_source != "none":
+        problem = f"warrant is empty ({warrant_source})"
+    elif problem is None and raw and warrant is None:
+        problem = "warrant is set but could not be loaded"
+    if problem is None and warrant is not None:
+        try:
+            child_raw = get_child_warrant_raw(None)
+        except FileNotFoundError as exc:
+            problem = f"child warrant path does not exist: {exc}"
+        except OSError as exc:
+            problem = f"child warrant path cannot be read: {exc}"
+        else:
+            if child_raw is not None and load_warrant(child_raw) is None:
+                problem = "child warrant is set but could not be loaded"
+
+    configured = warrant is not None and problem is None
+    if problem is not None:
+        check(False, f"plugin configured (warrant): {problem}", blocks)
+    else:
+        check(
+            configured,
+            "plugin configured (warrant)",
+            "set TENUO_WARRANT / warrant: — until then the plugin loads and does "
+            "not enforce (startup WARNING). Run doctor after install.",
+        )
 
     if warrant is not None:
         # 5. Warrant unexpired / not expiring soon

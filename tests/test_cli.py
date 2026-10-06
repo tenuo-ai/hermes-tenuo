@@ -159,6 +159,55 @@ class TestDoctorConfigured:
         assert "✗" in out
 
 
+class TestDoctorBrokenWarrant:
+    """A configured warrant the plugin cannot use blocks every call; doctor must say so."""
+
+    def _doctor(self, capsys, monkeypatch, tmp_path, warrant, child=None):
+        from hermes_tenuo.cli import cmd_doctor
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+        monkeypatch.setenv("TENUO_WARRANT", warrant)
+        if child is None:
+            monkeypatch.delenv("TENUO_CHILD_WARRANT", raising=False)
+        else:
+            monkeypatch.setenv("TENUO_CHILD_WARRANT", child)
+        rc = cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert rc != 0
+        assert "blocks every tool call" in out
+        assert "does not enforce" not in out
+        return out
+
+    def test_missing_path(self, capsys, monkeypatch, tmp_path):
+        out = self._doctor(capsys, monkeypatch, tmp_path, "/nonexistent/x.warrant")
+        assert "does not exist" in out
+
+    def test_empty_file(self, capsys, monkeypatch, tmp_path):
+        empty = tmp_path / "empty.warrant"
+        empty.write_text("\n")
+        out = self._doctor(capsys, monkeypatch, tmp_path, str(empty))
+        assert "warrant is empty" in out
+
+    def test_unreadable_path(self, capsys, monkeypatch, tmp_path):
+        out = self._doctor(capsys, monkeypatch, tmp_path, str(tmp_path))
+        assert "cannot be read" in out
+
+    def test_corrupt_warrant(self, capsys, monkeypatch, tmp_path):
+        out = self._doctor(capsys, monkeypatch, tmp_path, "not-a-warrant!!")
+        assert "could not be loaded" in out
+
+    def test_missing_child_path(self, capsys, monkeypatch, tmp_path):
+        from tenuo import SigningKey, Warrant
+        key = SigningKey.generate()
+        w = Warrant.mint_builder().tool("read_file").holder(key.public_key).ttl(3600).mint(key)
+        import base64
+        out = self._doctor(
+            capsys, monkeypatch, tmp_path,
+            base64.b64encode(w.to_bytes()).decode(), child="/nonexistent/child.warrant",
+        )
+        assert "child warrant path does not exist" in out
+
+
 class TestMintConstraints:
     """--allow tool:arg=value produces real argument constraints, enforced locally."""
 

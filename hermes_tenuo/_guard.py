@@ -42,6 +42,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             f"TENUO_WARRANT points to {exc}, which does not exist — "
             "every tool call is blocked until the warrant is fixed"
         ) from exc
+    except OSError as exc:
+        raise WarrantLoadError(
+            f"TENUO_WARRANT cannot be read ({exc}) — "
+            "every tool call is blocked until the warrant is fixed"
+        ) from exc
     if not warrant_raw:
         # Not configured, or a kanban worker with no staged task warrant
         # (register() blocks that case). Anything else is an empty warrant.
@@ -63,6 +68,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     except FileNotFoundError as exc:
         raise WarrantLoadError(
             f"TENUO_CHILD_WARRANT points to {exc}, which does not exist — "
+            "every tool call is blocked until the warrant is fixed"
+        ) from exc
+    except OSError as exc:
+        raise WarrantLoadError(
+            f"TENUO_CHILD_WARRANT cannot be read ({exc}) — "
             "every tool call is blocked until the warrant is fixed"
         ) from exc
     child_warrant = load_warrant(child_raw)
