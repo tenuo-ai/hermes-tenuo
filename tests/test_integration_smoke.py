@@ -592,6 +592,56 @@ class TestCorruptWarrantFailsClosed:
                 assert result is not None and result.get("action") == "block", f"corrupt warrant must block {tool}"
                 assert "could not be loaded" in result["message"]
 
+    def _assert_blocks_all(self, ctx, expected: str):
+        for tool in ["web_search", "read_file", "terminal"]:
+            result = ctx.call_hook("pre_tool_call", tool_name=tool, args={}, session_id="s1")
+            assert result is not None and result.get("action") == "block", f"must block {tool}"
+            assert expected in result["message"]
+
+    def test_missing_warrant_path_blocks_every_tool(self, agent_key, root_key):
+        with _plugin_ctx(
+            "/nonexistent/x.warrant", agent_key, root_key,
+            has_registry_enforcement_fn=False,
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "does not exist")
+
+    def test_empty_warrant_file_blocks_every_tool(self, agent_key, root_key, tmp_path):
+        empty = tmp_path / "empty.warrant"
+        empty.write_text("\n")
+        with _plugin_ctx(
+            str(empty), agent_key, root_key,
+            has_registry_enforcement_fn=False,
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "empty")
+
+    def test_unreadable_warrant_path_blocks_every_tool(self, agent_key, root_key, tmp_path):
+        # A directory exists but read_text() raises; that must not escape register().
+        with _plugin_ctx(
+            str(tmp_path), agent_key, root_key,
+            has_registry_enforcement_fn=False,
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "cannot be read")
+
+    def test_missing_child_warrant_path_blocks_every_tool(
+        self, parent_warrant, agent_key, root_key
+    ):
+        with _plugin_ctx(
+            _warrant_b64(parent_warrant), agent_key, root_key,
+            has_registry_enforcement_fn=False,
+            env_overrides={"TENUO_CHILD_WARRANT": "/nonexistent/child.warrant"},
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "TENUO_CHILD_WARRANT")
+
+    def test_corrupt_child_warrant_blocks_every_tool(
+        self, parent_warrant, agent_key, root_key
+    ):
+        with _plugin_ctx(
+            _warrant_b64(parent_warrant), agent_key, root_key,
+            has_registry_enforcement_fn=False,
+            env_overrides={"TENUO_CHILD_WARRANT": "not-a-warrant!!"},
+        ) as (ctx, _):
+            self._assert_blocks_all(ctx, "TENUO_CHILD_WARRANT")
+
 
 # ---------------------------------------------------------------------------
 # TestProfileAwareWarrantPath

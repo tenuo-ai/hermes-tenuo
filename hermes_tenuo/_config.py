@@ -114,13 +114,13 @@ def resolve_warrant_text(ctx: Any) -> tuple[Optional[str], str]:
 
 
 def get_warrant_raw(ctx: Any) -> Optional[str]:
-    """Return raw warrant: base64 string or contents of a warrant file."""
-    try:
-        raw, _ = resolve_warrant_text(ctx)
-        return raw
-    except FileNotFoundError as exc:
-        logger.warning("hermes-tenuo: warrant path does not exist: %s", exc)
-        return None
+    """Return raw warrant: base64 string or contents of a warrant file.
+
+    A configured path that does not exist raises ``FileNotFoundError``; it is
+    never reported as "not configured".
+    """
+    raw, _ = resolve_warrant_text(ctx)
+    return raw
 
 
 def get_child_warrant_raw(ctx: Any) -> Optional[str]:
@@ -131,8 +131,9 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
         return None
     if _looks_like_path(raw):
         path = Path(raw).expanduser()
-        if path.exists():
-            return path.read_text().strip()
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        return path.read_text().strip()
     return raw
 
 
