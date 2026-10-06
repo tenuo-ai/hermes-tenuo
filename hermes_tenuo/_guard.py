@@ -31,13 +31,26 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         get_require_session_warrant,
         get_signing_key,
         get_trusted_roots,
-        get_warrant_raw,
         load_warrant,
+        resolve_warrant_text,
     )
 
-    warrant_raw = get_warrant_raw(ctx)
+    try:
+        warrant_raw, source = resolve_warrant_text(ctx)
+    except FileNotFoundError as exc:
+        raise WarrantLoadError(
+            f"TENUO_WARRANT points to {exc}, which does not exist — "
+            "every tool call is blocked until the warrant is fixed"
+        ) from exc
     if not warrant_raw:
-        return None
+        # Not configured, or a kanban worker with no staged task warrant
+        # (register() blocks that case). Anything else is an empty warrant.
+        if source == "none" or source.startswith("kanban:"):
+            return None
+        raise WarrantLoadError(
+            f"TENUO_WARRANT is set but empty ({source}) — "
+            "every tool call is blocked until the warrant is fixed"
+        )
 
     warrant = load_warrant(warrant_raw)
     if warrant is None:
@@ -45,7 +58,19 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "TENUO_WARRANT is set but could not be loaded — "
             "every tool call is blocked until the warrant is fixed"
         )
-    child_warrant = load_warrant(get_child_warrant_raw(ctx))
+    try:
+        child_raw = get_child_warrant_raw(ctx)
+    except FileNotFoundError as exc:
+        raise WarrantLoadError(
+            f"TENUO_CHILD_WARRANT points to {exc}, which does not exist — "
+            "every tool call is blocked until the warrant is fixed"
+        ) from exc
+    child_warrant = load_warrant(child_raw)
+    if child_raw is not None and child_warrant is None:
+        raise WarrantLoadError(
+            "TENUO_CHILD_WARRANT is set but could not be loaded — "
+            "every tool call is blocked until the warrant is fixed"
+        )
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
     on_denial = get_on_denial(ctx)
