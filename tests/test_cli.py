@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import sys
+import types
 
 import pytest
 
@@ -157,6 +159,20 @@ class TestDoctorConfigured:
         out = capsys.readouterr().out
         assert "plugin configured" in out
         assert "✗" in out
+
+    def test_pre_tool_call_coverage_includes_execute_code(self, capsys, monkeypatch):
+        """Current Hermes routes execute_code helper calls through handle_function_call."""
+        from hermes_tenuo.cli import cmd_doctor
+
+        registry_module = types.ModuleType("tools.registry")
+        registry_module.registry = object()
+        monkeypatch.setitem(sys.modules, "tools.registry", registry_module)
+
+        cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "tools called from inside execute_code scripts" in out
+        assert "execute_code sandbox dispatch path not intercepted" not in out
+        assert "plugin ctx.dispatch_tool()" in out
 
 
 class TestDoctorBrokenWarrant:

@@ -109,8 +109,9 @@ plugins:
       signing_key_env: TENUO_SIGNING_KEY
 ```
 
-Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env`, or export it
-before you start Hermes:
+Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env` for Hermes. The
+standalone `uvx` command does not load that file, so also export it in the
+current shell before running `doctor`:
 
 ```bash
 export TENUO_SIGNING_KEY=<printed by mint>
@@ -274,7 +275,9 @@ as `uvx hermes-tenuo ...` instead.
 `doctor` checks plugin discovery, config wiring, warrant validity, and that
 the signing key matches the warrant holder. Run from the venv Hermes uses,
 it also reports which enforcement path is active; under `uvx` it reads the
-config directly and skips that check. Run it after every install.
+config directly and skips that check. Because `uvx` does not load
+`~/.hermes/.env`, export `TENUO_SIGNING_KEY` in that shell first. Run it after
+every install.
 
 ## Configuration reference
 
