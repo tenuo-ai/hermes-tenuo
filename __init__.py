@@ -1,6 +1,6 @@
 """Hermes directory-plugin entry point.
 
-``hermes plugins install tenuo-ai/hermes-tenuo`` clones this repository into
+``hermes plugins install hermes-tenuo`` (the catalog entry) clones this repository into
 ``~/.hermes/plugins/hermes-tenuo/`` and imports this file as the plugin
 module. ``pip install`` users never touch it: Hermes finds the
 ``hermes_agent.plugins`` entry point and imports ``hermes_tenuo`` directly.
