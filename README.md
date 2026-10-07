@@ -162,7 +162,11 @@ A tool with no constraints is allowed with any arguments.
 
 A range only matches numbers: an amount sent as the string `"40.00"` is
 denied, so declare such arguments as numbers in the tool schema. Give both
-ends; `0..4000` also rules out negative amounts.
+ends; `0..4000` also rules out negative amounts. Only a complete numeric
+`MIN..MAX` value is treated as a range, so values such as
+`release..candidate` continue to be exact strings. Tenuo ranges use
+IEEE-754 numbers; the CLI rejects non-finite bounds and values outside the
+safe integer range (`-9007199254740991` to `9007199254740991`).
 
 Any argument the warrant does not name is unconstrained for that tool. The
 `--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).

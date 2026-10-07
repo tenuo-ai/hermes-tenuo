@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import sys
@@ -47,10 +48,21 @@ def cmd_mint(args: argparse.Namespace) -> int:
 
 _NUMBER = r"-?\d+(?:\.\d+)?"
 _RANGE = re.compile(rf"^({_NUMBER})\.\.({_NUMBER})$")
+_MAX_SAFE_INTEGER = (1 << 53) - 1
 
 
 def _parse_number(text: str) -> float | int:
-    return float(text) if "." in text else int(text)
+    value = float(text) if "." in text else int(text)
+    # Tenuo Range uses f64 bounds. Reject CLI literals that would become
+    # non-finite or cross the range where adjacent integers remain distinct.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"range bound '{text}' is not finite")
+    if abs(value) > _MAX_SAFE_INTEGER:
+        raise ValueError(
+            f"range bound '{text}' exceeds the safe numeric limit "
+            f"{_MAX_SAFE_INTEGER}"
+        )
+    return value
 
 
 def _parse_constraint_value(value: str) -> Any:
@@ -59,10 +71,8 @@ def _parse_constraint_value(value: str) -> Any:
     v = value.strip()
     if v == "*":
         return Wildcard()
-    if ".." in v and not v.startswith(("/", "~")):
-        m = _RANGE.match(v)
-        if not m:
-            raise ValueError(f"range must be MIN..MAX with both ends numeric, got '{v}'")
+    m = _RANGE.fullmatch(v)
+    if m:
         lo, hi = _parse_number(m.group(1)), _parse_number(m.group(2))
         if lo > hi:
             raise ValueError(f"range minimum {m.group(1)} is above maximum {m.group(2)}")

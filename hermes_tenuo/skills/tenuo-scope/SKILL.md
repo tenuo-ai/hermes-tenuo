@@ -106,6 +106,10 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=*` | that argument may be anything |
 | `tool:a=..,b=..` | several constraints on one tool |
 
+Only a complete numeric `MIN..MAX` value is a range; other values containing
+`..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
+`-9007199254740991..9007199254740991`.
+
 `--allow memory` and `--allow todo` are still tools. Add them only if
 the job needs them. For a case-insensitive path, or anything else this
 table cannot express, mint in Python (see the repo README).

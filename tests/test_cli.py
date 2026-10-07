@@ -270,11 +270,47 @@ class TestMintConstraints:
         _, c, _ = parse_allow("scale:delta=-5..5")
         assert isinstance(c["delta"], Range)
 
-    def test_parse_allow_range_rejects_malformed(self):
+    def test_parse_allow_range_rejects_reversed_bounds(self):
         from hermes_tenuo.cli import parse_allow
-        for bad in ("amount=..4000", "amount=0..", "amount=a..b", "amount=4000..0", "amount=0..40..50"):
-            with pytest.raises(ValueError):
-                parse_allow(f"checkout:{bad}")
+
+        with pytest.raises(ValueError, match="minimum 4000 is above maximum 0"):
+            parse_allow("checkout:amount=4000..0")
+
+    def test_non_range_double_dots_remain_exact(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Exact
+
+        for value in (
+            "release..candidate",
+            "https://example.com/a..b",
+            "../data",
+            "..4000",
+            "0..",
+            "0..40..50",
+        ):
+            _, constraints, shown = parse_allow(f"deploy:target={value}")
+            assert isinstance(constraints["target"], Exact)
+            assert shown == {"target": value}
+
+    def test_parse_allow_range_rejects_unsafe_bounds(self):
+        from hermes_tenuo.cli import parse_allow
+
+        for value in (
+            "9007199254740992..9007199254740992",
+            "-9007199254740992..0",
+            f"{'1' * 400}.0..{'1' * 400}.0",
+        ):
+            with pytest.raises(ValueError, match="safe numeric limit|not finite"):
+                parse_allow(f"checkout:amount={value}")
+
+    def test_parse_allow_range_accepts_safe_integer_boundary(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Range
+
+        _, constraints, _ = parse_allow(
+            "checkout:amount=-9007199254740991..9007199254740991"
+        )
+        assert isinstance(constraints["amount"], Range)
 
     def test_parse_allow_path_with_dots_stays_a_path(self):
         from hermes_tenuo.cli import parse_allow
