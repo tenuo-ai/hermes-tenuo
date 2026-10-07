@@ -154,6 +154,7 @@ A tool with no constraints is allowed with any arguments.
 | `tool` | any arguments | `--allow web_search` |
 | `tool:arg=/path` | argument must be that path or under it (traversal-safe) | `--allow read_file:path=/data` |
 | `tool:arg=glob*` | argument must match the glob | `--allow web_search:query=acme*` |
+| `tool:arg=domain:host\|*.host` | an http(s) URL on those hosts; literal private and metadata addresses are denied | `--allow browser_navigate:url=domain:docs.python.org` |
 | `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow git:action=status\|diff\|log` |
 | `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
 | `tool:arg=value` | argument must match exactly | `--allow write_file:mode=w` |
@@ -167,6 +168,13 @@ ends; `0..4000` also rules out negative amounts. Only a complete numeric
 `release..candidate` continue to be exact strings. Tenuo ranges use
 IEEE-754 numbers; the CLI rejects non-finite bounds and values outside the
 safe integer range (`-9007199254740991` to `9007199254740991`).
+
+`domain:` checks one URL. A list argument, such as `web_extract`'s
+`urls`, does not match and is denied, so limit `web_extract` by leaving it
+off the warrant and allowing `browser_navigate` on the domains you want.
+`UrlSafe` makes the authorization decision in Tenuo core. It is stateless and
+does not resolve DNS, so the URL-fetching layer must also validate and pin
+resolved addresses to prevent DNS rebinding to a private destination.
 
 Any argument the warrant does not name is unconstrained for that tool. The
 `--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).

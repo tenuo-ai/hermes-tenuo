@@ -100,6 +100,7 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool` | any arguments — last resort |
 | `tool:arg=/path` | that path or under it (traversal-safe) |
 | `tool:arg=glob*` | glob |
+| `tool:arg=domain:host\|*.host` | one http(s) URL whose host is on the list |
 | `tool:arg=a\|b\|c` | one of the choices |
 | `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
@@ -109,6 +110,10 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 Only a complete numeric `MIN..MAX` value is a range; other values containing
 `..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
 `-9007199254740991..9007199254740991`.
+
+`domain:` uses Tenuo core's `UrlSafe` constraint; the adapter only parses the
+host list. `UrlSafe` does not resolve DNS, so the URL-fetching layer must also
+validate and pin resolved addresses to prevent DNS rebinding.
 
 `--allow memory` and `--allow todo` are still tools. Add them only if
 the job needs them. For a case-insensitive path, or anything else this
