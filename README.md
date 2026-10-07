@@ -109,21 +109,27 @@ plugins:
       signing_key_env: TENUO_SIGNING_KEY
 ```
 
-Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env` for Hermes. The
-standalone `uvx` command does not load that file, so also export it in the
-current shell before running `doctor`:
+Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env`. Hermes reads that
+file when it starts. The `uvx` command below does not, so export the same
+value in this shell before the check:
 
 ```bash
 export TENUO_SIGNING_KEY=<printed by mint>
 ```
 
-**3. Check the wiring, then run Hermes.**
+**3. Check it, then start Hermes.** Run these in order:
 
 ```bash
-hermes plugins doctor hermes-tenuo   # Hermes loads the plugin and its hooks
-uvx hermes-tenuo doctor              # config, warrant, expiry, signing key
+hermes plugins doctor hermes-tenuo
+uvx hermes-tenuo doctor
 hermes
 ```
+
+- `hermes plugins doctor hermes-tenuo` — Hermes loads the plugin and registers its hooks. This does not look at your warrant. If it cannot find the plugin, go back to step 1.
+- `uvx hermes-tenuo doctor` — checks the config you pasted, the warrant, its expiry, and that the signing key matches the warrant holder. Fix anything it marks with `✗` before you start Hermes. This command runs outside Hermes, so it does not report the enforcement path. On a current Hermes install that path is `pre_tool_call`.
+- `hermes` — start the agent.
+
+If you installed with `pip install hermes-tenuo` into the same environment Hermes uses, drop the `uvx` prefix. `hermes-tenuo doctor` then also prints which enforcement path is active.
 
 Ask the agent to read `/opt/private/payroll.csv`. It gets the same denial as the tool
 result. Load `skill_view("hermes-tenuo:tenuo-scope")` to mint a warrant
@@ -183,7 +189,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | Per-user permissions, isolated per session, cleared on session end |
+| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Tool calls from inside `execute_code` still follow the config warrant |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
@@ -239,24 +245,32 @@ to see the same lines as an operator.
 
 ## Coverage
 
-On upstream Hermes, enforcement runs at `pre_tool_call`. On current Hermes
-`main` that covers every tool call made through the agent loop, including
-the tools `run_agent.py` handles before the registry (`todo`, `memory`,
-`session_search`, `delegate_task`) and tool calls made from inside an
-`execute_code` script. Callers that pass `skip_pre_tool_call_hook=True`
-have already run the hook themselves.
+Hermes asks hermes-tenuo before each tool handler runs (`pre_tool_call`).
 
-It does not cover a plugin that calls a tool directly through
-`ctx.dispatch_tool()`, which goes straight to `registry.dispatch()`. Only
-install plugins you trust alongside hermes-tenuo. A registry-level hook that
-closes this gap is proposed upstream in
-[hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
-The plugin detects it at load time and uses it automatically, and
-`hermes-tenuo doctor` reports which path is active.
+That includes every tool call in the agent loop, the tools Hermes handles
+before its registry (`todo`, `memory`, `session_search`, `delegate_task`),
+and tool calls an `execute_code` script makes through Hermes, such as
+`read_file` or `web_search`. A caller that passes
+`skip_pre_tool_call_hook=True` has already been through this check.
 
-Neither path inspects what an `execute_code` script does on its own, such as
-`subprocess.run(...)`. Use a container backend (Docker, Modal, Daytona) for
-that threat model.
+Those `execute_code` calls are checked against the warrant in your config
+(`TENUO_WARRANT`, or `plugins.entries.hermes-tenuo.warrant`). Hermes does
+not send the gateway session id with them, so a warrant you attached with
+`set_session_warrant` is not the one applied. On a gateway, leave
+`execute_code` off a session warrant when that session must stay narrower
+than the config warrant.
+
+Two things stay outside this check:
+
+- Another plugin calling `ctx.dispatch_tool()`. That goes straight to
+  `registry.dispatch()` and skips the hook. Only install plugins you trust
+  alongside hermes-tenuo. A registry-level hook that closes this gap is
+  proposed upstream in
+  [hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
+  When Hermes provides it, hermes-tenuo uses it automatically.
+- What an `execute_code` script runs on its own, such as
+  `subprocess.run(...)`. Use a container backend (Docker, Modal, Daytona)
+  for that.
 
 ## CLI
 
@@ -269,14 +283,14 @@ hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
 ```
 
-After a catalog install the command is not on your path; run each of these
-as `uvx hermes-tenuo ...` instead.
+After a catalog install these commands are not on your path. Prefix each
+one with `uvx `.
 
-`doctor` checks plugin discovery, config wiring, warrant validity, and that
-the signing key matches the warrant holder. Run from the venv Hermes uses,
-it also reports which enforcement path is active; under `uvx` it reads the
-config directly and skips that check. Because `uvx` does not load
-`~/.hermes/.env`, export `TENUO_SIGNING_KEY` in that shell first. Run it after
+`uvx hermes-tenuo doctor` checks plugin discovery, config, warrant validity,
+and that the signing key matches the warrant holder. Export
+`TENUO_SIGNING_KEY` in that shell first, because `uvx` does not load
+`~/.hermes/.env`. It does not report the enforcement path. Confirm Hermes
+loaded the plugin with `hermes plugins doctor hermes-tenuo`. Run both after
 every install.
 
 ## Configuration reference

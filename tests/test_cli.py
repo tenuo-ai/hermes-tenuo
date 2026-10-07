@@ -161,7 +161,7 @@ class TestDoctorConfigured:
         assert "✗" in out
 
     def test_pre_tool_call_coverage_includes_execute_code(self, capsys, monkeypatch):
-        """Current Hermes routes execute_code helper calls through handle_function_call."""
+        """Doctor tells the operator which warrant execute_code calls use."""
         from hermes_tenuo.cli import cmd_doctor
 
         registry_module = types.ModuleType("tools.registry")
@@ -171,8 +171,21 @@ class TestDoctorConfigured:
         cmd_doctor(argparse.Namespace())
         out = capsys.readouterr().out
         assert "tools called from inside execute_code scripts" in out
+        assert "execute_code calls inside a script use the warrant in your config." in out
+        assert "set_session_warrant does not apply to them." in out
         assert "execute_code sandbox dispatch path not intercepted" not in out
         assert "plugin ctx.dispatch_tool()" in out
+
+    def test_outside_hermes_points_at_plugins_doctor(self, capsys, monkeypatch):
+        """A standalone doctor cannot import Hermes, so it names the other check."""
+        from hermes_tenuo.cli import cmd_doctor
+
+        monkeypatch.setitem(sys.modules, "tools.registry", None)
+        cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "hermes plugins doctor hermes-tenuo" in out
+        assert "Hermes-enabled venv" not in out
+        assert "enforcement-path report" in out
 
 
 class TestDoctorBrokenWarrant:

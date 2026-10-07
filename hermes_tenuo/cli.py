@@ -440,12 +440,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("      - direct registry.dispatch(...) callers bypass enforcement")
             print("        (including plugin ctx.dispatch_tool())")
             print("    Fix pending: https://github.com/NousResearch/hermes-agent/pull/32719")
+        print("  execute_code calls inside a script use the warrant in your config.")
+        print("  set_session_warrant does not apply to them.")
         print()
         print("  Lifecycle hooks registered:")
         print("    on_session_start, on_session_end, subagent_start")
         print("    (subagent_start: pre-injects child warrants before first tool call)")
     except ImportError:
-        note("tools.registry not importable here — run `hermes-tenuo doctor` from a Hermes-enabled venv")
+        note("skipped the enforcement-path report — this command is not running inside Hermes")
+        note("the checks above still cover config, warrant, expiry, and the signing key")
+        note("confirm Hermes loaded the plugin: hermes plugins doctor hermes-tenuo")
 
     print()
     if ok:
