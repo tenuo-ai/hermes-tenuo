@@ -167,12 +167,13 @@ ends; `0..4000` also rules out negative amounts.
 Any argument the warrant does not name is unconstrained for that tool. The
 `--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).
 
-For anything the flag syntax cannot express, mint in Python with the full
-constraint set (numeric ranges, case-insensitive paths, and more):
+A number range is `--allow checkout:amount=0..4000` (both ends, inclusive).
+For a case-insensitive path, or anything else the flag cannot express, mint
+in Python:
 
 ```python
 import base64, os
-from tenuo import SigningKey, Warrant, Subpath, Pattern, Range
+from tenuo import SigningKey, Warrant, Subpath, Pattern
 
 control_key = SigningKey.generate()   # keep private; its public key is trusted_root
 agent_key = SigningKey.generate()     # export its secret as TENUO_SIGNING_KEY
@@ -180,9 +181,8 @@ agent_key = SigningKey.generate()     # export its secret as TENUO_SIGNING_KEY
 warrant = (
     Warrant.mint_builder()
     .holder(agent_key.public_key)
-    .capability("read_file", path=Subpath("/data"))
+    .capability("read_file", path=Subpath("/data", case_sensitive=False))
     .capability("web_search", query=Pattern("acme*"))
-    .capability("scale_cluster", replicas=Range.max_value(10))
     .ttl(3600)
     .mint(control_key)
 )

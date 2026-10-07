@@ -101,13 +101,14 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=/path` | that path or under it (traversal-safe) |
 | `tool:arg=glob*` | glob |
 | `tool:arg=a\|b\|c` | one of the choices |
+| `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
 | `tool:arg=*` | that argument may be anything |
 | `tool:a=..,b=..` | several constraints on one tool |
 
 `--allow memory` and `--allow todo` are still tools. Add them only if
-the job needs them. For numeric ranges or case-insensitive paths, mint
-in Python with `Range`, `Subpath`, `Pattern` (see the repo README).
+the job needs them. For a case-insensitive path, or anything else this
+table cannot express, mint in Python (see the repo README).
 
 ## Pattern: cron
 
