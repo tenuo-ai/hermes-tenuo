@@ -74,6 +74,9 @@ def test_package_and_plugin_versions_agree():
 
 
 def test_readme_keeps_listing_strategy_out():
+    # Installing from the public catalog is fine; notes about the listing
+    # itself (the entry file, submission) stay out of the README.
     text = (ROOT / "README.md").read_text().lower()
-    assert "catalog" not in text
     assert "plugin-catalog" not in text
+    assert "catalog-entry" not in text
+    assert "submission" not in text
