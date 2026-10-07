@@ -15,10 +15,15 @@ Each --allow takes a tool name with optional argument constraints:
     --allow write_file:path=/tmp/out,mode=w exact mode, path under /tmp/out
     --allow web_search:query=acme*          glob pattern
     --allow git:action=status|diff|log      one of several values
+    --allow checkout:amount=0..4000         number from 0 to 4000, inclusive
 
-Value rules: ``*`` allows anything; ``a|b`` is a choice; a value containing
-``*`` or ``?`` is a glob; a value starting with ``/`` or ``~`` is a path
-prefix (Subpath, traversal-safe); anything else must match exactly.
+Value rules: ``*`` allows anything; ``a|b`` is a choice; ``MIN..MAX`` is a
+numeric range (both ends required, inclusive); a value containing ``*`` or
+``?`` is a glob; a value starting with ``/`` or ``~`` is a path prefix
+(Subpath, traversal-safe); anything else must match exactly.
+
+A range only matches numbers. A tool that sends the amount as a string
+(``"40.00"``) is denied, so declare that argument as a number.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -39,12 +45,28 @@ def cmd_mint(args: argparse.Namespace) -> int:
     return _mint_local(args)
 
 
+_NUMBER = r"-?\d+(?:\.\d+)?"
+_RANGE = re.compile(rf"^({_NUMBER})\.\.({_NUMBER})$")
+
+
+def _parse_number(text: str) -> float | int:
+    return float(text) if "." in text else int(text)
+
+
 def _parse_constraint_value(value: str) -> Any:
     """Map one ``arg=value`` string to a tenuo constraint (see module docstring)."""
-    from tenuo import Exact, OneOf, Pattern, Subpath, Wildcard
+    from tenuo import Exact, OneOf, Pattern, Range, Subpath, Wildcard
     v = value.strip()
     if v == "*":
         return Wildcard()
+    if ".." in v and not v.startswith(("/", "~")):
+        m = _RANGE.match(v)
+        if not m:
+            raise ValueError(f"range must be MIN..MAX with both ends numeric, got '{v}'")
+        lo, hi = _parse_number(m.group(1)), _parse_number(m.group(2))
+        if lo > hi:
+            raise ValueError(f"range minimum {m.group(1)} is above maximum {m.group(2)}")
+        return Range(lo, hi)
     if "|" in v:
         choices = [c.strip() for c in v.split("|") if c.strip()]
         if not choices:

@@ -229,6 +229,56 @@ class TestMintConstraints:
         tool, c, _ = parse_allow("web_search")
         assert tool == "web_search" and c == {}
 
+    def test_parse_allow_range(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Range
+
+        _, c, shown = parse_allow("checkout:amount=0..4000")
+        assert isinstance(c["amount"], Range) and shown == {"amount": "0..4000"}
+        _, c, _ = parse_allow("checkout:amount=0.5..40.25,currency=usd")
+        assert isinstance(c["amount"], Range)
+        _, c, _ = parse_allow("scale:delta=-5..5")
+        assert isinstance(c["delta"], Range)
+
+    def test_parse_allow_range_rejects_malformed(self):
+        from hermes_tenuo.cli import parse_allow
+        for bad in ("amount=..4000", "amount=0..", "amount=a..b", "amount=4000..0", "amount=0..40..50"):
+            with pytest.raises(ValueError):
+                parse_allow(f"checkout:{bad}")
+
+    def test_parse_allow_path_with_dots_stays_a_path(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Subpath
+
+        _, c, _ = parse_allow("read_file:path=/data/../data")
+        assert isinstance(c["path"], Subpath)
+
+    def test_minted_range_is_enforced_by_guard(self, capsys):
+        """Inclusive bounds; negatives, overages and numeric strings are denied."""
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.hermes_guard import HermesGuard
+        from tenuo import PublicKey, SigningKey, Warrant
+
+        args = argparse.Namespace(ttl="1h", allow=["checkout:amount=0..4000"], output="env")
+        assert cmd_mint(args) == 0
+        env = {}
+        for line in capsys.readouterr().out.splitlines():
+            if line.startswith("export "):
+                k, v = line[len("export "):].split("=", 1)
+                env[k] = v
+        guard = HermesGuard(
+            warrant=Warrant.from_bytes(base64.b64decode(env["TENUO_WARRANT"])),
+            signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
+            trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
+        )
+        def call(amount):
+            return guard.pre_tool_call("checkout", {"amount": amount}, session_id="s1")
+        for ok in (0, 2000, 4000, 39.99):
+            assert call(ok) is None, ok
+        for bad in (-50, 4000.01, 18900, "2000"):
+            denied = call(bad)
+            assert denied and denied["action"] == "block", bad
+
     def test_parse_allow_rejects_malformed(self):
         from hermes_tenuo.cli import parse_allow
         with pytest.raises(ValueError):
