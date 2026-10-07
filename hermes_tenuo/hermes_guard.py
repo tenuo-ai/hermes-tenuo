@@ -19,13 +19,71 @@ Invariants:
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("hermes_tenuo")
+
+# Bounded waits for signed receipts still in the deferred emitter's queue.
+_SESSION_END_FLUSH_SECS = 2.0
+_EXIT_FLUSH_SECS = 5.0
+
+
+def _log_receipt_error(exc: BaseException) -> None:
+    logger.warning("hermes-tenuo: receipt delivery failed: %s", exc)
+
+
+def _connect_control_plane() -> Any:
+    """Return the process control-plane client, with Cloud receipts when possible.
+
+    With ``TENUO_CONNECT_TOKEN`` set and ``tenuo[cloud]`` installed, the client
+    gets a ``CloudReceiptSink``, so every decision over a presented warrant is
+    also delivered to Tenuo Cloud as a signed receipt. Without the cloud SDK,
+    decisions still stream but no receipts are produced. Any failure here falls
+    back to the plain client: receipts never affect authorization.
+    """
+    from tenuo.control_plane import get_client, get_or_create
+
+    if get_client() is not None or not os.environ.get("TENUO_CONNECT_TOKEN"):
+        return get_or_create()
+    try:
+        import tenuo_cloud
+    except ImportError:
+        logger.warning(
+            "hermes-tenuo: TENUO_CONNECT_TOKEN is set but tenuo[cloud] is not "
+            "installed; decisions stream to the control plane without signed "
+            "receipts. Install it with: pip install 'hermes-tenuo[cloud]'"
+        )
+        return get_or_create()
+    try:
+        from tenuo.control_plane import connect
+
+        cloud = tenuo_cloud.connect(claim=False, apply_env=False)
+        client = connect(
+            receipt_sink=tenuo_cloud.CloudReceiptSink(cloud),
+            on_receipt_error=_log_receipt_error,
+        )
+    except Exception as exc:  # noqa: BLE001 - receipts must not block startup
+        logger.warning("hermes-tenuo: Cloud receipts unavailable (%s); continuing without them", exc)
+        return get_or_create()
+    atexit.register(_flush_receipts, client, _EXIT_FLUSH_SECS)
+    return client
+
+
+def _flush_receipts(client: Any, timeout: float) -> None:
+    flush = getattr(client, "flush_receipts", None)
+    if not callable(flush):
+        return
+    try:
+        if not flush(timeout=timeout):
+            logger.warning("hermes-tenuo: receipts still pending after %.0fs", timeout)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes-tenuo: receipt flush failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +210,9 @@ class HermesGuard:
         self._pre_decisions: Dict[str, Tuple[bool, str]] = {}
         self._pre_decisions_lock = threading.Lock()
 
-        # Connect to control plane (auto-discovers from env if not already connected)
-        from tenuo.control_plane import get_or_create
-        self._control_plane = get_or_create()
+        # Connect to control plane (auto-discovers from env if not already
+        # connected); adds Cloud receipts when tenuo[cloud] is installed.
+        self._control_plane = _connect_control_plane()
 
     @property
     def has_warrant(self) -> bool:
@@ -463,6 +521,8 @@ class HermesGuard:
                 self._primary_session_id = None
         with self._session_lock:
             self._session_warrant_chains.pop(session_id, None)
+        if self._control_plane is not None:
+            _flush_receipts(self._control_plane, _SESSION_END_FLUSH_SECS)
 
     # ------------------------------------------------------------------
     # Hook: subagent_start
