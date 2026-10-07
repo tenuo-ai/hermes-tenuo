@@ -68,28 +68,31 @@ see [docs/walkthrough.md](docs/walkthrough.md).
 
 ## Install into Hermes
 
-**1. Install.**
+**1. Install.** hermes-tenuo is in the
+[Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/hermes-tenuo),
+so this installs the reviewed, pinned commit:
 
 ```bash
-# into the venv Hermes uses (pulls in tenuo):
-pip install hermes-tenuo
-
-# or as a directory plugin under ~/.hermes/plugins:
-hermes plugins install tenuo-ai/hermes-tenuo
-pip install "tenuo>=0.3.2"   # Hermes does not install plugin dependencies
+hermes plugins install hermes-tenuo
+hermes plugins enable hermes-tenuo
 ```
 
-To run the latest unreleased code instead: `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
+`install` asks for `TENUO_WARRANT` and `TENUO_SIGNING_KEY`. You mint those
+in the next step, so leave both empty for now. `enable` installs the `tenuo`
+dependency into the Hermes runtime.
+
+If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
+instead. That also puts the `hermes-tenuo` command on your path, so you can
+drop the `uvx` prefix below. To run the latest unreleased code:
+`pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
 
 Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through the plugin loader of upstream Hermes `main`, both install routes; the badge above is its latest result.
-The pip route installs `tenuo>=0.3.2` for you; the directory route needs the
-extra `pip install` line above.
 
 **2. Mint a warrant.** This generates a key pair and a warrant, and prints
 the exact config block to paste.
 
 ```bash
-hermes-tenuo mint --ttl 1h \
+uvx hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data \
   --allow web_search
 ```
@@ -106,6 +109,9 @@ plugins:
       signing_key_env: TENUO_SIGNING_KEY
 ```
 
+Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env`, or export it
+before you start Hermes:
+
 ```bash
 export TENUO_SIGNING_KEY=<printed by mint>
 ```
@@ -113,7 +119,8 @@ export TENUO_SIGNING_KEY=<printed by mint>
 **3. Check the wiring, then run Hermes.**
 
 ```bash
-hermes-tenuo doctor
+hermes plugins doctor hermes-tenuo   # Hermes loads the plugin and its hooks
+uvx hermes-tenuo doctor              # config, warrant, expiry, signing key
 hermes
 ```
 
@@ -231,16 +238,17 @@ to see the same lines as an operator.
 
 ## Coverage
 
-On upstream Hermes, enforcement runs at `pre_tool_call`. That covers every
-tool call made through the agent loop, including the tools `run_agent.py`
-handles before the registry (`todo`, `memory`, `session_search`,
-`delegate_task`). It does not cover:
+On upstream Hermes, enforcement runs at `pre_tool_call`. On current Hermes
+`main` that covers every tool call made through the agent loop, including
+the tools `run_agent.py` handles before the registry (`todo`, `memory`,
+`session_search`, `delegate_task`) and tool calls made from inside an
+`execute_code` script. Callers that pass `skip_pre_tool_call_hook=True`
+have already run the hook themselves.
 
-- callers that pass `skip_pre_tool_call_hook=True`;
-- plugins that call `registry.dispatch()` directly;
-- the `execute_code` sandbox's internal tool dispatch.
-
-A registry-level hook that closes all three is proposed upstream in
+It does not cover a plugin that calls a tool directly through
+`ctx.dispatch_tool()`, which goes straight to `registry.dispatch()`. Only
+install plugins you trust alongside hermes-tenuo. A registry-level hook that
+closes this gap is proposed upstream in
 [hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
 The plugin detects it at load time and uses it automatically, and
 `hermes-tenuo doctor` reports which path is active.
@@ -260,9 +268,13 @@ hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
 ```
 
-Run `doctor` from the same venv Hermes uses. It checks plugin discovery,
-config wiring, warrant validity, that the signing key matches the warrant
-holder, and which enforcement path is active. Run it after every install.
+After a catalog install the command is not on your path; run each of these
+as `uvx hermes-tenuo ...` instead.
+
+`doctor` checks plugin discovery, config wiring, warrant validity, and that
+the signing key matches the warrant holder. Run from the venv Hermes uses,
+it also reports which enforcement path is active; under `uvx` it reads the
+config directly and skips that check. Run it after every install.
 
 ## Configuration reference
 
