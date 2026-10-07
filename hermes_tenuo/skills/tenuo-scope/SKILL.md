@@ -68,10 +68,11 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
    chain.
 5. **No `terminal` / `execute_code` on a child or cron warrant**
    unless the user explicitly asked and the command/path is
-   constrained. Tool calls the script makes through Hermes are checked
-   against the config warrant, not the child or session warrant. The
-   plugin still does not see what the script runs itself
-   (`subprocess.run`).
+   constrained. On current Hermes `main`, tool calls the script makes
+   through Hermes are checked against the config warrant, not the child
+   or session warrant. Older releases may not route those calls through
+   the hook at all. The plugin still does not see what the script runs
+   itself (`subprocess.run`).
 6. **Signing keys stay in env or a secret source**, never in
    `config.yaml`. Under `gateway.multiplex_profiles`, put `TENUO_*`
    in that profile's `.env`.

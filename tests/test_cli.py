@@ -170,9 +170,10 @@ class TestDoctorConfigured:
 
         cmd_doctor(argparse.Namespace())
         out = capsys.readouterr().out
-        assert "tools called from inside execute_code scripts" in out
-        assert "execute_code calls inside a script use the warrant in your config." in out
-        assert "set_session_warrant does not apply to them." in out
+        assert "Current Hermes main also covers tools called from inside" in out
+        assert "older releases may not route them here" in out
+        assert "execute_code calls inside a script use" in out
+        assert "set_session_warrant does not apply" in out
         assert "execute_code sandbox dispatch path not intercepted" not in out
         assert "plugin ctx.dispatch_tool()" in out
 
