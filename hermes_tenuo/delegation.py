@@ -14,8 +14,10 @@ so a plan can only narrow. A grant Tenuo refuses blocks the delegation.
                           "delegate_task": {}}},
      "levels": [{"ttl_seconds": 1800, "tools": {...}}, {"ttl_seconds": 600, "tools": {...}}]}
 
-``patterns`` are anchored regular expressions; ``binaries`` becomes Shlex.
-A tool mapped to ``{}`` carries no argument constraints.
+``patterns`` are anchored regular expressions; ``binaries`` becomes Shlex;
+``range`` is an inclusive numeric ``[min, max]`` (for a numeric argument the
+tool always sends, e.g. the terminal timeout). A tool mapped to ``{}`` carries
+no argument constraints.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ class Level:
 
 
 def _members(spec: dict) -> List[Any]:
-    from tenuo import AnyOf, Regex
+    from tenuo import AnyOf, Range, Regex
     import tenuo_core
 
     out: List[Any] = []
@@ -45,6 +47,9 @@ def _members(spec: dict) -> List[Any]:
         out.append(tenuo_core.Shlex(allow=list(spec["binaries"])))
     if spec.get("patterns"):
         out.append(AnyOf([Regex(p) for p in spec["patterns"]]))
+    if spec.get("range"):
+        lo, hi = spec["range"]
+        out.append(Range(lo, hi))
     return out
 
 
@@ -61,7 +66,12 @@ class DelegationPlan:
         return self.levels[depth - 1] if 1 <= depth <= len(self.levels) else None
 
     def constraints_for(self, depth: int) -> Dict[str, Optional[Dict[str, Any]]]:
-        """tool → {arg: All(...)} for a child at ``depth``; None means unconstrained."""
+        """tool → {arg: All(...)} for a child at ``depth``; None means unconstrained.
+
+        Each argument is the ``All`` of every ancestor's members. A warrant that
+        delegates under this plan must mint the same ``All`` structure for the
+        root (see ``capability_members``) so attenuation stays All-to-All.
+        """
         from tenuo import All
 
         ancestry = [self.root] + list(self.levels[:depth])
@@ -90,7 +100,11 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
             patterns = spec.get("patterns") or []
             if not all(isinstance(p, str) and p.startswith("^") and p.endswith("$") for p in patterns):
                 raise DelegationPlanError(f"{where}: {tool}.{arg} patterns must be anchored (^...$)")
-            if not patterns and not spec.get("binaries"):
+            rng = spec.get("range")
+            if rng is not None and (not isinstance(rng, (list, tuple)) or len(rng) != 2
+                                    or not all(isinstance(n, (int, float)) for n in rng) or rng[0] > rng[1]):
+                raise DelegationPlanError(f"{where}: {tool}.{arg} range must be [min, max] with min <= max")
+            if not patterns and not spec.get("binaries") and rng is None:
                 raise DelegationPlanError(f"{where}: {tool}.{arg} has no constraints")
     return Level(ttl, {t: dict(a or {}) for t, a in raw["tools"].items()})
 
@@ -107,6 +121,16 @@ def parse_plan(data: Any) -> DelegationPlan:
     for depth in range(1, plan.max_depth + 1):
         plan.constraints_for(depth)  # report ancestry errors at load time
     return plan
+
+
+def capability_members(spec: dict) -> List[Any]:
+    """The constraint members for one argument spec, wrapped for a capability.
+
+    Mint the root warrant with ``All(capability_members(spec))`` per argument so
+    its structure matches what children receive from ``constraints_for`` and
+    attenuation stays All-to-All.
+    """
+    return _members(spec)
 
 
 def load_plan(path: str | Path) -> DelegationPlan:

@@ -215,3 +215,45 @@ def test_malformed_plans_are_rejected(mutate, message):
     mutate(plan)
     with pytest.raises(DelegationPlanError, match=message):
         parse_plan(plan)
+
+
+def test_range_argument_is_bounded_and_fails_closed():
+    """A numeric range argument (e.g. the terminal timeout) is bounded, not wildcarded."""
+    import tenuo_core
+    from tenuo import All, AnyOf, Range, Regex, SigningKey, Warrant, enforce_tool_call
+
+    from hermes_tenuo.delegation import parse_plan
+
+    def term(ttl=None):
+        d = {"tools": {"terminal": {"command": {"binaries": ["kubectl"],
+                                                "patterns": [r"^kubectl get pods -n shop$"]},
+                                    "timeout": {"range": [1, 600]}}, "delegate_task": {}}}
+        if ttl:
+            d["ttl_seconds"] = ttl
+        return d
+
+    plan = parse_plan({"version": 1, "root": term(), "levels": [term(600)]})
+    cons = plan.constraints_for(1)["terminal"]
+    assert "timeout" in cons and "command" in cons
+
+    root, agent = SigningKey.generate(), SigningKey.generate()
+    cmd = All([tenuo_core.Shlex(allow=["kubectl"]), AnyOf([Regex(r"^kubectl get pods -n shop$")])])
+    w = (Warrant.mint_builder().holder(agent.public_key)
+         .capability("terminal", command=cmd, timeout=Range(1, 600))
+         .capability("delegate_task").ttl(600).mint(root))
+    bw = w.bind(agent)
+    base = {"command": "kubectl get pods -n shop"}
+    assert enforce_tool_call("terminal", {**base, "timeout": 180}, bw, trusted_roots=[root.public_key]).allowed
+    assert not enforce_tool_call("terminal", {**base, "timeout": 600000}, bw, trusted_roots=[root.public_key]).allowed
+    assert not enforce_tool_call("terminal", base, bw, trusted_roots=[root.public_key]).allowed
+
+
+def test_range_must_be_min_max():
+    import pytest as _pt
+
+    from hermes_tenuo.delegation import DelegationPlanError, parse_plan
+    bad = {"version": 1,
+           "root": {"tools": {"terminal": {"timeout": {"range": [600, 1]}}, "delegate_task": {}}},
+           "levels": [{"ttl_seconds": 60, "tools": {"terminal": {"timeout": {"range": [600, 1]}}}}]}
+    with _pt.raises(DelegationPlanError, match="min <= max"):
+        parse_plan(bad)
