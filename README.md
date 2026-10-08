@@ -328,6 +328,7 @@ variable equivalent.
 | `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Warrants signed by anything else are rejected. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
+| `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a delegation plan: argument-level grants for each depth of a `delegate_task` tree (see `hermes_tenuo/delegation.py`). Children without a planned grant hold no authority. |
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |

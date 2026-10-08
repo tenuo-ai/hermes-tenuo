@@ -137,6 +137,15 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
     return raw
 
 
+def get_delegation_plan_path(ctx: Any) -> Optional[str]:
+    """Path of the delegation plan for per-depth delegate_task grants, if configured."""
+    entry = _get_plugin_entry(ctx)
+    raw = entry.get("delegation_plan") or _env_secret("TENUO_DELEGATION_PLAN")
+    if not raw:
+        return None
+    return str(raw).strip() or None
+
+
 def get_signing_key(ctx: Any):
     """Return SigningKey from env or config, or None."""
     entry = _get_plugin_entry(ctx)
