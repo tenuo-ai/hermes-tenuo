@@ -27,6 +27,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     from hermes_tenuo._config import (
         get_audit_log_path,
         get_child_warrant_raw,
+        get_delegation_plan_path,
         get_on_denial,
         get_require_session_warrant,
         get_signing_key,
@@ -81,6 +82,16 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "TENUO_CHILD_WARRANT is set but could not be loaded — "
             "every tool call is blocked until the warrant is fixed"
         )
+    delegation_plan = None
+    plan_path = get_delegation_plan_path(ctx)
+    if plan_path is not None:
+        from hermes_tenuo.delegation import DelegationPlanError, load_plan
+        try:
+            delegation_plan = load_plan(plan_path)
+        except DelegationPlanError as exc:
+            raise WarrantLoadError(
+                f"{exc} — every tool call is blocked until the plan is fixed"
+            ) from exc
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
     on_denial = get_on_denial(ctx)
@@ -100,6 +111,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         on_denial=on_denial,
         audit_callback=audit_callback,
         require_session_warrant=get_require_session_warrant(ctx),
+        delegation_plan=delegation_plan,
     )
 
     return PluginGuard(guard)
