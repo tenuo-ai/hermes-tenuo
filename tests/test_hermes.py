@@ -322,8 +322,7 @@ class TestSessionWarrantRegistry:
         guard.set_session_warrant(
             "child", child_warrant, agent_key, parent_warrant=basic_warrant
         )
-        with guard._session_lock:
-            assert guard._session_warrant_chains["child"] is basic_warrant
+        assert guard._chain_for("child") == [basic_warrant]
         guard.clear_session_warrant("child")
         with guard._session_lock:
             assert "child" not in guard._session_warrant_chains
