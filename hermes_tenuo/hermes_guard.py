@@ -429,7 +429,12 @@ class HermesGuard:
     def _register_planned_children(
         self, parent_session_id: str, task_count: int
     ) -> Optional[Dict[str, Any]]:
-        """Grant each child of one delegate_task call its plan level; block if impossible."""
+        """Grant each child of one delegate_task call its plan level; block if impossible.
+
+        Each child gets a fresh key, so its warrant is bound to a key only it holds.
+        """
+        from tenuo import SigningKey
+
         plan = self._delegation_plan
         depth = len(self._chain_for(parent_session_id)) + 1
         level = plan.level(depth)
@@ -443,10 +448,11 @@ class HermesGuard:
         try:
             planned = []
             for _ in range(task_count):
-                builder = parent_warrant.grant_builder().holder(parent_key.public_key)
+                child_key = SigningKey.generate()
+                builder = parent_warrant.grant_builder().holder(child_key.public_key)
                 for tool, tool_args in plan.constraints_for(depth).items():
                     builder = builder.capability(tool, **tool_args) if tool_args else builder.capability(tool)
-                planned.append((builder.ttl(level.ttl_seconds).grant(parent_key), chain, parent_key))
+                planned.append((builder.ttl(level.ttl_seconds).grant(parent_key), chain, child_key))
         except Exception as exc:
             logger.warning("hermes-tenuo: delegation plan grant failed at depth %d: %s", depth, exc)
             return {"action": "block", "message": f"tenuo: delegation to depth {depth} rejected: {exc}"}

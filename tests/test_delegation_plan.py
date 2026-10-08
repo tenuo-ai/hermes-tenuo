@@ -105,6 +105,19 @@ def test_children_carry_full_chains_and_nested_expiry(tree):
     assert w2.expires_at() <= w1.expires_at() <= root_w.expires_at()
 
 
+def test_each_child_holds_its_own_key(tree):
+    g = tree
+    _delegate(g, "s0", "s1")
+    _delegate(g, "s1", "s2")
+    keys = [g._resolve_warrant(s)[1] for s in ("s0", "s1", "s2")]
+    assert len({bytes(k.public_key.to_bytes()) for k in keys}) == 3
+    w2, _ = g._resolve_warrant("s2")
+    # The parent's key cannot act as the child: proof-of-possession fails.
+    with g._session_lock:
+        g._session_warrants["s2"] = (w2, keys[1])
+    assert _run(g, "s2", "kubectl logs deploy/payments -n shop") is not None
+
+
 def test_depth_beyond_plan_blocks_the_delegation(tree):
     g = tree
     _delegate(g, "s0", "s1")
