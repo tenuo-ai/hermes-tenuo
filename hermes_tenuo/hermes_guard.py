@@ -688,16 +688,10 @@ class HermesGuard:
             chain = self._chain_for(session_id)
             with self._trusted_roots_lock:
                 trusted = resolve_trusted_roots(self._trusted_roots)
-            if trusted is None and chain:
-                # Derive trusted root from the root ancestor's issuer.
-                try:
-                    if chain[0].issuer is not None:
-                        trusted = [chain[0].issuer]
-                except Exception:
-                    pass
-            # No signing_key.public_key fallback here: without an explicit trusted
-            # root anchor we must fail closed and let enforce_tool_call reject the
-            # warrant rather than silently accepting a self-issued one.
+            # No fallback anchor: not the signing key, and not the issuer of a
+            # warrant in the chain being verified. Deriving trust from the
+            # credential under test accepts any chain an attacker signs. Without
+            # a configured trusted_root, enforce_tool_call fails closed.
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
