@@ -379,8 +379,22 @@ denied at 3 a.m. A Tenuo control plane takes that over.
 
 When `TENUO_CONNECT_TOKEN` is set, the Tenuo SDK inside this plugin connects
 on its own and every allow and deny decision from every Hermes agent streams
-there, with nothing else to configure. On top of that stream the control
-plane gives you:
+there, with nothing else to configure.
+
+Install the cloud extra to also deliver each decision as a signed receipt:
+
+```bash
+pip install "hermes-tenuo[cloud]"
+```
+
+A receipt is signed by the agent's key, carries the proof-of-possession
+signature from the call it records, and links to the receipt before it, so a
+removed or edited entry shows up as a broken chain. Receipts are flushed when
+a session ends and when Hermes exits. Without the extra the plugin logs a
+warning and streams decisions without receipts. Delivering receipts never
+blocks or allows a call; the warrant check has already decided it.
+
+On top of that stream the control plane gives you:
 
 - **Revocation before expiry.** Pull a warrant, a key, or an agent the moment
   something looks wrong instead of waiting for the TTL. Revocation lists are

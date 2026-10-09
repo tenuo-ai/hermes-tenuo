@@ -28,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cloud = [
+    "tenuo[cloud]>=0.3.2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio",
