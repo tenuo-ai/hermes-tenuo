@@ -617,8 +617,7 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # For chain verification: use configured trusted_roots.
-            # If not configured, extract the root from the parent warrant's issuer.
+            # Ancestors root first; core verifies the whole chain against trusted_roots.
             chain = self._chain_for(session_id)
             with self._trusted_roots_lock:
                 trusted = resolve_trusted_roots(self._trusted_roots)

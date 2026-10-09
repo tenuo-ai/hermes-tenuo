@@ -48,3 +48,13 @@ def test_a_grandchild_without_its_full_chain_is_denied():
         guard._session_warrant_chains["s2"] = guard._session_warrant_chains["s2"][-1:]
     denied = guard.pre_tool_call("read_file", {"path": "/data/q3.csv"}, session_id="s2")
     assert denied and denied["action"] == "block"
+
+
+def test_live_attenuation_path_also_carries_the_full_chain():
+    """subagent_start without a staged delegate_task attenuates live; depth must still verify."""
+    guard, root_warrant = _guard()
+    sessions = ["s0", "s1", "s2", "s3"]
+    for parent, child in zip(sessions, sessions[1:]):
+        guard.on_subagent_start(parent_session_id=parent, child_session_id=child)
+    assert guard.pre_tool_call("read_file", {"path": "/data/q3.csv"}, session_id="s3") is None
+    assert guard._chain_for("s3")[0] is root_warrant and len(guard._chain_for("s3")) == 3
