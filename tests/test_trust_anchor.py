@@ -29,8 +29,8 @@ def test_no_trusted_root_fails_closed_for_root_and_child(session):
     assert blocked and blocked["action"] == "block"
 
 
-def test_child_chain_is_not_trusted_on_its_own_issuer():
-    """A chain signed by an unknown key must not verify just because it is a chain."""
+def test_child_chain_from_an_unknown_issuer_is_rejected():
+    """A configured root that did not issue the chain rejects it for a delegated child."""
     attacker = SigningKey.generate()
     guard = _guard(trusted=[SigningKey.generate().public_key], issuer=attacker)
     assert _read(guard, "s1") is not None

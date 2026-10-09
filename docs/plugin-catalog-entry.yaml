@@ -26,3 +26,4 @@ capabilities:
   requires_env:
     - TENUO_WARRANT
     - TENUO_SIGNING_KEY
+    - TENUO_TRUSTED_ROOT

@@ -26,3 +26,6 @@ requires_env:
   - name: TENUO_SIGNING_KEY
     description: "Base64-encoded Ed25519 signing key matching the warrant holder (proof-of-possession)."
     required: false
+  - name: TENUO_TRUSTED_ROOT
+    description: "Base64-encoded public key of the warrant issuer. Required to enforce; without it every tool call is blocked (or set plugins.entries.hermes-tenuo.trusted_root)."
+    required: false
