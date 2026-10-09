@@ -14,6 +14,10 @@ import os
 from pathlib import Path
 from typing import Any, List, Optional
 
+logger = logging.getLogger("hermes_tenuo._config")
+
+_PLUGIN_KEY = "hermes-tenuo"
+
 
 def _b64_to_bytes(raw: str) -> bytes:
     """Decode base64 that may be standard or URL-safe, with or without padding.
@@ -25,10 +29,6 @@ def _b64_to_bytes(raw: str) -> bytes:
     """
     s = raw.strip()
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-logger = logging.getLogger("hermes_tenuo._config")
-
-_PLUGIN_KEY = "hermes-tenuo"
 
 
 def _env_secret(name: str) -> Optional[str]:

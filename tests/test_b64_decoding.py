@@ -49,3 +49,35 @@ def test_warrant_loads_in_any_variant(variant):
     w = Warrant.mint_builder().holder(agent.public_key).capability("read").ttl(60).mint(root)
     loaded = load_warrant(_variants(w.to_bytes())[variant])
     assert loaded is not None
+
+
+def _urlsafe_nopad(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def test_verify_accepts_sdk_to_base64(tmp_path, monkeypatch, capsys):
+    """`verify` must load what the plugin loads, including tenuo's own to_base64()."""
+    import argparse
+
+    from hermes_tenuo.cli import cmd_verify
+
+    root, agent = SigningKey.generate(), SigningKey.generate()
+    w = Warrant.mint_builder().holder(agent.public_key).capability("read").ttl(60).mint(root)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("TENUO_WARRANT", w.to_base64())
+    monkeypatch.setenv("TENUO_TRUSTED_ROOT", _urlsafe_nopad(root.public_key.to_bytes()))
+    assert cmd_verify(argparse.Namespace()) == 0, capsys.readouterr().err
+
+
+def test_doctor_holder_match_accepts_urlsafe_key(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from hermes_tenuo.cli import cmd_doctor
+
+    root, agent = SigningKey.generate(), SigningKey.generate()
+    w = Warrant.mint_builder().holder(agent.public_key).capability("read").ttl(600).mint(root)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("TENUO_WARRANT", w.to_base64())
+    monkeypatch.setenv("TENUO_SIGNING_KEY", _urlsafe_nopad(agent.secret_key_bytes()))
+    cmd_doctor(argparse.Namespace())
+    assert "✓  signing key matches warrant holder" in capsys.readouterr().out
