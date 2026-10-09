@@ -354,6 +354,71 @@ class TestMintConstraints:
         with pytest.raises(ValueError):
             parse_allow("read_file:=x")
 
+    def test_parse_allow_domain(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import UrlSafe
+
+        _, c, shown = parse_allow("browser_navigate:url=domain:docs.python.org|*.acme.com")
+        assert isinstance(c["url"], UrlSafe)
+        assert shown == {"url": "domain:docs.python.org|*.acme.com"}
+
+    def test_parse_allow_domain_rejects_malformed(self):
+        from hermes_tenuo.cli import parse_allow
+
+        for bad in (
+            "domain:",
+            "domain:|",
+            "domain:a.com||b.com",
+            "domain:https://a.com",
+            "domain:a.com/path",
+            "domain:a.com:8080",
+            "domain:*a.com",
+            "domain:*.",
+            "domain:*..acme.com",
+            "domain:foo.*.com",
+        ):
+            with pytest.raises(ValueError):
+                parse_allow(f"browser_navigate:url={bad}")
+
+    def test_minted_domain_is_enforced_by_guard(self, capsys):
+        """Listed hosts pass; lookalikes, private addresses and other schemes are denied."""
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.hermes_guard import HermesGuard
+        from tenuo import PublicKey, SigningKey, Warrant
+
+        args = argparse.Namespace(
+            ttl="1h", allow=["browser_navigate:url=domain:docs.python.org|*.acme.com"], output="env",
+        )
+        assert cmd_mint(args) == 0
+        env = {}
+        for line in capsys.readouterr().out.splitlines():
+            if line.startswith("export "):
+                k, v = line[len("export "):].split("=", 1)
+                env[k] = v
+        guard = HermesGuard(
+            warrant=Warrant.from_bytes(base64.b64decode(env["TENUO_WARRANT"])),
+            signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
+            trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
+        )
+        def call(url):
+            return guard.pre_tool_call("browser_navigate", {"url": url}, session_id="s1")
+        for ok in ("https://docs.python.org/3/", "http://docs.python.org", "https://shop.acme.com/x"):
+            assert call(ok) is None, ok
+        for bad in (
+            "https://evil.com/",
+            "https://docs.python.org.evil.com/",
+            "https://evilacme.com/",
+            "http://8.8.8.8/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://127.0.0.1:8080/",
+            "ftp://docs.python.org/",
+        ):
+            denied = call(bad)
+            assert denied and denied["action"] == "block", bad
+        # A list of URLs is not a URL: denied even when every entry is allowed.
+        listed = guard.pre_tool_call("browser_navigate", {"url": ["https://docs.python.org/"]}, session_id="s1")
+        assert listed and listed["action"] == "block"
+
     def test_mint_malformed_allow_errors(self, capsys):
         from hermes_tenuo.cli import cmd_mint
         args = argparse.Namespace(ttl="1h", allow=["read_file:path"], output="env")

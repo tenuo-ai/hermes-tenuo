@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "tenuo>=0.3.2,<0.4",
+    "tenuo>=0.3.3,<0.4",
 ]
 
 [project.optional-dependencies]
