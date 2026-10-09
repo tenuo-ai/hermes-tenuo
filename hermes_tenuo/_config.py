@@ -19,6 +19,18 @@ logger = logging.getLogger("hermes_tenuo._config")
 _PLUGIN_KEY = "hermes-tenuo"
 
 
+def _b64_to_bytes(raw: str) -> bytes:
+    """Decode base64 that may be standard or URL-safe, with or without padding.
+
+    ``urlsafe_b64decode`` maps ``-_`` to ``+/`` and then accepts the standard
+    ``+/`` alphabet too, so this one decoder handles every form the three
+    secrets (warrant, signing key, trusted root) are supplied in. Encoders that
+    strip ``=`` padding are tolerated by re-padding first.
+    """
+    s = raw.strip()
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
 def _env_secret(name: str) -> Optional[str]:
     """Resolve a Tenuo credential without leaking another Hermes profile's env.
 
@@ -146,7 +158,7 @@ def get_signing_key(ctx: Any):
         return None
     try:
         from tenuo_core import SigningKey
-        return SigningKey.from_bytes(base64.b64decode(raw))
+        return SigningKey.from_bytes(_b64_to_bytes(raw))
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load signing key: %s", exc)
         return None
@@ -164,7 +176,7 @@ def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
         for r in raw.split(","):
             r = r.strip()
             if r:
-                roots.append(PublicKey.from_bytes(base64.b64decode(r)))
+                roots.append(PublicKey.from_bytes(_b64_to_bytes(r)))
         return roots if roots else None
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load trusted_root: %s", exc)
@@ -226,9 +238,7 @@ def load_warrant(raw: Optional[str]):
         return None
     try:
         from tenuo_core import Warrant
-        padded = raw + "=" * (-len(raw) % 4)
-        data = base64.urlsafe_b64decode(padded)
-        return Warrant.from_bytes(data)
+        return Warrant.from_bytes(_b64_to_bytes(raw))
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load warrant: %s", exc)
         return None

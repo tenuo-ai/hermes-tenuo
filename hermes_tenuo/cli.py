@@ -151,12 +151,12 @@ def _mint_local(args: argparse.Namespace) -> int:
     # Generate keys. Reuse TENUO_SIGNING_KEY as the holder when set so a
     # kanban worker inherits a key that matches the file mint --task writes.
     control_key = SigningKey.generate()
-    from hermes_tenuo._config import _env_secret
+    from hermes_tenuo._config import _b64_to_bytes, _env_secret
 
     existing_key = _env_secret("TENUO_SIGNING_KEY")
     if existing_key:
         try:
-            agent_key = SigningKey.from_bytes(base64.b64decode(existing_key))
+            agent_key = SigningKey.from_bytes(_b64_to_bytes(existing_key))
         except Exception as exc:
             print(f"error: TENUO_SIGNING_KEY is set but could not be loaded: {exc}", file=sys.stderr)
             return 1
@@ -347,6 +347,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 4. Configured? Same resolution the plugin uses (kanban task first).
     from hermes_tenuo._config import (
+        _b64_to_bytes,
         _env_secret,
         get_child_warrant_raw,
         load_warrant,
@@ -427,7 +428,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if signing_raw:
             try:
                 from tenuo_core import SigningKey
-                key = SigningKey.from_bytes(base64.b64decode(signing_raw))
+                key = SigningKey.from_bytes(_b64_to_bytes(signing_raw))
                 holder = _warrant_holder(warrant)
                 if holder is None:
                     note("could not read the warrant holder from this tenuo build — holder match not checked")
@@ -518,7 +519,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant against trusted_root and show its capabilities."""
-    from hermes_tenuo._config import get_trusted_roots, resolve_warrant_text
+    from hermes_tenuo._config import _b64_to_bytes, get_trusted_roots, resolve_warrant_text
     from hermes_tenuo._home import hermes_home
 
     try:
@@ -544,7 +545,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     try:
         from tenuo_core import Warrant
-        warrant = Warrant.from_bytes(base64.b64decode(warrant_raw))
+        warrant = Warrant.from_bytes(_b64_to_bytes(warrant_raw))
     except Exception as e:
         print(f"error: could not load warrant: {e}", file=sys.stderr)
         return 1
