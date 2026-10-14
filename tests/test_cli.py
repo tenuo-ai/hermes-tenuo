@@ -170,10 +170,8 @@ class TestDoctorConfigured:
 
         cmd_doctor(argparse.Namespace())
         out = capsys.readouterr().out
-        assert "Current Hermes main also covers tools called from inside" in out
-        assert "older releases may not route them here" in out
-        assert "execute_code calls inside a script use" in out
-        assert "set_session_warrant does not apply" in out
+        assert "tools called from inside execute_code scripts (Hermes 0.19+)" in out
+        assert "against the session that ran the script, found by its task id" in out
         assert "execute_code sandbox dispatch path not intercepted" not in out
         assert "plugin ctx.dispatch_tool()" in out
 
@@ -405,3 +403,69 @@ class TestMintConstraints:
         assert denied_choice and denied_choice["action"] == "block"
         denied_tool = call("terminal", {"command": "ls"})
         assert denied_tool and denied_tool["action"] == "block"
+
+
+class TestClosedWorldMint:
+    """mint must produce warrants Hermes's real tool calls can pass."""
+
+    @staticmethod
+    def _mint(capsys, allow, open_args=None):
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.hermes_guard import HermesGuard
+        from tenuo import PublicKey, SigningKey, Warrant
+
+        args = argparse.Namespace(ttl="1h", allow=allow, output="env", open_args=open_args)
+        assert cmd_mint(args) == 0
+        captured = capsys.readouterr()
+        env = dict(
+            line[len("export "):].split("=", 1)
+            for line in captured.out.splitlines() if line.startswith("export ")
+        )
+        guard = HermesGuard(
+            warrant=Warrant.from_bytes(base64.b64decode(env["TENUO_WARRANT"])),
+            signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
+            trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
+        )
+        return (lambda tool, a: guard.pre_tool_call(tool, a, session_id="s1") is None), captured.err
+
+    def test_write_file_path_allows_the_content_hermes_always_sends(self, capsys):
+        ok, _ = self._mint(capsys, ["write_file:path=/tmp/nightly"])
+        assert ok("write_file", {"path": "/tmp/nightly/r.md", "content": "# q3"})
+        assert not ok("write_file", {"path": "/etc/r.md", "content": "x"})
+        assert not ok("write_file", {"path": "/tmp/nightly/r.md", "content": "x", "cross_profile": True})
+
+    def test_read_file_path_allows_offset_and_limit(self, capsys):
+        ok, _ = self._mint(capsys, ["read_file:path=/data/reports"])
+        assert ok("read_file", {"path": "/data/reports/q3.csv"})
+        assert ok("read_file", {"path": "/data/reports/q3.csv", "offset": 1, "limit": 200})
+        assert not ok("read_file", {"path": "/opt/x", "offset": 1})
+
+    def test_terminal_stays_closed_and_says_so(self, capsys):
+        ok, err = self._mint(capsys, ["terminal:command=ls*"])
+        assert ok("terminal", {"command": "ls -la"})
+        assert not ok("terminal", {"command": "ls", "workdir": "/"})
+        assert "--open-args terminal" in err
+
+    def test_open_args_allows_unnamed_arguments(self, capsys):
+        ok, _ = self._mint(capsys, ["terminal:command=ls*"], open_args=["terminal"])
+        assert ok("terminal", {"command": "ls", "workdir": "/tmp"})
+        assert not ok("terminal", {"command": "rm -rf /", "workdir": "/tmp"})
+
+    def test_unknown_tool_is_closed_world(self, capsys):
+        ok, err = self._mint(capsys, ["git:action=status"])
+        assert ok("git", {"action": "status"})
+        assert not ok("git", {"action": "status", "repo": "/"})
+        assert "git: arguments other than action are denied" in err
+
+    def test_open_args_needs_a_matching_allow(self, capsys):
+        from hermes_tenuo.cli import cmd_mint
+        args = argparse.Namespace(ttl="1h", allow=["web_search"], output="env", open_args=["terminal"])
+        assert cmd_mint(args) != 0
+        assert "no --allow for that tool" in capsys.readouterr().err
+
+    def test_full_output_shows_what_mint_added(self, capsys):
+        from hermes_tenuo.cli import cmd_mint
+        args = argparse.Namespace(ttl="1h", allow=["write_file:path=/tmp/out"], output="full")
+        assert cmd_mint(args) == 0
+        out = capsys.readouterr().out
+        assert "#   write_file  path=/tmp/out, content=* (always sent); other arguments denied" in out

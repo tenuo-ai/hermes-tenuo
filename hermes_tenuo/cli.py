@@ -12,7 +12,8 @@ Each --allow takes a tool name with optional argument constraints:
 
     --allow web_search                      any arguments
     --allow read_file:path=/data            path must stay under /data
-    --allow write_file:path=/tmp/out,mode=w exact mode, path under /tmp/out
+    --allow memory:target=user              exact value
+    --allow write_file:path=/tmp/out,content=*  several constraints
     --allow web_search:query=acme*          glob pattern
     --allow git:action=status|diff|log      one of several values
     --allow checkout:amount=0..4000         number from 0 to 4000, inclusive
@@ -24,6 +25,14 @@ numeric range (both ends required, inclusive); a value containing ``*`` or
 
 A range only matches numbers. A tool that sends the amount as a string
 (``"40.00"``) is denied, so declare that argument as a number.
+
+Tenuo checks arguments closed-world: once a tool has a constraint, an
+argument the warrant does not list is denied, and a listed argument must
+be present. For Hermes's own tools mint fills in the rest: arguments
+Hermes always sends are added as ``*``, and when a tool's other optional
+arguments only page or trim output (``read_file`` offset/limit) they are
+allowed. ``--open-args TOOL`` allows every argument the warrant does not
+name for that tool.
 """
 
 from __future__ import annotations
@@ -118,6 +127,72 @@ def parse_allow(spec: str) -> tuple[str, dict, dict]:
     return tool, constraints, display
 
 
+# Arguments of Hermes Agent's own tools (0.19 schemas):
+#   (always sent, optional and output-only, optional and widening).
+# mint adds unnamed always-sent arguments as ``*``. When every optional
+# argument the user did not name is output-only, the tool allows arguments
+# it does not name; otherwise it stays closed and those calls are denied.
+_HERMES_TOOL_ARGS: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
+    "read_file": (("path",), ("offset", "limit"), ()),
+    "write_file": (("path", "content"), (), ("cross_profile",)),
+    "patch": (("mode",), (), ("path", "old_string", "new_string", "replace_all", "patch", "cross_profile")),
+    "search_files": (("pattern",), ("limit", "offset", "output_mode", "context"), ("target", "path", "file_glob")),
+    "terminal": (("command",), ("timeout",), ("background", "workdir", "pty", "notify_on_complete", "watch_patterns")),
+    "web_search": (("query",), ("limit",), ()),
+    "web_extract": (("urls",), ("char_limit",), ()),
+    "browser_navigate": (("url",), (), ()),
+    "vision_analyze": (("image_url", "question"), (), ()),
+}
+
+
+def complete_hermes_args(tool: str, constraints: dict, open_args: bool = False) -> tuple[dict, dict, str, list[str]]:
+    """Make one ``--allow`` usable under closed-world argument checks.
+
+    Returns ``(constraints, added, others, notes)``: the constraints to mint,
+    the always-sent arguments added as ``*``, whether arguments the warrant
+    does not name are ``"allowed"``, ``"denied"`` or ``"any"`` (the tool has
+    no constraints), and notes for the operator.
+    """
+    from tenuo import Wildcard
+
+    if not constraints:
+        return constraints, {}, "any", []
+    out = dict(constraints)
+    added: dict = {}
+    notes: list[str] = []
+    spec = _HERMES_TOOL_ARGS.get(tool.removeprefix("tool:"))
+    auto_open = False
+    closed_by: list[str] = []
+    if spec is not None:
+        required, output_only, widening = spec
+        for arg in required:
+            if arg not in out:
+                out[arg] = Wildcard()
+                added[arg] = "*"
+        for arg in constraints:
+            if arg in output_only or arg in widening:
+                notes.append(
+                    f"{tool}: '{arg}' is optional in Hermes; naming it makes every "
+                    f"{tool} call that omits it fail"
+                )
+        closed_by = [a for a in widening if a not in constraints]
+        auto_open = not closed_by and any(a not in constraints for a in output_only)
+    if open_args or auto_open:
+        out["_allow_unknown"] = True
+        return out, added, "allowed", notes
+    if closed_by:
+        notes.append(
+            f"{tool}: calls that send {', '.join(closed_by)} are denied; "
+            f"pass --open-args {tool} to allow arguments the warrant does not name"
+        )
+    elif spec is None:
+        notes.append(
+            f"{tool}: arguments other than {', '.join(sorted(constraints))} are denied; "
+            f"add the ones it always sends as arg=*, or pass --open-args {tool}"
+        )
+    return out, added, "denied", notes
+
+
 def _mint_local(args: argparse.Namespace) -> int:
     """Mint a warrant locally. No network, no account.
 
@@ -163,9 +238,19 @@ def _mint_local(args: argparse.Namespace) -> int:
     else:
         agent_key = SigningKey.generate()
 
+    open_tools = set(getattr(args, "open_args", None) or [])
+    unknown_open = sorted(open_tools - {tool for tool, _, _ in parsed})
+    if unknown_open:
+        print(f"error: --open-args {unknown_open[0]}: no --allow for that tool", file=sys.stderr)
+        return 1
     builder = Warrant.mint_builder().holder(agent_key.public_key)
-    for tool, constraints, _ in parsed:
-        builder = builder.capability(tool, **constraints)
+    completed = []
+    for tool, constraints, display in parsed:
+        minted, added, others, notes = complete_hermes_args(tool, constraints, tool in open_tools)
+        for note in notes:
+            print(f"note: {note}", file=sys.stderr)
+        builder = builder.capability(tool, **minted)
+        completed.append((tool, {**display, **added}, added, others))
 
     try:
         ttl_seconds = _parse_ttl(args.ttl)
@@ -207,12 +292,14 @@ def _mint_local(args: argparse.Namespace) -> int:
         print("# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
         print("# Tools:")
-        for tool, _, display in parsed:
-            if display:
-                shown = ", ".join(f"{k}={v}" for k, v in display.items())
-                print(f"#   {tool}  {shown}")
-            else:
+        for tool, display, added, others in completed:
+            if others == "any":
                 print(f"#   {tool}  (any arguments)")
+                continue
+            shown = ", ".join(
+                f"{k}={v}" + (" (always sent)" if k in added else "") for k, v in display.items()
+            )
+            print(f"#   {tool}  {shown}; other arguments {others}")
         print()
         print("# Keep the signing key out of config files. The control key that")
         print("# minted this warrant was not saved; mint again to change scope.")
@@ -466,19 +553,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("      (run_agent.py intercepts these before the registry)")
         else:
             print("  Enforcement path: pre_tool_call hook only")
-            print("    Covered: all agent-loop tool calls, including delegate_task")
-            print("    Current Hermes main also covers tools called from inside")
-            print("    execute_code scripts; older releases may not route them here.")
+            print("    Covered: all agent-loop tool calls, including delegate_task,")
+            print("    and tools called from inside execute_code scripts (Hermes 0.19+).")
             print("    Gap:")
             print("      - direct registry.dispatch(...) callers bypass enforcement")
             print("        (including plugin ctx.dispatch_tool())")
             print("    Fix pending: https://github.com/NousResearch/hermes-agent/pull/32719")
-        print("  On current Hermes main, execute_code calls inside a script use")
-        print("  the warrant in your config; set_session_warrant does not apply.")
+        print("  execute_code calls arrive without a session id. They are checked")
+        print("  against the session that ran the script, found by its task id; when")
+        print("  that is not possible and sub-agent or gateway session warrants are")
+        print("  in use, the call is blocked.")
         print()
         print("  Lifecycle hooks registered:")
         print("    on_session_start, on_session_end, subagent_start")
-        print("    (subagent_start: pre-injects child warrants before first tool call)")
+        print("    (subagent_start: attaches each delegated child's grant before its first tool call)")
     except ImportError:
         note("skipped the enforcement-path report — this command is not running inside Hermes")
         note("the checks above still cover config, warrant, expiry, and the signing key")
@@ -634,6 +722,10 @@ def main() -> None:
                              "Examples: --allow web_search  --allow read_file:path=/data  "
                              "--allow git:action=status|diff. Values: '*' any, 'a|b' choice, "
                              "glob with '*'/'?', '/path' prefix, otherwise exact match.")
+    mint_p.add_argument("--open-args", action="append", metavar="TOOL",
+                        help="Allow arguments the warrant does not name for TOOL (repeatable). "
+                             "By default a constrained tool denies them, except the ones mint "
+                             "adds for Hermes's own tools.")
     mint_p.add_argument("--task", metavar="ID",
                         help="Write the warrant to $HERMES_HOME/tenuo/warrants/<ID>.warrant "
                              "(kanban worker path). Reuses TENUO_SIGNING_KEY as the holder when set.")
