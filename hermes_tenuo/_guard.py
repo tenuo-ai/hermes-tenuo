@@ -215,9 +215,14 @@ class PluginGuard:
         child_session_id: str = "",
         **kwargs: Any,
     ) -> None:
+        goal = kwargs.get("child_goal")
+        # Hermes runs the child under its subagent id as the task id.
+        task_id = kwargs.get("child_subagent_id")
         self._guard.on_subagent_start(
             parent_session_id=parent_session_id or None,
             child_session_id=child_session_id or None,
+            child_goal=goal if isinstance(goal, str) else None,
+            child_task_id=str(task_id) if task_id else None,
         )
 
     # ------------------------------------------------------------------

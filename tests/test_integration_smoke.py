@@ -38,6 +38,12 @@ import pytest
 from hermes_tenuo.hermes_guard import HermesGuard
 
 
+def _stage(guard, warrant, parent="parent"):
+    """Stage a grant as an authorised delegate_task would (holder = the guard's key)."""
+    from hermes_tenuo.hermes_guard import _ChildGrant
+    guard._stage_grants(parent, [_ChildGrant(warrant, [], guard._static_signing_key, None)])
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures (warrant material)
 # ---------------------------------------------------------------------------
@@ -455,8 +461,7 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """on_subagent_start claims a pending child warrant and registers it."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
@@ -470,8 +475,7 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant, agent_key
     ):
         """After subagent_start injects a child warrant, read_file is blocked for child."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
@@ -488,8 +492,7 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """After subagent_start injects a child warrant, web_search is allowed."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
@@ -516,9 +519,8 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """A second on_subagent_start for the same child is idempotent — no crash."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
-            guard_with_child._pending_child_warrants[("parent", 1)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
+        _stage(guard_with_child, child_warrant)
 
         guard_with_child.on_subagent_start("parent", "child-1")
         guard_with_child.on_subagent_start("parent", "child-1")  # second call — no crash

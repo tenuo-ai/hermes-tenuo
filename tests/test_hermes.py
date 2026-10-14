@@ -21,6 +21,12 @@ import pytest
 from hermes_tenuo.hermes_guard import HermesGuard
 
 
+def _stage(guard, warrant, parent="parent"):
+    """Stage a grant as an authorised delegate_task would (holder = the guard's key)."""
+    from hermes_tenuo.hermes_guard import _ChildGrant
+    guard._stage_grants(parent, [_ChildGrant(warrant, [], guard._static_signing_key, None)])
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -356,8 +362,7 @@ class TestChildWarrantHeuristic:
         """
         guard_with_child._primary_session_id = "parent"
         # Simulate delegate_task pre-registering a pending child warrant
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
         warrant, _ = guard_with_child._resolve_warrant("child-1")
         assert warrant is child_warrant  # claimed from pending
 
@@ -367,8 +372,7 @@ class TestChildWarrantHeuristic:
         """After delegation, child warrant (web_search only) blocks read_file."""
         guard_with_child._primary_session_id = "parent"
         # Register pending child warrant (as delegate_task interception would)
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        _stage(guard_with_child, child_warrant)
         result = guard_with_child.pre_tool_call(
             "read_file", {"path": "/data/x"}, session_id="child-1"
         )
@@ -426,36 +430,36 @@ class TestChildWarrantHeuristic:
             {"tasks": ["research A", "research B"]},
             session_id="parent",
         )
-        # delegate_task is authorized — children should be registered
+        # delegate_task is authorized — one grant per task is staged
         assert result is None
         with guard._pending_lock:
-            assert ("parent", 0) in guard._pending_child_warrants
-            assert ("parent", 1) in guard._pending_child_warrants
+            assert len(guard._planned_children["parent"]) == 2
 
     def test_unknown_toolset_does_not_widen_child(
-        self, basic_warrant, child_warrant, agent_key, root_key
+        self, child_warrant, agent_key, root_key
     ):
         """A misspelled toolset must not grant the child the parent's full scope."""
-        guard = HermesGuard(
-            warrant=basic_warrant,
-            signing_key=agent_key,
-            child_warrant=child_warrant,
-            trusted_roots=[root_key.public_key],
+        from tenuo import Warrant, Wildcard
+        parent_warrant = (
+            Warrant.mint_builder()
+            .holder(agent_key.public_key)
+            .capability("delegate_task")
+            .capability("web_search", query=Wildcard())
+            .ttl(3600)
+            .mint(root_key)
         )
-        child = guard._attenuate_for_toolsets(
-            basic_warrant, ["no_such_toolset"], agent_key
-        )
-        assert child is child_warrant
-        assert set(child.tools or []) != set(basic_warrant.tools or [])
-
-        bare = HermesGuard(
-            warrant=basic_warrant,
-            signing_key=agent_key,
-            trusted_roots=[root_key.public_key],
-        )
-        assert bare._attenuate_for_toolsets(
-            basic_warrant, ["no_such_toolset"], agent_key
-        ) is None
+        for cw in (child_warrant, None):
+            guard = HermesGuard(
+                warrant=parent_warrant,
+                signing_key=agent_key,
+                child_warrant=cw,
+                trusted_roots=[root_key.public_key],
+            )
+            result = guard.pre_tool_call(
+                "delegate_task", {"goal": "g", "toolsets": ["no_such_toolset"]}, session_id="parent"
+            )
+            assert result is not None and result["action"] == "block"
+            assert not guard._planned_children.get("parent")
 
     def test_delegate_task_denied_does_not_poison_pending_slots(
         self, guard_with_child
@@ -477,7 +481,7 @@ class TestChildWarrantHeuristic:
         assert result["action"] == "block"
         # No children should have been registered
         with guard_with_child._pending_lock:
-            assert ("parent", 0) not in guard_with_child._pending_child_warrants
+            assert not guard_with_child._planned_children.get("parent")
 
 
 # ---------------------------------------------------------------------------
