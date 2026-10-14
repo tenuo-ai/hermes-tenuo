@@ -86,7 +86,7 @@ instead. That also puts the `hermes-tenuo` command on your path, so you can
 drop the `uvx` prefix below. To run the latest unreleased code:
 `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
 
-Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
+Requires Hermes Agent 0.19 or newer. A nightly job loads the plugin through
 the plugin loader of upstream Hermes `main` using both install routes; the
 badge above is its latest result.
 
@@ -156,9 +156,9 @@ A tool with no constraints is allowed with any arguments.
 | `tool:arg=glob*` | argument must match the glob | `--allow web_search:query=acme*` |
 | `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow git:action=status\|diff\|log` |
 | `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
-| `tool:arg=value` | argument must match exactly | `--allow write_file:mode=w` |
-| `tool:arg=*` | that argument may be anything | `--allow memory:action=*` |
-| `tool:a=..,b=..` | several constraints on one tool | `--allow write_file:path=/tmp/out,mode=w` |
+| `tool:arg=value` | argument must match exactly | `--allow memory:target=user` |
+| `tool:arg=*` | that argument must be sent, with any value | `--allow write_file:path=/tmp/out,content=*` |
+| `tool:a=..,b=..` | several constraints on one tool | `--allow vision_analyze:image_url=https://cdn.acme.com/*,question=*` |
 
 A range only matches numbers: an amount sent as the string `"40.00"` is
 denied, so declare such arguments as numbers in the tool schema. Give both
@@ -168,8 +168,26 @@ ends; `0..4000` also rules out negative amounts. Only a complete numeric
 IEEE-754 numbers; the CLI rejects non-finite bounds and values outside the
 safe integer range (`-9007199254740991` to `9007199254740991`).
 
-Any argument the warrant does not name is unconstrained for that tool. The
-`--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).
+Arguments are checked closed-world, as everywhere in Tenuo. Once a tool has
+a constraint, an argument the warrant does not list is denied, and every
+listed argument must be present (`*` included). For Hermes's own tools,
+`mint` fills in the rest so ordinary calls pass:
+
+- Arguments Hermes always sends, such as `write_file`'s `content`, are added
+  as `*`.
+- If the tool's other optional arguments only page or trim output
+  (`read_file` `offset`/`limit`, `web_search` `limit`), arguments the warrant
+  does not name are allowed.
+- Otherwise the tool stays closed and `mint` prints a note naming the
+  optional arguments that will be denied, such as `write_file`
+  `cross_profile` or `terminal` `workdir`.
+
+`--open-args TOOL` allows every argument the warrant does not name for that
+tool (the `_allow_unknown=True` switch on a Python capability). Naming an
+optional argument makes it required, so constrain optional arguments only
+when you want calls without them denied. A tool with no constraints accepts
+any arguments. The `--ttl` flag takes `30m`, `1h`, `7d`, and so on (default
+`24h`).
 
 A number range is `--allow checkout:amount=0..4000` (both ends, inclusive).
 For a case-insensitive path, or anything else the flag cannot express, mint
@@ -206,8 +224,8 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | Scenario | What you do | What you get |
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
-| **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Tool calls from inside `execute_code` still follow the config warrant |
+| **Subagents via `delegate_task`** | Set `child_warrant` (or a `delegation_plan`) | Every child gets that scope, granted from the parent's warrant and verified as a chain; a researcher cannot suddenly `write_file` |
+| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends, including tool calls from inside `execute_code` |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
@@ -250,7 +268,7 @@ plugins:
 |---|---|
 | `pre_tool_call` | Verifies the tool name and arguments against the session's warrant. On denial, returns `{"action": "block", "message": ...}`; the handler never runs. |
 | `post_tool_call` | Adds timing to the recorded decision and writes the audit record. |
-| `subagent_start` | Hands the `child_warrant` to the new child session. |
+| `subagent_start` | Attaches the warrant granted for that task when the parent's `delegate_task` call was allowed. A child that no allowed `delegate_task` call started holds no authority. |
 | `on_session_end` | Clears any per-session warrant set with `guard.set_session_warrant()`, so gateway users never share one. |
 
 The decision itself runs in Tenuo's Rust core: signature, expiry, holder
@@ -264,25 +282,20 @@ to see the same lines as an operator.
 ## Coverage
 
 Hermes asks hermes-tenuo before each agent-loop tool handler runs
-(`pre_tool_call`). The coverage below describes current upstream Hermes
-`main`, exercised by the **Upstream Hermes** badge. Hermes 0.20 and later can
-load the plugin, but older releases may not route tool calls made inside
-`execute_code` through this hook. On an older or unverified build, do not
-grant `execute_code` to an agent or session whose isolation depends on
-hermes-tenuo.
-
-On current Hermes `main`, that includes every tool call in the agent loop,
-the tools Hermes handles before its registry (`todo`, `memory`,
+(`pre_tool_call`). On Hermes 0.19 and on current upstream `main` (exercised
+by the **Upstream Hermes** badge), that includes every tool call in the agent
+loop, the tools Hermes handles before its registry (`todo`, `memory`,
 `session_search`, `delegate_task`), and tool calls an `execute_code` script
-makes through Hermes, such as `read_file` or `web_search`. A caller that passes
-`skip_pre_tool_call_hook=True` has already been through this check.
+makes through Hermes, such as `read_file` or `web_search`. A caller that
+passes `skip_pre_tool_call_hook=True` has already been through this check.
 
-Those `execute_code` calls are checked against the warrant in your config
-(`TENUO_WARRANT`, or `plugins.entries.hermes-tenuo.warrant`). Hermes does
-not send the gateway session id with them, so a warrant you attached with
-`set_session_warrant` is not the one applied. On a gateway, leave
-`execute_code` off a session warrant when that session must stay narrower
-than the config warrant.
+Hermes sends those `execute_code` calls with a task id but no session id.
+hermes-tenuo maps the task id to the session that ran the script (the parent,
+a `delegate_task` child, or a gateway session) and checks the call against
+that session's warrant. When the task id does not identify one live session
+and sub-agent or gateway session warrants are in use, the call is blocked
+instead of being checked against the config warrant. A single agent with no
+session warrants uses the config warrant, as before.
 
 Two things stay outside this check:
 
@@ -327,8 +340,8 @@ variable equivalent.
 | `warrant` | `TENUO_WARRANT` | Base64 warrant, or a path to a file containing one. Required for enforcement. |
 | `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Warrants signed by anything else are rejected. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
-| `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
-| `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a delegation plan: argument-level grants for each depth of a `delegate_task` tree (see `hermes_tenuo/delegation.py`). Children without a planned grant hold no authority. |
+| `child_warrant` | `TENUO_CHILD_WARRANT` | Scope for every `delegate_task` child. Each child gets it granted from the delegating session's warrant, with its own key, and the hop is verified as a chain. Tools the parent does not hold are dropped; a constraint wider than the parent's blocks the delegation. Toolsets named on the call narrow it further. Without it, a child keeps the parent's scope. |
+| `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a delegation plan: argument-level grants for each depth of a `delegate_task` tree (see `hermes_tenuo/delegation.py`). Takes precedence over `child_warrant`. Children without a planned grant hold no authority. |
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |

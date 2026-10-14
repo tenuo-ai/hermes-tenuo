@@ -11,7 +11,7 @@ sha: "0000000000000000000000000000000000000000"   # placeholder: git rev-parse v
 description: Per-call authorization for Hermes tool calls. Each call is checked against a signed, expiring warrant, arguments included, before the handler runs.
 maintainer: tenuo-ai
 tier: community
-requires_hermes: ">=0.20"
+requires_hermes: ">=0.19"
 docs_url: https://github.com/tenuo-ai/hermes-tenuo#readme
 platforms: []
 capabilities:

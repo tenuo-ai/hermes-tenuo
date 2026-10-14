@@ -60,19 +60,16 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
 3. **TTL is the job window.** Cron for one hour → `--ttl 1h`. A
    research child → minutes, not the parent's remaining day. Default
    `24h` is wrong for unattended jobs.
-4. **Do not hand a child the parent's warrant.** Mint a grant from the
-   parent (`grant_builder`) to the child's holder and attach it with
-   `set_session_warrant(..., parent_warrant=parent)` so the hop is
-   verified as a chain. Config `child_warrant` is a separately minted
-   file for simple installs — prefer a grant when you care about the
-   chain.
+4. **Do not hand a child the parent's warrant.** Set `child_warrant`
+   to the scope a child needs. The plugin grants it from the parent's
+   warrant for every `delegate_task` child, with a fresh key, so the hop
+   is verified as a chain. Without it, a child keeps the parent's scope.
 5. **No `terminal` / `execute_code` on a child or cron warrant**
    unless the user explicitly asked and the command/path is
-   constrained. On current Hermes `main`, tool calls the script makes
-   through Hermes are checked against the config warrant, not the child
-   or session warrant. Older releases may not route those calls through
-   the hook at all. The plugin still does not see what the script runs
-   itself (`subprocess.run`).
+   constrained. Tool calls the script makes through Hermes are checked
+   against the warrant of the session that ran it (matched by task id),
+   and blocked when that cannot be determined. The plugin does not see
+   what the script runs itself (`subprocess.run`).
 6. **Signing keys stay in env or a secret source**, never in
    `config.yaml`. Under `gateway.multiplex_profiles`, put `TENUO_*`
    in that profile's `.env`.
@@ -103,8 +100,17 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=a\|b\|c` | one of the choices |
 | `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
-| `tool:arg=*` | that argument may be anything |
+| `tool:arg=*` | that argument must be sent, with any value |
 | `tool:a=..,b=..` | several constraints on one tool |
+
+Arguments are closed-world: once a tool has a constraint, arguments the
+warrant does not list are denied and listed ones must be present. For
+Hermes's own tools `mint` adds the arguments Hermes always sends (e.g.
+`write_file` `content`) as `*`, and allows output-only extras such as
+`read_file` `offset`/`limit`. Read the `note:` lines it prints: they name
+optional arguments that stay denied (`terminal` `workdir`). Add
+`--open-args TOOL` only if the job needs them. Do not name an optional
+argument unless every call should send it.
 
 Only a complete numeric `MIN..MAX` value is a range; other values containing
 `..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
@@ -157,17 +163,20 @@ that hop). Do not copy the parent warrant bytes into the child session.
 `examples/subagent_scope.py` and `hermes-tenuo demo` are the runnable
 form.
 
-Config `child_warrant` is a separately minted file for simple
-installs. The plugin injects it on `subagent_start`, but that file is
-**not** a grant from the parent — no chain is verified. Prefer
-`grant_builder` when the hop matters.
+With the plugin, set `child_warrant` and let it do the grant. It
+reads the tools and constraints from that warrant and grants them from
+the delegating session's warrant on each authorised `delegate_task`
+call, one grant and one fresh key per task, attached on
+`subagent_start`. Tools the parent does not hold are dropped; a
+constraint wider than the parent's blocks the delegation. A sub-agent
+that no authorised `delegate_task` call started holds nothing.
 
 ```yaml
 plugins:
   entries:
     hermes-tenuo:
       warrant: ~/.hermes/tenuo/orchestrator.warrant
-      child_warrant: ~/.hermes/tenuo/researcher.warrant  # convenience, not a chain
+      child_warrant: ~/.hermes/tenuo/researcher.warrant  # scope for every child
       trusted_root: <base64>
 ```
 
