@@ -136,13 +136,19 @@ class PluginGuard:
         tool_call_id: str = "",
         **kwargs: Any,
     ) -> Optional[dict]:
-        result = self._guard.pre_tool_call(
-            tool_name=tool_name,
-            args=args or {},
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-        )
+        try:
+            result = self._guard.pre_tool_call(
+                tool_name=tool_name,
+                args=args or {},
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Hermes lets a call through when a pre_tool_call hook raises, so
+            # an error inside the check must become a block here.
+            logger.exception("hermes-tenuo: authorization check failed for %s; blocking", tool_name)
+            result = {"action": "block", "message": f"tenuo: authorization check failed ({type(exc).__name__}); call blocked"}
         if result and result.get("action") == "block":
             self._auto_block_kanban_task(tool_name, result.get("message", ""))
         return result  # None = allow, {"action": "block", "message": "..."} = block
@@ -215,9 +221,14 @@ class PluginGuard:
         child_session_id: str = "",
         **kwargs: Any,
     ) -> None:
+        goal = kwargs.get("child_goal")
+        # Hermes runs the child under its subagent id as the task id.
+        task_id = kwargs.get("child_subagent_id")
         self._guard.on_subagent_start(
             parent_session_id=parent_session_id or None,
             child_session_id=child_session_id or None,
+            child_goal=goal if isinstance(goal, str) else None,
+            child_task_id=str(task_id) if task_id else None,
         )
 
     # ------------------------------------------------------------------

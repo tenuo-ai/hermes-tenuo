@@ -12,7 +12,7 @@ DATA="${DATA:-/tmp/hermes-tenuo-walkthrough/data}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if ! command -v hermes >/dev/null; then
-  echo "hermes not on PATH. Install Hermes Agent 0.20 or newer, then retry." >&2
+  echo "hermes not on PATH. Install Hermes Agent 0.19 or newer, then retry." >&2
   exit 1
 fi
 if ! command -v hermes-tenuo >/dev/null; then

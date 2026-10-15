@@ -72,8 +72,8 @@ _DRIVER = textwrap.dedent(
     with open(os.path.join(home, "config.yaml"), "w") as fh:
         fh.write("plugins:\\n  enabled:\\n    - hermes-tenuo\\n  entries:\\n    hermes-tenuo:\\n" + entry)
     assert "hermes_tenuo" not in sys.modules
-    from hermes_cli.plugins import PluginManager, invoke_hook
-    pm = PluginManager()
+    from hermes_cli.plugins import get_plugin_manager, invoke_hook
+    pm = get_plugin_manager()  # invoke_hook dispatches through this singleton
     pm.discover_and_load()
     plugin = next((p for p in pm.list_plugins() if p["name"] == "hermes-tenuo"), None)
     out = {

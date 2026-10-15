@@ -11,7 +11,7 @@ kind: standalone
 # `hermes plugins enable` installs these into the Hermes runtime, after consent.
 python_dependencies:
   - "tenuo>=0.3.2,<0.4"
-requires_hermes: ">=0.20"
+requires_hermes: ">=0.19"
 tags: [security, authorization, warrants, tenuo]
 provides_hooks:
   - pre_tool_call

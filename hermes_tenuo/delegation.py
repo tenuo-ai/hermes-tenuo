@@ -79,14 +79,26 @@ class DelegationPlan:
         for tool, args in ancestry[-1].tools.items():
             if any(tool not in lvl.tools for lvl in ancestry):
                 raise DelegationPlanError(f"{tool} at depth {depth} is not held by every ancestor")
-            if not args:
+            named = {a: v for a, v in (args or {}).items() if a != ALLOW_UNKNOWN}
+            open_world = all((lvl.tools[tool] or {}).get(ALLOW_UNKNOWN) is True for lvl in ancestry)
+            if not named and not open_world:
                 result[tool] = None
                 continue
-            result[tool] = {
-                arg: All([m for lvl in ancestry for m in _members(lvl.tools[tool].get(arg, {}))])
-                for arg in args
+            caps: Dict[str, Any] = {
+                arg: All([m for lvl in ancestry for m in _members(lvl.tools[tool].get(arg, {}))]) for arg in named
             }
+            # Other arguments stay allowed only if every ancestor level allows them.
+            if open_world:
+                caps[ALLOW_UNKNOWN] = True
+            result[tool] = caps
         return result
+
+
+# A tool entry may set this to true to let the tool take arguments the plan
+# does not name (for example Hermes's optional terminal arguments such as
+# workdir). Named arguments are still checked. A child level keeps it only
+# when every ancestor level sets it.
+ALLOW_UNKNOWN = "_allow_unknown"
 
 
 def _level(raw: Any, where: str, *, root: bool = False) -> Level:
@@ -97,12 +109,20 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
         raise DelegationPlanError(f"{where}: ttl_seconds must be a positive integer")
     for tool, args in raw["tools"].items():
         for arg, spec in (args or {}).items():
+            if arg == ALLOW_UNKNOWN:
+                if spec is not True:
+                    raise DelegationPlanError(f"{where}: {tool}.{ALLOW_UNKNOWN} must be true when present")
+                continue
             patterns = spec.get("patterns") or []
             if not all(isinstance(p, str) and p.startswith("^") and p.endswith("$") for p in patterns):
                 raise DelegationPlanError(f"{where}: {tool}.{arg} patterns must be anchored (^...$)")
             rng = spec.get("range")
-            if rng is not None and (not isinstance(rng, (list, tuple)) or len(rng) != 2
-                                    or not all(isinstance(n, (int, float)) for n in rng) or rng[0] > rng[1]):
+            if rng is not None and (
+                not isinstance(rng, (list, tuple))
+                or len(rng) != 2
+                or not all(isinstance(n, (int, float)) for n in rng)
+                or rng[0] > rng[1]
+            ):
                 raise DelegationPlanError(f"{where}: {tool}.{arg} range must be [min, max] with min <= max")
             if not patterns and not spec.get("binaries") and rng is None:
                 raise DelegationPlanError(f"{where}: {tool}.{arg} has no constraints")
