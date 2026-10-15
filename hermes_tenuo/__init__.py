@@ -112,6 +112,10 @@ def register(ctx: Any) -> None:
         _register_block_all(ctx, f"hermes-tenuo: {exc}")
         return
     if guard is None:
+        from hermes_tenuo._config import get_require_warrant
+        if get_require_warrant(ctx):
+            _register_block_all(ctx, "hermes-tenuo: require_warrant is enabled but no warrant is configured")
+            return
         from hermes_tenuo.kanban import current_task_id
         kanban_task = current_task_id()
         if kanban_task:
