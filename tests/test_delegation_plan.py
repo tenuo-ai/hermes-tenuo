@@ -360,3 +360,13 @@ def test_plan_allow_unknown_must_be_true():
                 "levels": [{"ttl_seconds": 60, "tools": {"terminal": {"command": _SPEC}}}],
             }
         )
+
+
+def test_child_without_delegate_task_gets_a_terminal_grant(tree):
+    g = tree
+    assert _delegate(g, "s0", "s1") is None
+    investigator, _ = g._resolve_warrant("s1")
+    assert not investigator.is_terminal()  # it may still delegate
+    assert _delegate(g, "s1", "s2") is None
+    inspector, _ = g._resolve_warrant("s2")
+    assert inspector.is_terminal()  # no delegate_task, so its grant can't be delegated

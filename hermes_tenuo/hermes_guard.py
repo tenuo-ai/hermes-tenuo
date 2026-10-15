@@ -443,6 +443,9 @@ class HermesGuard:
                     builder = parent_warrant.grant_builder().holder(child_key.public_key)
                     for tool in sorted(keep):
                         builder = builder.capability(tool, **child_caps[tool])
+                    if "delegate_task" not in keep:
+                        # The child can't delegate, so its grant can't be delegated either.
+                        builder = builder.terminal()
                     child = builder.ttl(ttl).grant(parent_key)
                 else:
                     b = parent_warrant.attenuate_builder()
@@ -486,8 +489,12 @@ class HermesGuard:
             for goal, _toolsets in tasks:
                 child_key = SigningKey.generate()
                 builder = parent_warrant.grant_builder().holder(child_key.public_key)
-                for tool, tool_args in plan.constraints_for(depth).items():
+                level_tools = plan.constraints_for(depth)
+                for tool, tool_args in level_tools.items():
                     builder = builder.capability(tool, **tool_args) if tool_args else builder.capability(tool)
+                if "delegate_task" not in level_tools:
+                    # The child can't delegate, so its grant can't be delegated either.
+                    builder = builder.terminal()
                 planned.append(_ChildGrant(builder.ttl(level.ttl_seconds).grant(parent_key), chain, child_key, goal))
         except Exception as exc:
             logger.warning("hermes-tenuo: delegation plan grant failed at depth %d: %s", depth, exc)
