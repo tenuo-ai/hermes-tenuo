@@ -327,6 +327,7 @@ variable equivalent.
 | `warrant` | `TENUO_WARRANT` | Base64 warrant, or a path to a file containing one. Required for enforcement. |
 | `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Required for enforcement: without it every call is blocked (logged instead under `on_denial: log`). Warrants and delegation chains signed by anything else are rejected. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
+| `require_warrant` | | If `true`, a loaded plugin blocks calls when no warrant is configured, including under `on_denial: log`. Default `false` preserves unconfigured passthrough. |
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
@@ -337,8 +338,12 @@ Keep secret key material in env vars or a secrets manager, never in
 
 ## Things to know
 
-- **Enabled but unconfigured is a no-op.** Without a `warrant`, the plugin
-  loads, logs a warning, and enforces nothing. `doctor` fails that check.
+- **Enabled but unconfigured is a no-op by default.** Without a `warrant`, the
+  plugin loads, logs a warning, and enforces nothing. `doctor` fails that check.
+  Set `require_warrant: true` under `plugins.entries.hermes-tenuo` to block
+  calls instead. This requires the plugin to load successfully; it cannot
+  detect its own absence. With a warrant configured, `on_denial` continues to
+  select observation (`log`) or enforcement (`block`).
 - **Multiplexed profiles.** Under `gateway.multiplex_profiles`, `TENUO_*`
   values are read through Hermes `get_secret`, so put each profile's keys in
   that profile's `.env`. A secondary profile does not inherit the launch

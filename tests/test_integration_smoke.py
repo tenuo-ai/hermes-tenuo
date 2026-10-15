@@ -740,3 +740,31 @@ class TestUnconfiguredInstall:
         # and they enforce nothing
         (fn,) = ctx.hooks["pre_tool_call"]
         assert fn("terminal", {"command": "ls"}, session_id="s1") is None
+
+
+@pytest.mark.parametrize("entry,blocked", [
+    ({}, False),
+    ({"require_warrant": False}, False),
+    ({"require_warrant": True}, True),
+    ({"require_warrant": True, "on_denial": "log"}, True),
+    ({"require_warrant": "false"}, True),
+    ({"require_warrant": None}, True),
+])
+def test_require_warrant_controls_unconfigured_registration(monkeypatch, entry, blocked):
+    """Missing authority blocks only when required; malformed opt-ins fail closed."""
+    import hermes_tenuo
+
+    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: entry)
+    # Model upstream Hermes without registry enforcement; exercise the real
+    # configuration -> guard construction -> registration path.
+    monkeypatch.setitem(sys.modules, "tools", ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.registry", _make_mock_registry_module(False))
+    ctx = MockCtx()
+    hermes_tenuo.register(ctx)
+    for tool in ("terminal", "memory", "todo"):
+        result = ctx.call_hook("pre_tool_call", tool_name=tool, args={})
+        if blocked:
+            assert result["action"] == "block"
+            assert "require_warrant" in result["message"]
+        else:
+            assert result is None
