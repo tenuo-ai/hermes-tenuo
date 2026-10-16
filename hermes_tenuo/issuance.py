@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import os
+import stat
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -22,12 +23,22 @@ def read_public_key(path: str | Path):
     return PublicKey.from_bytes(_read_key(path))
 
 
-def write_private_file(path: str | Path, text: str, *, overwrite: bool = False) -> None:
+def write_private_file(path: str | Path, text: str, *, overwrite: bool = False,
+                       preserve_permissions: bool = False) -> None:
     """Publish a complete 0600 file atomically; existing files are safe by default."""
     destination = Path(path).expanduser()
+    metadata = None
+    if preserve_permissions:
+        from hermes_tenuo.session_store import _publication_metadata
+        metadata = _publication_metadata(destination)
     fd, temporary = tempfile.mkstemp(prefix=f'.{destination.name}.', dir=destination.parent)
     try:
         with os.fdopen(fd, 'w') as stream:
+            if metadata is not None:
+                current = os.fstat(stream.fileno())
+                if (current.st_uid, current.st_gid) != (metadata.st_uid, metadata.st_gid):
+                    os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+                os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode) & 0o644)
             stream.write(text.rstrip('\n') + '\n')
             stream.flush()
             os.fsync(stream.fileno())
@@ -41,7 +52,9 @@ def write_private_file(path: str | Path, text: str, *, overwrite: bool = False) 
 
 
 def mint_for_holder(issuer: Any, holder: Any, capabilities: dict[str, dict],
-                    ttl_seconds: int, session_id: str | None = None):
+                    ttl_seconds: int, session_id: str | None = None, *,
+                    approval_gates: list[str] | None = None, approvers: list | None = None,
+                    min_approvals: int = 1):
     """Sign a root execution warrant using only the recipient's public key."""
     from tenuo import Warrant
     if not capabilities:
@@ -55,6 +68,19 @@ def mint_for_holder(issuer: Any, holder: Any, capabilities: dict[str, dict],
         builder = builder.session_id(session_id)
     for tool, constraints in capabilities.items():
         builder = builder.capability(tool, **constraints)
+    if approval_gates or approvers:
+        if not approval_gates or not approvers:
+            raise ValueError('approval gates and approver public keys must be supplied together')
+        if any(tool not in capabilities for tool in approval_gates):
+            raise ValueError('approval gates must name granted tools')
+        if len({p.to_bytes() for p in approvers}) != len(approvers):
+            raise ValueError('approver keys must be distinct')
+        if type(min_approvals) is not int or not 1 <= min_approvals <= len(approvers):
+            raise ValueError('approval threshold must be between 1 and the number of approvers')
+        builder = (builder.approval_gates({tool: None for tool in approval_gates})
+                   .required_approvers(approvers).min_approvals(min_approvals))
+    elif min_approvals != 1:
+        raise ValueError('approval threshold requires gates and approvers')
     return builder.mint(issuer)
 
 

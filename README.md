@@ -725,3 +725,109 @@ configuration continue working when the file settings are absent.
 Run `hermes-tenuo status` to inspect configured sources and `hermes-tenuo doctor`
 to validate loading and the holder/warrant match. These paths are operator
 configuration, not agent-selected tool arguments.
+
+## Human approval for an operation: send a file, sign it, bring it back
+
+Issuing a warrant and approving an operation are different. `approve` issues new
+session authority. `approvals sign` satisfies a human-approval gate already signed
+into a warrant; it cannot expand that warrant. Everything below runs locally,
+without an account, approval server, or Tenuo Cloud.
+
+An approver has their own key, separate from the issuer and Hermes holder keys.
+Use the existing key generator on the approver's machine:
+
+```sh
+hermes-tenuo keygen --private-key alice.key --public-key alice.pub
+hermes-tenuo approver register alice --public-key alice.pub
+hermes-tenuo approver show alice
+```
+
+Registration stores only a public key and a readable name under
+`~/.config/hermes-tenuo/approvers/` (`--identities-dir` overrides this). It refuses
+replacement. Exchange the public key and independently compare the printed full
+SHA-256 fingerprint. The issuer registers that public key too, then can mint:
+
+```sh
+hermes-tenuo approver register alice --public-key alice.pub
+hermes-tenuo mint --issuer-key issuer.key --holder-public-key holder.pub \
+  --allow 'restart_service:service=example' --require-approval restart_service \
+  --approver alice --ttl 20m --session-id example-session --out restart.warrant
+hermes-tenuo attach restart.warrant --session example-session
+```
+
+`--require-approval TOOL` gates every call to that granted tool. Repeat
+`--approver NAME` and set `--min-approvals 2` for two distinct signers. The signed
+public keys determine authority; names are local labels, not a global identity
+service. Registering a name never grants approval authority. For rotation,
+register a new identity and explicitly issue a new warrant. CLI gate flags work
+with separate issuance, including `--policy` scope templates; gate configuration
+is not yet part of the version 1 policy/request format. Renewal still rejects
+gated warrants rather than silently dropping their restrictions.
+
+Enable the local file workflow in the Hermes profile:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      operation_requests_dir: tenuo/operation-requests
+      operation_approvals_dir: /path/to/operator-published/operation-approvals
+```
+
+Both paths must be configured and separate. Relative paths use the active profile
+home. Hermes writes requests; only the operator writes approvals. Keep approver
+and issuer private keys outside Hermes. Mount the approval directory read-only
+into an isolated agent, just like session membership. New directories/files are
+`0700`/`0600`; provision shared read-group access for a separate agent OS user.
+Approval reimports preserve existing ownership and read permissions. Static mode
+requires `on_denial: block`; dynamic session mode always enforces.
+
+When a gated tool call is attempted, its handler does not execute. Hermes gets a
+useful block message with the request file and review command. Requests are
+self-contained JSON containing the signed warrant and exact call arguments. Send
+that file manually to the authorized person using your preferred transport;
+it may contain sensitive arguments. The recipient needs no running Hermes and
+receives no issuer or holder private key. They independently trust the issuer's
+public key, review, and sign:
+
+```sh
+hermes-tenuo approvals show restart.operation.json --trusted-root issuer.pub
+hermes-tenuo approvals sign restart.operation.json --identity alice --key alice.key \
+  --trusted-root issuer.pub --out alice.response.json
+```
+
+The CLI verifies the warrant signature, issuer, expiry, gate, recipient holder,
+and request hash. It displays the exact arguments, fingerprints, threshold and
+duration before asking for confirmation. `--yes` explicitly opts into
+noninteractive signing. No paths supplied by a request select credentials or
+output destinations. Only the reviewed in-memory snapshot is signed.
+
+The recipient sends **only the response file** back. On the operator's machine:
+
+```sh
+hermes-tenuo approvals import restart.operation.json --response alice.response.json \
+  --trusted-root issuer.pub
+```
+
+Import defaults to configured `operation_approvals_dir`; `--directory PATH` selects
+an explicit store. Each response is verified before publication. Partial m-of-n
+responses can be imported separately; repeated imports from one key never count
+as multiple people. Ask Hermes to retry. The next tool call loads signatures and
+Tenuo verifies them before execution; **no gateway restart is needed**. Import is
+publication, not confirmation of execution. Audit records include the verified
+approver fingerprints and signed identity labels alongside the ALLOW decision.
+Identity labels are claims signed by those keys, not proof of a person's name.
+
+Approvals bind the exact warrant, holder, tool, and arguments. Their default TTL
+is five minutes (`sign --ttl` overrides it), capped at the warrant's expiry.
+**They are not single-use:** identical calls may repeat until expiry. Tenuo does
+not track consumed nonces; changing the tool, arguments, holder or warrant needs
+a different approval. Signed session restrictions still apply, and local response
+publication is isolated per session. After expiry, sign a new response and import
+it; if the warrant expired, issue a new warrant first. This first file workflow
+supports root warrants; delegated chains need a future portable chain format.
+
+Malformed, unauthorized, expired, or mismatched responses never satisfy a gate.
+An independent valid grant can still authorize a call: a gate on one warrant is
+not a global deny on another warrant. Pending requests reuse stable filenames,
+with at most 100 per session; archive reviewed requests when that limit is reached.

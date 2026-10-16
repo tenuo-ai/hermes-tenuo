@@ -43,7 +43,8 @@ from typing import Any
 
 def cmd_mint(args: argparse.Namespace) -> int:
     """Mint a warrant and print config to stdout."""
-    if any(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out", "session_id")):
+    if (any(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out", "session_id", "require_approval", "approver"))
+            or getattr(args, 'min_approvals', 1) != 1):
         return _mint_separate(args)
     return _mint_local(args)
 
@@ -104,10 +105,15 @@ def _mint_separate(args: argparse.Namespace) -> int:
             if tool in capabilities:
                 raise ValueError(f"duplicate tool: {tool}")
             capabilities[tool] = constraints
+        from hermes_tenuo.operation_approvals import load_identity
+        approvers = [load_identity(name, getattr(args, 'identities_dir', None))
+                     for name in (getattr(args, 'approver', None) or [])]
         issuer = read_signing_key(args.issuer_key)
         holder = read_public_key(args.holder_public_key)
         warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(ttl),
-                                  getattr(args, "session_id", None))
+                                  getattr(args, "session_id", None),
+                                  approval_gates=getattr(args, 'require_approval', None), approvers=approvers,
+                                  min_approvals=getattr(args, 'min_approvals', 1))
         write_private_file(args.out, warrant.to_base64())
     except Exception as exc:
         print(f"error: issuance failed: {exc}", file=sys.stderr)
@@ -755,6 +761,14 @@ def main() -> None:
     mint_p.add_argument("--out", metavar="PATH", help="Write warrant to a new 0600 file")
     mint_p.add_argument("--session-id", metavar="ID", help="Bind separate issuance to a session")
 
+    mint_p.add_argument('--require-approval', action='append', metavar='TOOL', help='Gate every call to this granted tool (repeatable)')
+    mint_p.add_argument('--approver', action='append', metavar='NAME', help='Registered approver identity (repeatable)')
+    mint_p.add_argument('--identities-dir', help='Local public approver identity directory')
+    mint_p.add_argument('--min-approvals', type=int, default=1, help='Required distinct approvers (default: 1)')
+
+    from hermes_tenuo.operation_approvals import register_commands as register_approval_commands
+    register_approval_commands(subparsers)
+
     policy_p = subparsers.add_parser("policy", help="Validate or inspect declarative scope")
     policy_sub = policy_p.add_subparsers(dest="policy_command", required=True)
     for command in ("validate", "show"):
@@ -786,7 +800,10 @@ def main() -> None:
     if hasattr(args, "authority_request_handler"):
         sys.exit(args.authority_request_handler(args))
 
-    if args.command == "keygen":
+    if args.command in ('approver', 'approvals'):
+        from hermes_tenuo.operation_approvals import cmd_approver, cmd_approvals
+        sys.exit(cmd_approver(args) if args.command == 'approver' else cmd_approvals(args))
+    elif args.command == "keygen":
         sys.exit(cmd_keygen(args))
     elif args.command in ("attach", "detach", "sessions", "clear-session"):
         from hermes_tenuo._config import get_session_warrants_dir

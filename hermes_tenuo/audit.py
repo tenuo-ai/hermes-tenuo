@@ -93,6 +93,8 @@ def read_audit_log(
                 # from the pre hook stays DENY even if a post record says ALLOW.
                 prev = merged[key]
                 combined = {**prev, **rec}
+                if prev.get("approvers") and not rec.get("approvers"):
+                    combined["approvers"] = prev["approvers"]
                 if prev.get("decision") == "DENY" and rec.get("decision") != "DENY":
                     combined["decision"] = "DENY"
                     combined["reason"] = prev.get("reason") or rec.get("reason")

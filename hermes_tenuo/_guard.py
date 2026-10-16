@@ -43,6 +43,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         if setting in entry and loader(ctx) is None:
             raise WarrantLoadError(f"{setting} is invalid, unreadable, or conflicts with another key source")
 
+    from hermes_tenuo.operation_approvals import configured_store
+    try:
+        operation_store = configured_store(ctx)
+    except ValueError as exc:
+        raise WarrantLoadError(str(exc)) from exc
     from hermes_tenuo._config import get_session_warrants_dir
     try:
         session_directory = get_session_warrants_dir(ctx)
@@ -54,6 +59,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         audit_path = get_audit_log_path(ctx)
         return PluginGuard(SessionGuard(
             directory=session_directory,
+            operation_approval_store=operation_store,
             signing_key=get_signing_key(ctx),
             trusted_roots=get_trusted_roots(ctx),
             audit_callback=LocalAuditLog(audit_path) if audit_path else None,
@@ -72,6 +78,8 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "every tool call is blocked until the warrant is fixed"
         ) from exc
     if not warrant_raw:
+        if operation_store is not None:
+            raise WarrantLoadError('portable operation approvals require a warrant or dynamic session configuration')
         # Not configured, or a kanban worker with no staged task warrant
         # (register() blocks that case). Anything else is an empty warrant.
         if source == "none" or source.startswith("kanban:"):
@@ -108,6 +116,8 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
     on_denial = get_on_denial(ctx)
+    if operation_store is not None and on_denial == 'log':
+        raise WarrantLoadError('portable operation approvals require on_denial: block')
 
     audit_callback = None
     audit_path = get_audit_log_path(ctx)
@@ -118,6 +128,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
 
     guard = HermesGuard(
         warrant=warrant,
+        operation_approval_store=operation_store,
         signing_key=signing_key,
         child_warrant=child_warrant,
         trusted_roots=trusted_roots,
