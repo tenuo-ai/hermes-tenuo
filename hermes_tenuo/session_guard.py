@@ -1,6 +1,7 @@
 """Session-scoped dynamic authority, evaluated independently for every call."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from hermes_tenuo.hermes_guard import HermesGuard, HermesAuditEvent, _format_denial_reason
 from hermes_tenuo.session_store import read_session, _decode
@@ -43,12 +44,15 @@ class SessionGuard(HermesGuard):
                         continue
                     approval_handler = (self._operation_approval_store.handler(warrant, session_id, roots)
                                         if self._operation_approval_store else self._approval_handler)
-                    result = enforce_tool_call(
-                        tool_name=tool_name, tool_args=args,
-                        bound_warrant=warrant.bind(self._static_signing_key),
-                        trusted_roots=roots,
-                        approval_handler=approval_handler,
-                    )
+                    scope = (self._revocation_store.scope(warrant, [], self._static_signing_key, roots)
+                             if self._revocation_store else nullcontext())
+                    with scope:
+                        result = enforce_tool_call(
+                            tool_name=tool_name, tool_args=args,
+                            bound_warrant=warrant.bind(self._static_signing_key),
+                            trusted_roots=roots,
+                            approval_handler=approval_handler,
+                        )
                     if result.allowed:
                         allowed, selected, reason = True, str(warrant.id), ""
                         approved_by = getattr(approval_handler, "approved_by", [])
@@ -58,6 +62,8 @@ class SessionGuard(HermesGuard):
                     from hermes_tenuo.operation_approvals import OperationApprovalPending
                     if isinstance(exc, OperationApprovalPending):
                         pending = str(exc)
+                    elif self._revocation_store is not None:
+                        reason = f"tenuo: {exc}"
                     # A bad or expired grant must not hide an independent valid grant.
                     continue
         except Exception as exc:

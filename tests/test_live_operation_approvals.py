@@ -30,12 +30,18 @@ issuer, holder, alice = [SigningKey.generate() for _ in range(3)]
 (operator / 'alice.pub').write_text(base64.b64encode(alice.public_key.to_bytes()).decode())
 store = home.parent / 'sessions'
 responses = operator / 'responses'
+revocations = operator / 'revocations'
+from tenuo import SignedRevocationList
+from hermes_tenuo.revocation import import_srl
+initial_srl = SignedRevocationList.builder().version(1).build(issuer)
+import_srl(initial_srl, revocations, [issuer.public_key])
 requests = home / 'requests'
 (home / 'config.yaml').write_text('plugins:\n  enabled: [hermes-tenuo]\n  entries:\n    hermes-tenuo:\n'
     + '      signing_key_file: holder.key\n      trusted_root_file: issuer.pub\n'
     + '      session_warrants_dir: ' + str(store) + '\n'
     + '      operation_requests_dir: ' + str(requests) + '\n'
-    + '      operation_approvals_dir: ' + str(responses) + '\n')
+    + '      operation_approvals_dir: ' + str(responses) + '\n'
+    + '      revocations_dir: ' + str(revocations) + '\n')
 policy_path = operator / 'maintenance.yaml'
 policy_path.write_text('version: 2\nttl: 10m\ncapabilities:\n  example_restart: {}\napprovals:\n'
     + '  keys: [./alice.pub]\n  gates:\n    example_restart: {always: true}\n')
@@ -80,8 +86,19 @@ assert len(calls) == 1
 call({'resource':'different'})
 call({'resource':'example'}, session='session-b')
 assert len(calls) == 1
+from tenuo import Warrant
+issued = Warrant.from_base64((operator/'restart.warrant').read_text().strip())
+revoked_srl = SignedRevocationList.builder().from_existing(initial_srl).revoke(str(issued.id)).version(2).build(issuer)
+(operator/'revoked.srl').write_bytes(revoked_srl.to_bytes())
+cli('revocations', 'import', operator/'revoked.srl', '--trusted-root', home/'issuer.pub')
+blocked = call({'resource':'example'})
+assert 'revoked' in blocked.lower() and len(calls) == 1, blocked
+# Reattachment does not restore the same revoked ID.
+attach_encoded_warrant(issued.to_base64(), 'session-a', store)
+assert 'revoked' in call({'resource':'example'}).lower() and len(calls) == 1
 rows = [json.loads(line) for line in (home/'tenuo/audit.jsonl').read_text().splitlines()]
 assert any(r['decision']=='DENY' and 'Human approval required' in r['reason'] for r in rows)
+assert any(r['decision']=='DENY' and 'revoked' in r['reason'].lower() for r in rows)
 from hermes_tenuo.operation_approvals import fingerprint
 assert any(r['decision']=='ALLOW' and r.get('approvers', [{}])[0].get('fingerprint')==fingerprint(alice.public_key) for r in rows)
 print('LIVE_OPERATION_APPROVAL_OK')
