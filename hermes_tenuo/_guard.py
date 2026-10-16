@@ -140,6 +140,9 @@ class PluginGuard:
         tool_call_id: str = "",
         **kwargs: Any,
     ) -> Optional[dict]:
+        from hermes_tenuo.authority_requests import REQUEST_TOOL
+        if getattr(self, "_request_control_enabled", False) and tool_name == REQUEST_TOOL:
+            return None  # This bounded control tool only writes unsigned requests.
         result = self._guard.pre_tool_call(
             tool_name=tool_name,
             args=args or {},

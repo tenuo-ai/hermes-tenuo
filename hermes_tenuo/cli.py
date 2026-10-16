@@ -745,6 +745,9 @@ def main() -> None:
     for command in ("validate", "show"):
         policy_sub.add_parser(command).add_argument("path", metavar="FILE")
 
+    from hermes_tenuo.authority_requests import register_commands as register_request_commands
+    register_request_commands(subparsers)
+
     # status
     subparsers.add_parser("status", help="Show current configuration status")
 
@@ -764,6 +767,9 @@ def main() -> None:
     subparsers.add_parser("demo", help="Print a local allow/deny transcript (no Hermes process)")
 
     args = parser.parse_args()
+
+    if hasattr(args, "authority_request_handler"):
+        sys.exit(args.authority_request_handler(args))
 
     if args.command == "keygen":
         sys.exit(cmd_keygen(args))

@@ -135,6 +135,9 @@ def register(ctx: Any) -> None:
             _register_passthrough_hooks(ctx)
         return
 
+    from hermes_tenuo.request_tools import register_request_tool
+    guard._request_control_enabled = register_request_tool(ctx)
+
     # Primary enforcement: register directly with ToolRegistry for universal
     # coverage including execute_code sandbox (tenuo-ai/hermes-agent fork).
     # Falls back gracefully to the pre_tool_call hook on upstream Hermes.
