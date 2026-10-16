@@ -584,3 +584,73 @@ agent use. Atomic updates preserve existing ownership and read permissions;
 failed ownership preservation leaves the previous manifest intact. Group- or
 world-writable manifests are rejected. Keep the directory operator-writable only
 and mount it read-only into the agent. These commands require Unix file locking.
+
+## Request authority, approve outside Hermes
+
+A request is an unsigned snapshot, not authority. Create one ad hoc without a
+policy file, or replace `--allow` with `--policy report-reader.yaml`:
+
+```sh
+hermes-tenuo request create --holder-public-key reader.pub --session research-session \
+  --description 'Read the quarterly report' --ttl 20m \
+  --allow 'read_file:path=/data/reports' --out report.request.json
+hermes-tenuo request show report.request.json
+hermes-tenuo approve report.request.json --issuer-key issuer.key
+```
+
+Approval displays the exact recipient, session, duration and scope, then asks
+for confirmation. Confirm the public holder fingerprint against the intended
+agent identity; an untrusted request cannot establish its own identity. Use
+`--yes` only when explicitly approving noninteractively. The issuer reads only
+the holder public key. It signs the already-reviewed in-memory snapshot; edits
+to the request file during review cannot change what is signed. Output defaults
+to `report.request.warrant` and refuses overwrite; `--out` selects another file.
+Requests never supply output paths or issuer credentials.
+
+For the same-machine workflow, add `--attach` to approval. It publishes the signed
+warrant to the request's session in configured `session_warrants_dir`; use
+`--directory` for an explicitly selected local store. No execution ID lookup,
+network service, or gateway restart is needed. Publication is not a runtime
+acknowledgment: the running plugin verifies it before the next protected call.
+Approval does not automatically retry a previously denied operation. Ask Hermes
+to continue when ready. A new session receives no attachments automatically.
+
+To let Hermes itself propose authority, configure both directories:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      session_warrants_dir: /srv/hermes-authority/sessions
+      requests_dir: /srv/hermes-authority/requests
+      signing_key_env: TENUO_SIGNING_KEY
+      trusted_root: <issuer-public-key>
+```
+
+Include the plugin's `tenuo` toolset if your configuration restricts available
+toolsets. `tenuo_request_authority(allow, ttl, description)` writes an unsigned
+request and returns its path and external approval command. The recipient holder
+and session come from runtime context, never model arguments. This one bounded
+control operation can run without infrastructure authority; protected tools
+remain denied until a signed warrant is attached. It neither signs nor attaches
+warrants. Request scope strings use the same syntax as `mint --allow`.
+
+Keep the issuer private key outside agent-accessible paths/tools. Give Hermes
+write access to the request directory and read-only access to session membership;
+use separate mounts or OS permissions. Running the operator and Hermes as the
+same unrestricted OS account is not isolation. Operator approval works in a
+separate terminal on the same machine; remote transport is optional deployment
+work, not part of this protocol. The tool caps request size, scope count and
+retained requests per session; archive old requests after review when needed.
+
+Generated approval commands include the originating session store explicitly, so
+approval from another terminal/profile does not select a different store by
+accident. `approve --attach` displays and checks that destination before loading
+the issuer key or signing. Missing configuration, invalid membership, and ordinary
+write-permission failures therefore leave no newly issued warrant.
+
+Preflight cannot prevent every later I/O failure. If publication fails after
+signing, approval reports the issued warrant ID and a recovery `attach` command
+with `--expected-id`. Retry that command rather than approving/signing again;
+substituting another artifact is rejected. Publication still does not imply the
+runtime has activated the warrant.
