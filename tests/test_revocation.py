@@ -229,6 +229,9 @@ def test_revoked_parent_denies_delegated_child_using_core_chain_verification(set
     revoked = SignedRevocationList.builder().version(2).revoke(str(parent.id)).build(issuer)
     import_srl(revoked, directory, [issuer.public_key])
     guard = HermesGuard(trusted_roots=[issuer.public_key], revocation_store=RevocationStore(directory))
+    from hermes_tenuo.warrant_inventory import describe
+    view = describe(child, ['child'], [issuer.public_key], revoked)
+    assert view['directly_revoked'] is False and view['revoked'] is None
     guard.set_session_warrant('child', child, signing_key=child_holder, parent_warrant=parent)
     assert guard.pre_tool_call('read_file', {}, session_id='child')['action'] == 'block'
 

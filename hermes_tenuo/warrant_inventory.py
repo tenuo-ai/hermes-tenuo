@@ -60,7 +60,9 @@ def describe(warrant, sessions, roots, srl):
         'signature_valid': warrant.verify(warrant.issuer.to_bytes()),
         'signed_session_id': warrant.session_id, 'attached_sessions': sessions,
         'expires_at': str(warrant.expires_at()), 'expired': warrant.is_expired(),
-        'revoked': srl.is_revoked(str(warrant.id)) if srl is not None else None,
+        'directly_revoked': srl.is_revoked(str(warrant.id)) if srl is not None else None,
+        'revoked': (True if srl.is_revoked(str(warrant.id)) else (False if warrant.depth == 0 else None))
+                   if srl is not None else None,
         'revocation_version': srl.version if srl is not None else None,
         'capabilities': {tool: {arg: repr(value) for arg, value in arguments.items()}
                          for tool, arguments in warrant.capabilities.items()},
@@ -100,7 +102,7 @@ def cmd_warrants(args):
                     errors.append({'warrant_id': str(entry['warrant'].id), 'error': str(exc)})
                     continue
                 rows.append({key: row[key] for key in ('warrant_id', 'holder_fingerprint', 'attached_sessions',
-                    'expires_at', 'expired', 'revoked', 'signature_valid', 'issuer_trusted')})
+                    'expires_at', 'expired', 'revoked', 'signature_valid', 'issuer_trusted', 'capabilities')})
             print(json.dumps({'published': rows, 'errors': errors, 'revocation_error': revocation_error,
                               'note': 'Published attachments, not all issued warrants or a runtime activation acknowledgement.'}, indent=2))
         else:

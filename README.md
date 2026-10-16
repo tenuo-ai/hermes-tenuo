@@ -879,8 +879,9 @@ approval gates/keys and revocation status. Constraints use SDK representations;
 gate introspection uses SDK kinds and argument names. Opaque extension bytes are
 retained as base64 rather than interpreted by a second policy engine. Signature
 validity, root trust and revocation are separate fields. Delegated issuer trust
-requires a complete chain at runtime; a single-file inspection is not an
-activation or authorization verdict. Missing revocation information is `null`,
+requires a complete chain at runtime; indirect revocation is unknown without
+that chain, with direct ID membership shown separately. A single-file inspection
+is not an activation or authorization verdict. Missing revocation information is `null`,
 with an error if a configured source is unavailable.
 
 `list` inventories published session attachments, **not every warrant ever
