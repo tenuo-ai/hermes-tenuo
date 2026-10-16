@@ -12,15 +12,20 @@ DRIVER = textwrap.dedent(r'''
 import base64, json, os, subprocess, sys
 from pathlib import Path
 from tenuo import SigningKey
-from hermes_tenuo.issuance import mint_for_holder
 from hermes_tenuo.session_store import attach_encoded_warrant
 home = Path(os.environ['HERMES_HOME'])
 home.mkdir()
 operator = home.parent / 'operator'
 operator.mkdir()
+def cli(*args):
+    result = subprocess.run([sys.executable, '-m', 'hermes_tenuo.cli', *map(str,args)],
+        capture_output=True, text=True)
+    assert result.returncode == 0, (result.stdout, result.stderr)
 issuer, holder, alice = [SigningKey.generate() for _ in range(3)]
 (home / 'holder.key').write_text(base64.b64encode(holder.secret_key_bytes()).decode())
 (home / 'issuer.pub').write_text(base64.b64encode(issuer.public_key.to_bytes()).decode())
+(operator / 'issuer.key').write_text(base64.b64encode(issuer.secret_key_bytes()).decode())
+(operator / 'holder.pub').write_text(base64.b64encode(holder.public_key.to_bytes()).decode())
 (operator / 'alice.key').write_text(base64.b64encode(alice.secret_key_bytes()).decode())
 (operator / 'alice.pub').write_text(base64.b64encode(alice.public_key.to_bytes()).decode())
 store = home.parent / 'sessions'
@@ -31,9 +36,12 @@ requests = home / 'requests'
     + '      session_warrants_dir: ' + str(store) + '\n'
     + '      operation_requests_dir: ' + str(requests) + '\n'
     + '      operation_approvals_dir: ' + str(responses) + '\n')
-warrant = mint_for_holder(issuer, holder.public_key, {'example_restart': {}}, 600, 'session-a',
-    approval_gates=['example_restart'], approvers=[alice.public_key])
-attach_encoded_warrant(warrant.to_base64(), 'session-a', store)
+policy_path = operator / 'maintenance.yaml'
+policy_path.write_text('version: 2\nttl: 10m\ncapabilities:\n  example_restart: {}\napprovals:\n'
+    + '  keys: [./alice.pub]\n  gates:\n    example_restart: {always: true}\n')
+cli('mint', '--policy', policy_path, '--issuer-key', operator/'issuer.key',
+    '--holder-public-key', operator/'holder.pub', '--session-id', 'session-a', '--out', operator/'restart.warrant')
+attach_encoded_warrant((operator/'restart.warrant').read_text().strip(), 'session-a', store)
 from hermes_cli.plugins import get_plugin_manager
 manager = get_plugin_manager()
 manager.discover_and_load()
@@ -62,15 +70,8 @@ recipient = operator / 'recipient'
 recipient.mkdir()
 copy = recipient / 'request.json'
 copy.write_bytes(request.read_bytes())
-def cli(*args):
-    result = subprocess.run([sys.executable, '-m', 'hermes_tenuo.cli', *map(str,args)],
-        capture_output=True, text=True)
-    assert result.returncode == 0, (result.stdout, result.stderr)
-identities = recipient / 'identities'
-cli('approver', 'register', 'alice', '--public-key', operator/'alice.pub', '--identities-dir', identities)
 response = recipient / 'response.json'
-cli('approvals', 'sign', copy, '--identity', 'alice', '--identities-dir', identities,
-    '--key', operator/'alice.key', '--trusted-root', home/'issuer.pub', '--out', response, '--yes')
+cli('approvals', 'sign', copy, '--key', operator/'alice.key', '--trusted-root', home/'issuer.pub', '--out', response, '--yes')
 call({'resource':'example'})
 assert calls == []  # A remote signature is inert until explicitly imported.
 cli('approvals', 'import', request, '--response', response, '--trusted-root', home/'issuer.pub')
@@ -81,7 +82,8 @@ call({'resource':'example'}, session='session-b')
 assert len(calls) == 1
 rows = [json.loads(line) for line in (home/'tenuo/audit.jsonl').read_text().splitlines()]
 assert any(r['decision']=='DENY' and 'Human approval required' in r['reason'] for r in rows)
-assert any(r['decision']=='ALLOW' and r.get('approvers', [{}])[0].get('identity')=='alice' for r in rows)
+from hermes_tenuo.operation_approvals import fingerprint
+assert any(r['decision']=='ALLOW' and r.get('approvers', [{}])[0].get('fingerprint')==fingerprint(alice.public_key) for r in rows)
 print('LIVE_OPERATION_APPROVAL_OK')
 ''')
 

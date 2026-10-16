@@ -17,7 +17,7 @@ from hermes_tenuo.policy import (
     'version: 1\ncapabilities: *caps',
     '!!python/object/apply:os.system [echo unsafe]',
     'version: true\ncapabilities: {read_file: {}}',
-    'version: 2\ncapabilities: {read_file: {}}',
+    'version: 3\ncapabilities: {read_file: {}}',
     'version: 1\nissuer_key: /secret\ncapabilities: {read_file: {}}',
     'version: 1\ncapabilities: {}',
     'version: 1\nttl: 0m\ncapabilities: {read_file: {}}',

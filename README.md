@@ -490,7 +490,7 @@ Unknown fields, duplicate keys, aliases, anchors, unsafe YAML tags, unsupported
 versions, empty capabilities, invalid durations, and invalid bounds are rejected.
 Range bounds must be finite and within ±9,007,199,254,740,991.
 
-The editor schema is [policy.schema.json](hermes_tenuo/schemas/policy.schema.json)
+The editor schema for versions 1 and 2 is [policy.schema.json](hermes_tenuo/schemas/policy.schema.json)
 and ships in the Python package. `policy validate` is authoritative, including
 cross-field checks such as minimum not exceeding maximum.
 
@@ -734,35 +734,65 @@ into a warrant; it cannot expand that warrant. Everything below runs locally,
 without an account, approval server, or Tenuo Cloud.
 
 An approver has their own key, separate from the issuer and Hermes holder keys.
-Use the existing key generator on the approver's machine:
+Generate it on the approver's machine and exchange only the public key:
 
 ```sh
-hermes-tenuo keygen --private-key alice.key --public-key alice.pub
-hermes-tenuo approver register alice --public-key alice.pub
-hermes-tenuo approver show alice
+hermes-tenuo keygen --private-key operator.key --public-key operator.pub
 ```
 
-Registration stores only a public key and a readable name under
-`~/.config/hermes-tenuo/approvers/` (`--identities-dir` overrides this). It refuses
-replacement. Exchange the public key and independently compare the printed full
-SHA-256 fingerprint. The issuer registers that public key too, then can mint:
+Use a version 2 policy to declare scope and approval gates:
+
+```yaml
+version: 2
+name: service-maintenance
+ttl: 20m
+capabilities:
+  get_service_status:
+    service: {exact: example}
+  restart_service:
+    service: {exact: example}
+approvals:
+  keys:
+    - ./keys/operator.pub
+  gates:
+    restart_service:
+      always: true
+```
+
+Any one signature from a listed key satisfies local policy approval. There is no
+`threshold` setting. Public-key paths resolve relative to the policy file, with
+no environment or home interpolation. `always: true` gates every otherwise
+permitted call to that tool. A gate without keys, an ungranted tool, unknown
+fields, duplicate keys, or unsupported conditional syntax is a validation error.
+Version 1 scope-only policies remain supported.
 
 ```sh
-hermes-tenuo approver register alice --public-key alice.pub
-hermes-tenuo mint --issuer-key issuer.key --holder-public-key holder.pub \
-  --allow 'restart_service:service=example' --require-approval restart_service \
-  --approver alice --ttl 20m --session-id example-session --out restart.warrant
+hermes-tenuo policy validate maintenance.yaml
+hermes-tenuo policy show maintenance.yaml  # includes resolved key fingerprints
+hermes-tenuo mint --policy maintenance.yaml --issuer-key issuer.key \
+  --holder-public-key holder.pub --session-id example-session --out restart.warrant
 hermes-tenuo attach restart.warrant --session example-session
 ```
 
-`--require-approval TOOL` gates every call to that granted tool. Repeat
-`--approver NAME` and set `--min-approvals 2` for two distinct signers. The signed
-public keys determine authority; names are local labels, not a global identity
-service. Registering a name never grants approval authority. For rotation,
-register a new identity and explicitly issue a new warrant. CLI gate flags work
-with separate issuance, including `--policy` scope templates; gate configuration
-is not yet part of the version 1 policy/request format. Renewal still rejects
-gated warrants rather than silently dropping their restrictions.
+Compare public-key fingerprints independently before trusting them. Minting
+embeds the actual public keys and gates in the signed warrant; editing the YAML
+or key files later does not change existing authority. Gated policies require
+separate issuance; legacy convenience minting never silently drops their gates.
+For ad hoc issuance, use `--require-approval TOOL --approver-public-key PATH`
+instead of policy approvals. Combining policy approvals with CLI approval
+settings is rejected.
+
+`request create --policy maintenance.yaml` also preserves approval gates. It
+snapshots public key contents into the portable authority request, so the issuer
+reviews actual keys and never follows key-file paths supplied by a request.
+Renewal still rejects gated warrants rather than dropping their restrictions;
+explicitly issue a new warrant from the policy.
+
+No identity registry is required. Existing `approver register NAME --public-key
+PATH` and `--identity NAME` options remain optional conveniences for matching a
+key to a local label. Names are unverified annotations; the cryptographic identity
+is the key fingerprint. This is not a directory or certificate service. See
+[the policy format and integration boundaries](docs/policy-format.md).
 
 Enable the local file workflow in the Hermes profile:
 
@@ -792,12 +822,12 @@ public key, review, and sign:
 
 ```sh
 hermes-tenuo approvals show restart.operation.json --trusted-root issuer.pub
-hermes-tenuo approvals sign restart.operation.json --identity alice --key alice.key \
-  --trusted-root issuer.pub --out alice.response.json
+hermes-tenuo approvals sign restart.operation.json --key operator.key \
+  --trusted-root issuer.pub --out operator.response.json
 ```
 
 The CLI verifies the warrant signature, issuer, expiry, gate, recipient holder,
-and request hash. It displays the exact arguments, fingerprints, threshold and
+and request hash. It displays the exact arguments, fingerprints and
 duration before asking for confirmation. `--yes` explicitly opts into
 noninteractive signing. No paths supplied by a request select credentials or
 output destinations. Only the reviewed in-memory snapshot is signed.
@@ -805,14 +835,14 @@ output destinations. Only the reviewed in-memory snapshot is signed.
 The recipient sends **only the response file** back. On the operator's machine:
 
 ```sh
-hermes-tenuo approvals import restart.operation.json --response alice.response.json \
+hermes-tenuo approvals import restart.operation.json --response operator.response.json \
   --trusted-root issuer.pub
 ```
 
 Import defaults to configured `operation_approvals_dir`; `--directory PATH` selects
-an explicit store. Each response is verified before publication. Partial m-of-n
-responses can be imported separately; repeated imports from one key never count
-as multiple people. Ask Hermes to retry. The next tool call loads signatures and
+an explicit store. Each response is verified before publication. Runtime also respects the signed
+requirements on externally minted warrants; it never relaxes them to the local
+policy default. Ask Hermes to retry. The next tool call loads signatures and
 Tenuo verifies them before execution; **no gateway restart is needed**. Import is
 publication, not confirmation of execution. Audit records include the verified
 approver fingerprints and signed identity labels alongside the ALLOW decision.

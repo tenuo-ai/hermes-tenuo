@@ -43,8 +43,8 @@ from typing import Any
 
 def cmd_mint(args: argparse.Namespace) -> int:
     """Mint a warrant and print config to stdout."""
-    if (any(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out", "session_id", "require_approval", "approver"))
-            or getattr(args, 'min_approvals', 1) != 1):
+    if any(getattr(args, field, None) for field in
+           ("issuer_key", "holder_public_key", "out", "session_id", "require_approval", "approver", "approver_public_key")):
         return _mint_separate(args)
     return _mint_local(args)
 
@@ -99,21 +99,29 @@ def _mint_separate(args: argparse.Namespace) -> int:
         print("error: --task cannot be combined with separate issuance", file=sys.stderr)
         return 1
     try:
-        parsed, ttl = _parse_mint_scope(args)
+        parsed, ttl, policy = _parse_mint_scope(args)
         capabilities = {}
         for tool, constraints, _ in parsed:
             if tool in capabilities:
                 raise ValueError(f"duplicate tool: {tool}")
             capabilities[tool] = constraints
+        from hermes_tenuo.policy import resolve_policy_approvals, approval_mint_kwargs
         from hermes_tenuo.operation_approvals import load_identity
         approvers = [load_identity(name, getattr(args, 'identities_dir', None))
                      for name in (getattr(args, 'approver', None) or [])]
+        approvers.extend(read_public_key(path) for path in (getattr(args, 'approver_public_key', None) or []))
+        snapshot = resolve_policy_approvals(policy, args.policy) if policy else None
+        if snapshot:
+            if approvers or getattr(args, 'require_approval', None):
+                raise ValueError('policy approvals cannot be combined with CLI approval settings')
+            approval_options = approval_mint_kwargs(snapshot)
+        else:
+            approval_options = {'approval_gates': getattr(args, 'require_approval', None), 'approvers': approvers}
         issuer = read_signing_key(args.issuer_key)
         holder = read_public_key(args.holder_public_key)
         warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(ttl),
                                   getattr(args, "session_id", None),
-                                  approval_gates=getattr(args, 'require_approval', None), approvers=approvers,
-                                  min_approvals=getattr(args, 'min_approvals', 1))
+                                  **approval_options)
         write_private_file(args.out, warrant.to_base64())
     except Exception as exc:
         print(f"error: issuance failed: {exc}", file=sys.stderr)
@@ -214,7 +222,7 @@ def _parse_mint_scope(args):
             raise ValueError("at least one --allow TOOL or --policy FILE is required")
         parsed = [parse_allow(spec) for spec in args.allow]
     ttl = args.ttl or (policy or {}).get("ttl", "24h")
-    return parsed, ttl
+    return parsed, ttl, policy
 
 
 def _mint_local(args: argparse.Namespace) -> int:
@@ -232,7 +240,9 @@ def _mint_local(args: argparse.Namespace) -> int:
     from tenuo import SigningKey, Warrant
 
     try:
-        parsed, ttl = _parse_mint_scope(args)
+        parsed, ttl, policy = _parse_mint_scope(args)
+        if policy and 'approvals' in policy:
+            raise ValueError('gated policies require separate issuance: --issuer-key, --holder-public-key and --out')
     except (ValueError, TypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -744,7 +754,7 @@ def main() -> None:
     mint_p.add_argument("--ttl", default=None, metavar="DURATION",
                         help="Warrant TTL, e.g. 30m, 1h, 7d (default: 24h)")
     scope = mint_p.add_mutually_exclusive_group()
-    scope.add_argument("--policy", metavar="FILE", help="Load a version 1 YAML scope policy")
+    scope.add_argument("--policy", metavar="FILE", help="Load a versioned YAML scope policy")
     scope.add_argument("--allow", action="append", metavar="TOOL[:ARG=VALUE,...]",
                         help="Allow a tool, optionally constraining its arguments (repeatable). "
                              "Examples: --allow web_search  --allow read_file:path=/data  "
@@ -764,7 +774,7 @@ def main() -> None:
     mint_p.add_argument('--require-approval', action='append', metavar='TOOL', help='Gate every call to this granted tool (repeatable)')
     mint_p.add_argument('--approver', action='append', metavar='NAME', help='Registered approver identity (repeatable)')
     mint_p.add_argument('--identities-dir', help='Local public approver identity directory')
-    mint_p.add_argument('--min-approvals', type=int, default=1, help='Required distinct approvers (default: 1)')
+    mint_p.add_argument('--approver-public-key', action='append', metavar='PATH', help='Authorized approver public key file (repeatable)')
 
     from hermes_tenuo.operation_approvals import register_commands as register_approval_commands
     register_approval_commands(subparsers)
