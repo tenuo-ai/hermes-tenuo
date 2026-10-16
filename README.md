@@ -326,6 +326,8 @@ variable equivalent.
 |---|---|---|
 | `warrant` | `TENUO_WARRANT` | Base64 warrant, or a path to a file containing one. Required for enforcement. |
 | `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Required for enforcement: without it every call is blocked (logged instead under `on_denial: log`). Warrants and delegation chains signed by anything else are rejected. |
+| `signing_key_file` | | Base64 holder private key file; alternative to environment configuration. Relative paths resolve under the profile home. |
+| `trusted_root_file` | | Base64 issuer public key file; alternative to inline/environment trust configuration. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
 | `on_denial` | | `block` (default) or `log`. |
@@ -426,10 +428,9 @@ these commands. Explicit issuance completely ignores `TENUO_SIGNING_KEY`.
 
 Give the agent `reports.warrant` and the trusted `issuer.pub`. Configure
 `warrant: /absolute/path/reports.warrant` and
-`trusted_root` to the base64 contents of `issuer.pub` in the plugin entry
-(the trusted-root setting does not read a file path). Load the holder
-private file into the agent's `TENUO_SIGNING_KEY` environment variable using your
-secret manager. Do not give the agent `issuer.key`.
+`trusted_root_file: /absolute/path/issuer.pub` in the plugin entry. Set
+`signing_key_file: /absolute/path/holder.key` for the agent's holder identity,
+removing the old `signing_key_env` entry and `TENUO_SIGNING_KEY` environment value. Do not give the agent `issuer.key`.
 
 Optional `--session-id ID` embeds a session binding in the signed warrant. It
 neither discovers a running session nor attaches the warrant to one. Ordinary
@@ -688,3 +689,39 @@ This atomically replaces only the previous grant's session membership, preservin
 other attached warrants. The running plugin verifies the new grant before the
 next protected call. Use `sessions --session example-session` to inspect published
 IDs; old copies elsewhere remain subject to their original expiry.
+
+
+### Load runtime keys from files
+
+The plugin can read the holder private key and trusted issuer public key from
+separate base64 text files. Keep the issuer **private** key outside the agent's
+accessible environment. Only its public key belongs in this configuration:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      warrant: /path/to/agent.warrant
+      signing_key_file: tenuo/holder.key
+      trusted_root_file: tenuo/issuer.pub
+```
+
+These are explicit file settings, not inline key material. Relative paths resolve
+under the active Hermes profile home (`HERMES_HOME`); absolute paths and `~` paths
+also work. Each file must contain exactly one base64-encoded key, optionally with
+a trailing newline. Keep the holder private file at permission `0600`; mount key
+files read-only when using a container. Key values are never logged by file loading.
+Files are bounded to 64 KiB and read at guard construction; restart Hermes after
+rotating these identity files.
+
+Choose one source for each key. `signing_key_file` conflicts with an explicit
+`signing_key_env` or a defined `TENUO_SIGNING_KEY` secret. `trusted_root_file`
+conflicts with `trusted_root` or a defined `TENUO_TRUSTED_ROOT` secret. Remove the
+old source when migrating. Missing, invalid, or conflicting configured files
+block enforcement initialization, including when no warrant is configured; they
+never fall back to an environment key. Existing environment and inline-public-key
+configuration continue working when the file settings are absent.
+
+Run `hermes-tenuo status` to inspect configured sources and `hermes-tenuo doctor`
+to validate loading and the holder/warrant match. These paths are operator
+configuration, not agent-selected tool arguments.

@@ -35,6 +35,14 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         resolve_warrant_text,
     )
 
+    # A configured file is intentional enforcement configuration. Validate it
+    # even before a warrant is present; a bad file must never become passthrough.
+    from hermes_tenuo._config import _get_plugin_entry
+    entry = _get_plugin_entry(ctx)
+    for setting, loader in (("signing_key_file", get_signing_key), ("trusted_root_file", get_trusted_roots)):
+        if setting in entry and loader(ctx) is None:
+            raise WarrantLoadError(f"{setting} is invalid, unreadable, or conflicts with another key source")
+
     from hermes_tenuo._config import get_session_warrants_dir
     try:
         session_directory = get_session_warrants_dir(ctx)

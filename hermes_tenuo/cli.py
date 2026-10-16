@@ -340,6 +340,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     ]
     all_required = True
     for label, cfg_val, env_val, cfg_key, env_name in rows:
+        file_key = {"Signing key": "signing_key_file", "Trusted root": "trusted_root_file"}.get(label)
+        if file_key and file_key in entry:
+            print(f"  ✓  {label:14} set  (config: {file_key}, file; run doctor to validate)")
+            continue
         if cfg_val:
             # Never echo the value: a warrant or root is credential material. Say only
             # whether the config points at a file or carries the value inline.
@@ -443,8 +447,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 4. Configured? Same resolution the plugin uses (kanban task first).
     from hermes_tenuo._config import (
-        _b64_to_bytes,
-        _env_secret,
         get_child_warrant_raw,
         load_warrant,
         resolve_warrant_text,
@@ -519,35 +521,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             note("could not determine warrant expiry")
 
         # 6. Signing key + holder match
-        key_env = config_entry.get("signing_key_env", "TENUO_SIGNING_KEY")
-        signing_raw = _env_secret(key_env) or _env_secret("TENUO_SIGNING_KEY")
-        if signing_raw:
-            try:
-                from tenuo_core import SigningKey
-                key = SigningKey.from_bytes(_b64_to_bytes(signing_raw))
-                holder = _warrant_holder(warrant)
-                if holder is None:
-                    note("could not read the warrant holder from this tenuo build — holder match not checked")
-                elif key.public_key.to_bytes() == holder.to_bytes():
-                    check(True, "signing key matches warrant holder")
-                else:
-                    check(
-                        False,
-                        "signing key does not match warrant holder",
-                        "export the signing key that was registered with the warrant",
-                    )
-            except Exception as exc:
-                check(False, f"signing key could not be loaded: {exc}")
+        from hermes_tenuo._config import get_signing_key, get_trusted_roots
+        key = get_signing_key(None)
+        if key is not None:
+            holder = _warrant_holder(warrant)
+            if holder is None:
+                note("could not read the warrant holder from this tenuo build — holder match not checked")
+            elif key.public_key.to_bytes() == holder.to_bytes():
+                check(True, "signing key matches warrant holder")
+            else:
+                check(False, "signing key does not match warrant holder",
+                      "configure the holder key registered with the warrant")
         else:
-            check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
+            check(False, "signing key not set or invalid", "set signing_key_file or TENUO_SIGNING_KEY; use one source")
 
         # 7. Trusted root (required for enforcement)
-        trusted = config_entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
-        check(
-            bool(trusted),
-            "trusted_root set",
-            "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
-        )
+        check(bool(get_trusted_roots(None)), "trusted_root set and loadable",
+              "set trusted_root_file, trusted_root, or TENUO_TRUSTED_ROOT; use one source")
     # 8. Enforcement path
     print()
     try:
