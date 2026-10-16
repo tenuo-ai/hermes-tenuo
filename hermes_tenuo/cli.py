@@ -308,6 +308,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Config file:  {cfg_path} ({'found, ' + via if cfg_path.is_file() else 'not found'})")
     print()
 
+    from hermes_tenuo.session_diagnostics import report_dynamic_config
+    dynamic = report_dynamic_config()
+    if dynamic is not None:
+        return 0 if dynamic else 1
+
     signing_env = entry.get("signing_key_env", "TENUO_SIGNING_KEY")
     rows = [
         ("Warrant", entry.get("warrant"), _env_secret("TENUO_WARRANT"), "warrant", "TENUO_WARRANT"),
@@ -408,6 +413,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             note("plugins.entries.hermes-tenuo empty (falling back to env vars)")
     except Exception as exc:
         note(f"could not read Hermes config ({exc})")
+
+    from hermes_tenuo.session_diagnostics import report_dynamic_config
+    dynamic = report_dynamic_config()
+    if dynamic is not None:
+        check(dynamic, "dynamic session identity and trust configured",
+              "configure a holder signing key and explicit trusted issuer")
+        note("Configuration checks do not prove the running Hermes process loaded the plugin.")
+        return 0 if ok else 1
 
     # 4. Configured? Same resolution the plugin uses (kanban task first).
     from hermes_tenuo._config import (
@@ -695,6 +708,17 @@ def main() -> None:
     keygen_p.add_argument("--public-key", required=True, metavar="PATH")
 
     # mint
+    for name in ("attach", "detach", "sessions", "clear-session"):
+        session_p = subparsers.add_parser(name, help=f"{name.title()} published session warrants")
+        session_p.add_argument("--session", required=True)
+        session_p.add_argument("--directory", help="Operator-published session directory; defaults to plugin config")
+        if name == "attach":
+            session_p.add_argument("warrant", help="Encoded warrant file")
+            session_p.add_argument("--replace", help="Atomically replace this attached warrant ID")
+            session_p.add_argument("--expected-id", help="Require the exact previously reviewed warrant ID")
+        elif name == "detach":
+            session_p.add_argument("warrant_id")
+
     mint_p = subparsers.add_parser("mint", help="Mint a warrant and print config")
     mint_p.add_argument("--ttl", default=None, metavar="DURATION",
                         help="Warrant TTL, e.g. 30m, 1h, 7d (default: 24h)")
@@ -743,6 +767,29 @@ def main() -> None:
 
     if args.command == "keygen":
         sys.exit(cmd_keygen(args))
+    elif args.command in ("attach", "detach", "sessions", "clear-session"):
+        from hermes_tenuo._config import get_session_warrants_dir
+        from hermes_tenuo.session_store import attach_warrant, clear_session, detach_warrant, session_status
+        import json
+        try:
+            directory = args.directory or get_session_warrants_dir(None)
+            if directory is None:
+                raise ValueError("set --directory or session_warrants_dir in plugin config")
+            if args.command == "attach":
+                identifier = attach_warrant(args.warrant, args.session, directory, replace_id=args.replace, expected_id=args.expected_id)
+                print(f"Published {identifier}; runtime verifies before use (not an activation acknowledgement)")
+            elif args.command == "clear-session":
+                clear_session(args.session, directory)
+                print("Cleared all warrants from this session; other copies remain valid")
+            elif args.command == "detach":
+                detach_warrant(args.session, args.warrant_id, directory)
+                print("Detached from this session; this does not revoke other copies")
+            else:
+                print(json.dumps({"session": args.session, "published": session_status(args.session, directory)}))
+        except (ValueError, OSError, TimeoutError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
     elif args.command == "mint":
         sys.exit(cmd_mint(args))
     elif args.command == "policy":

@@ -242,3 +242,17 @@ def load_warrant(raw: Optional[str]):
     except Exception as exc:
         logger.warning("hermes-tenuo: could not load warrant: %s", exc)
         return None
+
+
+def get_session_warrants_dir(ctx: Any):
+    """Opt in to persistent, externally published session authority."""
+    raw = _get_plugin_entry(ctx).get("session_warrants_dir")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("session_warrants_dir must be a nonempty path")
+    from hermes_tenuo._home import hermes_home
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = hermes_home() / path
+    return path.resolve()

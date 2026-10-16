@@ -492,3 +492,95 @@ Range bounds must be finite and within ±9,007,199,254,740,991.
 The editor schema is [policy.schema.json](hermes_tenuo/schemas/policy.schema.json)
 and ships in the Python package. `policy validate` is authoritative, including
 cross-field checks such as minimum not exceeding maximum.
+
+### Dynamic session warrants (opt in)
+
+Static `warrant` configuration remains the default. To publish multiple grants to
+individual conversations without restarting Hermes, configure:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      session_warrants_dir: /path/to/operator-published/sessions
+      signing_key_env: TENUO_SIGNING_KEY
+      trusted_root: <issuer-public-key-base64>
+```
+
+The operator writes this directory; the agent should have **read-only** access.
+Keep the issuer private key outside the agent's accessible environment. A local
+file protocol also works when the operator and Hermes use the same machine.
+Directory isolation is still important: possession of a warrant does not itself
+prove that an operator intended to attach it to a particular conversation.
+
+```sh
+hermes-tenuo attach diagnostic.warrant --session example-session
+hermes-tenuo sessions --session example-session
+hermes-tenuo status  # dynamic configuration health, not runtime activation
+hermes-tenuo doctor
+hermes-tenuo detach WARRANT_ID --session example-session
+# Replace one grant atomically, retaining other attached warrants:
+hermes-tenuo attach renewed.warrant --session example-session --replace OLD_WARRANT_ID
+```
+
+These commands use the configured directory, or an explicit `--directory PATH`.
+Session identifiers are opaque: the storage layer hashes them rather than using
+them as paths. A request/approval integration can supply the originating session
+without requiring users to discover its identifier manually.
+
+Attachments survive subsequent turns and gateway restarts. The next protected
+call reloads a bounded atomic membership snapshot, then checks issuer trust,
+holder proof, signature, expiry, and arguments using Tenuo enforcement. One
+attached warrant must authorize the **entire** call; constraints from separate
+grants are never combined. A corrupt or expired grant cannot hide another valid
+grant. Signed session restrictions, when present, must match the session.
+
+An empty directory, missing session, unreadable/invalid manifest, or absence of
+any authorizing grant blocks execution. Session mode always enforces denials;
+it does not use `on_denial: log`, inherit the static warrant, or automatically
+pass authority to child sessions. Each child needs explicit attachments.
+Legacy in-memory session APIs and static deployment behavior are unchanged.
+
+`attach` reports **published**, not confirmed loaded: runtime verification occurs
+before the next call. `sessions` shows published IDs and expiration, not verified
+activation. The local audit decision identifies the selected warrant on ALLOW.
+Detach prevents later calls in that session; it cannot cancel an operation
+already authorized or revoke other copies of the signed warrant. The directory
+is not a sandbox, and these changes do not add new enforcement coverage to
+Hermes execution paths that bypass its existing tool hooks.
+
+
+Replacement requires a valid, unexpired candidate with the same holder and issuer
+as the attached grant. Failed validation leaves session membership unchanged.
+Identity/trust rotation is a separate explicit operation; `--replace` does not
+silently rotate keys. Runtime verification still checks the configured trust and
+tool constraints before each call.
+
+
+For recovery of an already-issued artifact, `attach --expected-id WARRANT_ID`
+rejects a substituted file before publication. This does not mint a new warrant.
+
+Relative `session_warrants_dir` paths resolve under the active Hermes profile home
+(`HERMES_HOME` outside Hermes), independent of the working directory. Explicit CLI
+`--directory` paths use the shell's working directory.
+
+`sessions` reports malformed individual grants as `invalid` with their SHA-256
+fingerprint; unrelated valid grants remain inspectable and removable. Attachment
+and replacement retain malformed entries for diagnosis. To remove all authority
+from a session, including recovery from an invalid JSON manifest, run:
+
+```sh
+hermes-tenuo clear-session --session example-session
+```
+
+This publishes an empty manifest without decoding the old contents. Symlinks are
+rejected, and other sessions remain unchanged. Detachment/clearing affects future
+checks, not already authorized operations or copies attached elsewhere.
+
+New directories and manifests default to permissions `0700` and `0600`. For a
+separate agent OS user, provision a shared read group, make the directory `0750`
+with the appropriate group, and set each published manifest to `0640` before
+agent use. Atomic updates preserve existing ownership and read permissions;
+failed ownership preservation leaves the previous manifest intact. Group- or
+world-writable manifests are rejected. Keep the directory operator-writable only
+and mount it read-only into the agent. These commands require Unix file locking.

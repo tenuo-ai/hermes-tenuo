@@ -35,6 +35,22 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         resolve_warrant_text,
     )
 
+    from hermes_tenuo._config import get_session_warrants_dir
+    try:
+        session_directory = get_session_warrants_dir(ctx)
+    except ValueError as exc:
+        raise WarrantLoadError(str(exc)) from exc
+    if session_directory is not None:
+        from hermes_tenuo.session_guard import SessionGuard
+        from hermes_tenuo.audit import LocalAuditLog
+        audit_path = get_audit_log_path(ctx)
+        return PluginGuard(SessionGuard(
+            directory=session_directory,
+            signing_key=get_signing_key(ctx),
+            trusted_roots=get_trusted_roots(ctx),
+            audit_callback=LocalAuditLog(audit_path) if audit_path else None,
+        ))
+
     try:
         warrant_raw, source = resolve_warrant_text(ctx)
     except FileNotFoundError as exc:
