@@ -187,6 +187,24 @@ def test_generated_command_routes_to_originating_store(tmp_path, monkeypatch):
     assert '--directory' in command
     assert command[command.index('--directory') + 1] == str(destination)
 
+    # Approve from a terminal whose default profile points at a different store.
+    from hermes_tenuo.cli import main
+    from hermes_tenuo.session_store import read_session
+    issuer = SigningKey.generate()
+    key = tmp_path / 'operator.key'
+    key.write_text(base64.b64encode(issuer.secret_key_bytes()).decode())
+    command[command.index('--issuer-key') + 1] = str(key)
+    command.append('--yes')
+    wrong_store = tmp_path / 'other-profile'
+    monkeypatch.setattr('hermes_tenuo._config._get_plugin_entry', lambda _: {
+        'session_warrants_dir': str(wrong_store)})
+    monkeypatch.setattr('sys.argv', command)
+    with pytest.raises(SystemExit) as approved:
+        main()
+    assert approved.value.code == 0
+    assert len(read_session('session-a', destination)) == 1
+    assert not wrong_store.exists()
+
 
 def test_unwritable_attachment_store_fails_before_loading_issuer(tmp_path, monkeypatch):
     import hermes_tenuo.authority_requests as requests
