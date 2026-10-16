@@ -436,3 +436,59 @@ neither discovers a running session nor attaches the warrant to one. Ordinary
 static configuration still needs a restart after replacement. The original
 `mint --allow ...` quickstart remains available; it combines provisioning and
 issuance and prints a holder private key, so use it only in a trusted terminal.
+
+### Declarative scope policies
+
+Use a policy when a scope is worth reusing; ad hoc `mint --allow ...` remains
+supported. A policy is a template, not approval or a signed warrant. It contains
+no key locations, credentials, automatic renewal, or standing issuance authority.
+
+Save `report-reader.yaml`:
+
+```yaml
+version: 1
+name: report-reader
+ttl: 20m
+capabilities:
+  read_file:
+    path: {subpath: /data/reports}
+  web_search:
+    query: {pattern: 'example*'}
+```
+
+```sh
+hermes-tenuo policy validate report-reader.yaml
+hermes-tenuo policy show report-reader.yaml
+hermes-tenuo mint --policy report-reader.yaml \
+  --issuer-key issuer.key --holder-public-key holder.pub --out reports.warrant
+# Explicit --ttl overrides the policy duration:
+hermes-tenuo mint --policy report-reader.yaml --ttl 10m \
+  --issuer-key issuer.key --holder-public-key holder.pub --out shorter.warrant
+```
+
+`mint --policy` and `--allow` are mutually exclusive. Without a policy duration
+or explicit `--ttl`, mint uses 24 hours. `show` prints the validated typed JSON
+snapshot; validation does not issue or install authority.
+
+Every argument constraint has exactly one explicit type:
+
+| Form | Meaning |
+|---|---|
+| `{exact: 'report.txt'}` | Exact string; quote numeric-looking strings |
+| `{one_of: ['status', 'diff']}` | One of a nonempty list of strings |
+| `{range: {min: 0, max: 100}}` | Inclusive numeric bounds; numeric strings do not match |
+| `{pattern: 'example*'}` | Glob pattern |
+| `{subpath: /data/reports}` | Traversal-safe absolute path prefix |
+| `{wildcard: true}` | Explicitly unconstrained argument |
+
+An empty tool mapping (`web_search: {}`) allows any arguments for that tool.
+**Omitted arguments are unconstrained**, not forbidden. Omitted tools are not
+granted. Required constrained arguments must be present at authorization time.
+There is no environment expansion, home expansion, or template evaluation.
+Unknown fields, duplicate keys, aliases, anchors, unsafe YAML tags, unsupported
+versions, empty capabilities, invalid durations, and invalid bounds are rejected.
+Range bounds must be finite and within ±9,007,199,254,740,991.
+
+The editor schema is [policy.schema.json](hermes_tenuo/schemas/policy.schema.json)
+and ships in the Python package. `policy validate` is authoritative, including
+cross-field checks such as minimum not exceeding maximum.

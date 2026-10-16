@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "tenuo>=0.3.2,<0.4",
+    "PyYAML>=6.0.2,<7",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +52,7 @@ where = ["."]
 include = ["hermes_tenuo*"]
 
 [tool.setuptools.package-data]
-hermes_tenuo = ["skills/*/SKILL.md"]
+hermes_tenuo = ["skills/*/SKILL.md", "schemas/*.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

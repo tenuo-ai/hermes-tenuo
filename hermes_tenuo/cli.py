@@ -79,15 +79,15 @@ def _mint_separate(args: argparse.Namespace) -> int:
         print("error: --task cannot be combined with separate issuance", file=sys.stderr)
         return 1
     try:
+        parsed, ttl = _parse_mint_scope(args)
         capabilities = {}
-        for spec in args.allow or []:
-            tool, constraints, _ = parse_allow(spec)
+        for tool, constraints, _ in parsed:
             if tool in capabilities:
                 raise ValueError(f"duplicate tool: {tool}")
             capabilities[tool] = constraints
         issuer = read_signing_key(args.issuer_key)
         holder = read_public_key(args.holder_public_key)
-        warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(args.ttl),
+        warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(ttl),
                                   getattr(args, "session_id", None))
         write_private_file(args.out, warrant.to_base64())
     except Exception as exc:
@@ -162,12 +162,34 @@ def parse_allow(spec: str) -> tuple[str, dict, dict]:
         arg, value = arg.strip(), value.strip()
         if not eq or not arg or not value:
             raise ValueError(f"--allow '{spec}': expected arg=value, got '{item}'")
+        if arg in constraints:
+            raise ValueError(f"--allow '{spec}': duplicate argument: {arg}")
         try:
             constraints[arg] = _parse_constraint_value(value)
         except ValueError as exc:
             raise ValueError(f"--allow '{spec}': {arg}: {exc}") from exc
         display[arg] = value
     return tool, constraints, display
+
+
+def _parse_mint_scope(args):
+    """Resolve either explicit policy scope or ad hoc scope, with TTL precedence."""
+    policy = None
+    parsed = []
+    if getattr(args, "policy", None):
+        from hermes_tenuo.policy import load_policy, compile_capabilities
+        if args.allow:
+            raise ValueError("--policy and --allow cannot be combined")
+        policy = load_policy(args.policy)
+        compiled = compile_capabilities(policy["capabilities"])
+        parsed = [(tool, constraints, policy["capabilities"][tool])
+                  for tool, constraints in compiled.items()]
+    else:
+        if not args.allow:
+            raise ValueError("at least one --allow TOOL or --policy FILE is required")
+        parsed = [parse_allow(spec) for spec in args.allow]
+    ttl = args.ttl or (policy or {}).get("ttl", "24h")
+    return parsed, ttl
 
 
 def _mint_local(args: argparse.Namespace) -> int:
@@ -184,21 +206,11 @@ def _mint_local(args: argparse.Namespace) -> int:
         return 1
     from tenuo import SigningKey, Warrant
 
-    if not args.allow:
-        print(
-            "error: at least one --allow TOOL is required, e.g. "
-            "--allow web_search --allow read_file:path=/data",
-            file=sys.stderr,
-        )
+    try:
+        parsed, ttl = _parse_mint_scope(args)
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-
-    parsed = []
-    for spec in args.allow:
-        try:
-            parsed.append(parse_allow(spec))
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
 
     # Generate keys. Reuse TENUO_SIGNING_KEY as the holder when set so a
     # kanban worker inherits a key that matches the file mint --task writes.
@@ -220,7 +232,7 @@ def _mint_local(args: argparse.Namespace) -> int:
         builder = builder.capability(tool, **constraints)
 
     try:
-        ttl_seconds = _parse_ttl(args.ttl)
+        ttl_seconds = _parse_ttl(ttl)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -257,7 +269,7 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
         print()
         print("# ── Warrant details ─────────────────────────────────────────────")
-        print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
+        print(f"# TTL:   {ttl_seconds}s ({ttl})")
         print("# Tools:")
         for tool, _, display in parsed:
             if display:
@@ -684,9 +696,11 @@ def main() -> None:
 
     # mint
     mint_p = subparsers.add_parser("mint", help="Mint a warrant and print config")
-    mint_p.add_argument("--ttl", default="24h", metavar="DURATION",
+    mint_p.add_argument("--ttl", default=None, metavar="DURATION",
                         help="Warrant TTL, e.g. 30m, 1h, 7d (default: 24h)")
-    mint_p.add_argument("--allow", action="append", metavar="TOOL[:ARG=VALUE,...]",
+    scope = mint_p.add_mutually_exclusive_group()
+    scope.add_argument("--policy", metavar="FILE", help="Load a version 1 YAML scope policy")
+    scope.add_argument("--allow", action="append", metavar="TOOL[:ARG=VALUE,...]",
                         help="Allow a tool, optionally constraining its arguments (repeatable). "
                              "Examples: --allow web_search  --allow read_file:path=/data  "
                              "--allow git:action=status|diff. Values: '*' any, 'a|b' choice, "
@@ -701,6 +715,11 @@ def main() -> None:
     mint_p.add_argument("--holder-public-key", metavar="PATH", help="Recipient public key file (base64)")
     mint_p.add_argument("--out", metavar="PATH", help="Write warrant to a new 0600 file")
     mint_p.add_argument("--session-id", metavar="ID", help="Bind separate issuance to a session")
+
+    policy_p = subparsers.add_parser("policy", help="Validate or inspect declarative scope")
+    policy_sub = policy_p.add_subparsers(dest="policy_command", required=True)
+    for command in ("validate", "show"):
+        policy_sub.add_parser(command).add_argument("path", metavar="FILE")
 
     # status
     subparsers.add_parser("status", help="Show current configuration status")
@@ -726,6 +745,9 @@ def main() -> None:
         sys.exit(cmd_keygen(args))
     elif args.command == "mint":
         sys.exit(cmd_mint(args))
+    elif args.command == "policy":
+        from hermes_tenuo.policy import cmd_policy
+        sys.exit(cmd_policy(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
     elif args.command == "verify":
