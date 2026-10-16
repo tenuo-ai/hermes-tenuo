@@ -861,3 +861,87 @@ Malformed, unauthorized, expired, or mismatched responses never satisfy a gate.
 An independent valid grant can still authorize a call: a gate on one warrant is
 not a global deny on another warrant. Pending requests reuse stable filenames,
 with at most 100 per session; archive reviewed requests when that limit is reached.
+
+## Inspect warrants and revoke authority locally
+
+`warrants show` decodes an encoded warrant file or a full warrant ID found in
+published session membership:
+
+```sh
+hermes-tenuo warrants list
+hermes-tenuo warrants show WARRANT_ID
+hermes-tenuo warrants show diagnostic.warrant
+```
+
+The JSON view shows the full ID, capabilities and argument constraints, holder
+and issuer keys/fingerprints, expiry, signed session restriction, attachments,
+approval gates/keys and revocation status. Constraints use SDK representations;
+gate introspection uses SDK kinds and argument names. Opaque extension bytes are
+retained as base64 rather than interpreted by a second policy engine. Signature
+validity, root trust and revocation are separate fields. Delegated issuer trust
+requires a complete chain at runtime; a single-file inspection is not an
+activation or authorization verdict. Missing revocation information is `null`,
+with an error if a configured source is unavailable.
+
+`list` inventories published session attachments, **not every warrant ever
+issued**. Unattached warrants can be inspected by file. `--directory` selects a
+session store, `--trusted-root` selects an issuer public-key file, and
+`--revocations-dir` selects revocation data; otherwise profile configuration is
+used. Corrupt manifests are reported alongside the inventory.
+
+Revocation uses Tenuo core's native **SignedRevocationList (SRL)** CBOR artifact,
+created with its builder and verified by its authorizer. There is no Hermes SRL
+wrapper, hosted service or additional signing identity requirement. Keep the SRL
+signer's private key outside Hermes; the signer must be an explicitly trusted
+root. To enable local revocation, first publish an initial empty list:
+
+```sh
+hermes-tenuo revocations create --issuer-key issuer.key --out initial.srl
+hermes-tenuo revocations import initial.srl --trusted-root issuer.pub \
+  --directory /path/to/operator-published/revocations
+```
+
+Configure the profile (relative paths resolve under its home):
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      revocations_dir: /path/to/operator-published/revocations
+```
+
+The operator writes this directory; mount it read-only into Hermes. It contains
+immutable, versioned native SRL files. New directories/files use `0700`/`0600`;
+provision read permissions when operator and agent use different OS users.
+Missing, corrupt, untrusted or rolled-back configured data blocks tool calls.
+Static revocation mode requires `on_denial: block`; dynamic sessions always
+enforce. Keep the published history across restarts; deleting/restoring the
+operator's entire history is outside the agent's read-only boundary.
+
+Find and inspect the warrant, then sign an updated list outside Hermes:
+
+```sh
+hermes-tenuo warrants list
+hermes-tenuo warrants show WARRANT_ID
+hermes-tenuo revocations create --issuer-key issuer.key --from initial.srl \
+  --revoke WARRANT_ID --out updated.srl
+hermes-tenuo revocations show updated.srl --trusted-root issuer.pub
+hermes-tenuo revocations import updated.srl --trusted-root issuer.pub
+```
+
+`--from` retains existing revoked IDs and advances the signed version. Repeat
+`--revoke` for multiple IDs. Creating a file alone changes no runtime; import
+publishes it. The next protected call reloads it without restarting the gateway.
+A revoked warrant remains attached and visible but cannot authorize calls;
+reattaching the same artifact does not bypass the SRL. Detach still removes only
+one session's attachment. Calls already authorized cannot be cancelled by this
+check, and other verifiers must receive the updated SRL to enforce it.
+
+You can also import an SRL produced directly by Tenuo core. Import checks signer
+trust, signature and core's version/content rules before publication. A newer
+SRL is an **authoritative replacement snapshot**, so external producers must
+retain IDs they intend to keep revoked. Core may allow re-signing the same
+version with the same IDs; this immutable local publication directory accepts
+exact retries but requires a new version for changed artifact bytes. Older or
+conflicting versions cannot replace the published list. No cross-integration
+transport or shared-package refactor is introduced.

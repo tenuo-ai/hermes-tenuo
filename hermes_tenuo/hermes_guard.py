@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -118,10 +119,11 @@ class HermesGuard:
         audit_callback: Optional[AuditCallback] = None,
         approval_handler: Optional[Callable] = None,
         operation_approval_store: Optional[Any] = None,
+        revocation_store: Optional[Any] = None,
         require_session_warrant: Optional[bool] = None,
     ):
-        if operation_approval_store is not None and on_denial == 'log':
-            raise ValueError('portable operation approvals require on_denial: block')
+        if (operation_approval_store is not None or revocation_store is not None) and on_denial == 'log':
+            raise ValueError('operation approvals and revocation require on_denial: block')
         self._static_warrant = warrant
         self._static_signing_key = signing_key
         self._child_warrant = child_warrant
@@ -131,6 +133,7 @@ class HermesGuard:
         self._audit_callback = audit_callback
         self._approval_handler = approval_handler
         self._operation_approval_store = operation_approval_store
+        self._revocation_store = revocation_store
         # None = on once set_session_warrant has been used; True/False override.
         self._require_session_warrant = require_session_warrant
         self._audit_only_warned = False  # warn once when running without a warrant
@@ -633,14 +636,17 @@ class HermesGuard:
             # a configured trusted_root, enforce_tool_call fails closed.
             approval_handler = (self._operation_approval_store.handler(warrant, session_id, trusted)
                                 if self._operation_approval_store else self._approval_handler)
-            result = enforce_tool_call(
-                tool_name=tool_name,
-                tool_args=args,
-                bound_warrant=bound,
-                trusted_roots=trusted,
-                warrant_chain=chain or None,
-                approval_handler=approval_handler,
-            )
+            scope = (self._revocation_store.scope(warrant, chain, signing_key, trusted)
+                     if self._revocation_store else nullcontext())
+            with scope:
+                result = enforce_tool_call(
+                    tool_name=tool_name,
+                    tool_args=args,
+                    bound_warrant=bound,
+                    trusted_roots=trusted,
+                    warrant_chain=chain or None,
+                    approval_handler=approval_handler,
+                )
         except Exception as exc:
             from hermes_tenuo.operation_approvals import OperationApprovalPending
             if isinstance(exc, OperationApprovalPending):
@@ -648,6 +654,8 @@ class HermesGuard:
                 self._remember_decision(tool_call_id, False, reason)
                 self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
                 return {'action': 'block', 'message': reason, 'code': 'operation_approval_required'}
+            if self._revocation_store is not None:
+                self._emit_audit(tool_name, args, False, f"Authorization error: {exc}", session_id, task_id, tool_call_id)
             logger.warning("hermes-tenuo: enforcement error for %s: %s", tool_name, exc)
             # Enforcement exceptions always block — on_denial: log only applies to
             # *policy* denials from the Rust core (result.allowed=False). Internal

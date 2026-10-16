@@ -778,6 +778,10 @@ def main() -> None:
 
     from hermes_tenuo.operation_approvals import register_commands as register_approval_commands
     register_approval_commands(subparsers)
+    from hermes_tenuo.revocation import register_commands as register_revocations
+    register_revocations(subparsers)
+    from hermes_tenuo.warrant_inventory import register_commands as register_inventory
+    register_inventory(subparsers)
 
     policy_p = subparsers.add_parser("policy", help="Validate or inspect declarative scope")
     policy_sub = policy_p.add_subparsers(dest="policy_command", required=True)
@@ -810,7 +814,13 @@ def main() -> None:
     if hasattr(args, "authority_request_handler"):
         sys.exit(args.authority_request_handler(args))
 
-    if args.command in ('approver', 'approvals'):
+    if args.command == 'revocations':
+        from hermes_tenuo.revocation import cmd_revocations
+        sys.exit(cmd_revocations(args))
+    elif args.command == 'warrants':
+        from hermes_tenuo.warrant_inventory import cmd_warrants
+        sys.exit(cmd_warrants(args))
+    elif args.command in ('approver', 'approvals'):
         from hermes_tenuo.operation_approvals import cmd_approver, cmd_approvals
         sys.exit(cmd_approver(args) if args.command == 'approver' else cmd_approvals(args))
     elif args.command == "keygen":
