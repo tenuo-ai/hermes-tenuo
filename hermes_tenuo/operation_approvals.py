@@ -11,7 +11,6 @@ import shlex
 import sys
 import time
 
-from hermes_tenuo.authority_requests import _unique_object
 from hermes_tenuo.issuance import read_public_key, read_signing_key, write_private_file
 
 from tenuo.approval import ApprovalRequired
@@ -24,17 +23,13 @@ def fingerprint(public) -> str:
     return hashlib.sha256(public.to_bytes()).hexdigest()
 
 
-def _reject_constant(value):
-    raise ValueError('non-finite JSON is not supported')
-
-
 def _load(path):
     with Path(path).expanduser().open('rb') as stream:
         raw = stream.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
         raise ValueError('approval file exceeds 128 KiB')
-    return json.loads(raw, object_pairs_hook=_unique_object,
-                      parse_constant=_reject_constant)
+    from tenuo import parse_strict_json
+    return parse_strict_json(raw.decode("utf-8"))
 
 
 def _save(path, data):
@@ -249,23 +244,30 @@ def cmd_approvals(args):
         if args.approvals_command == 'show':
             print('Next: send this file to an authorized approver. They run:')
             print('hermes-tenuo approvals sign ' + shlex.quote(str(args.request)) +
-                  ' --identity NAME --key APPROVER_PRIVATE_KEY_FILE --trusted-root ISSUER_PUBLIC_KEY_FILE --out response.json')
+                  ' --key APPROVER_PRIVATE_KEY_FILE --trusted-root ISSUER_PUBLIC_KEY_FILE --out response.json')
             return 0
         if args.approvals_command == 'sign':
             from tenuo_core import ApprovalPayload, SignedApproval
             from hermes_tenuo.cli import _parse_ttl
-            public = load_identity(args.identity, args.identities_dir)
+            # Registration is optional: the signed warrant trusts keys, not labels.
+            key = None
+            identity = getattr(args, 'identity', None)
+            if identity:
+                public = load_identity(identity, args.identities_dir)
+            else:
+                key = read_signing_key(args.key)
+                public = key.public_key
             if not any(public.to_bytes() == p.to_bytes() for p in warrant.required_approvers()):
-                raise ValueError('registered identity is not an authorized approver for this warrant')
+                raise ValueError('signing key is not an authorized approver for this warrant')
             ttl = min(_parse_ttl(args.ttl), request.warrant_expires_at_unix - int(time.time()))
             if ttl < 1:
                 raise ValueError('warrant has expired')
-            print(json.dumps({'sign_as': args.identity, 'fingerprint': fingerprint(public), 'ttl_seconds': ttl}))
+            print(json.dumps({'approver_fingerprint': fingerprint(public), 'ttl_seconds': ttl}))
             print('This approval permits repeated identical calls until expiry; it is not single-use.')
             if not args.yes and input('Approve exactly this operation? [y/N] ').strip().lower() not in ('y', 'yes'):
                 print('Not approved.')
                 return 1
-            key = read_signing_key(args.key)
+            key = key or read_signing_key(args.key)
             if key.public_key.to_bytes() != public.to_bytes():
                 raise ValueError('private key does not match the registered identity')
             now = int(time.time())
@@ -273,7 +275,7 @@ def cmd_approvals(args):
             if expires <= now:
                 raise ValueError('warrant expired during review; nothing was signed')
             signed = SignedApproval.create(ApprovalPayload(
-                request_hash=request.request_hash, nonce=os.urandom(16), external_id=args.identity,
+                request_hash=request.request_hash, nonce=os.urandom(16), external_id=identity or '',
                 approved_at=now, expires_at=expires), key)
             response = {'version': 1, 'kind': 'operation-approval-response',
                         'request_hash': request.request_hash.hex(),
@@ -322,7 +324,7 @@ def register_commands(subparsers):
         parser.add_argument('request', help='Portable operation request file')
         parser.add_argument('--trusted-root', required=True, help='Independently trusted issuer public key file')
         if name == 'sign':
-            parser.add_argument('--identity', required=True)
+            parser.add_argument('--identity', help='Optional registered display identity; the warrant authorizes the key')
             parser.add_argument('--identities-dir')
             parser.add_argument('--key', required=True, help='Approver private key file; never an issuer or holder key')
             parser.add_argument('--ttl', default='5m')

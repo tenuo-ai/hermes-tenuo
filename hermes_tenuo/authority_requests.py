@@ -11,26 +11,22 @@ import sys
 import uuid
 
 from hermes_tenuo.issuance import mint_for_holder, read_public_key, read_signing_key, write_private_file
-from hermes_tenuo.policy import capabilities_from_allow, compile_capabilities, load_policy, validate_capabilities
+from hermes_tenuo.policy import (
+    capabilities_from_allow, compile_capabilities, load_policy, validate_capabilities,
+    resolve_policy_approvals, validate_approval_snapshot, approval_mint_kwargs,
+)
 
 MAX_REQUEST_BYTES = 64 * 1024
 REQUEST_TOOL = "tenuo_request_authority"
 
 
-def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate request field: {key}")
-        result[key] = value
-    return result
-
-
 def validate_request(data: dict) -> dict:
     fields = {"version", "id", "session_id", "holder_public_key", "description", "ttl", "capabilities"}
+    if isinstance(data, dict) and data.get("version") == 2:
+        fields.add("approvals")
     if not isinstance(data, dict) or set(data) != fields:
         raise ValueError("request must contain exactly: " + ", ".join(sorted(fields)))
-    if type(data["version"]) is not int or data["version"] != 1:
+    if type(data["version"]) is not int or data["version"] not in (1, 2):
         raise ValueError("unsupported request version")
     if not isinstance(data["id"], str) or str(uuid.UUID(data["id"])) != data["id"]:
         raise ValueError("request id must be a canonical UUID")
@@ -51,12 +47,18 @@ def validate_request(data: dict) -> dict:
         _parse_ttl(data["ttl"])
     except (ValueError, OverflowError) as exc:
         raise ValueError("ttl must be a finite positive duration") from exc
-    return {**data, "holder_public_key": base64.b64encode(public.to_bytes()).decode(),
-            "capabilities": validate_capabilities(data["capabilities"])}
+    result = {**data, "holder_public_key": base64.b64encode(public.to_bytes()).decode(),
+              "capabilities": validate_capabilities(data["capabilities"])}
+    if data["version"] == 2:
+        result["approvals"] = validate_approval_snapshot(data["approvals"], result["capabilities"])
+    return result
 
 
-def new_request(holder, session_id: str, capabilities: dict, ttl: str, description: str) -> dict:
-    return validate_request({"version": 1, "id": str(uuid.uuid4()), "session_id": session_id,
+def new_request(holder, session_id: str, capabilities: dict, ttl: str, description: str,
+                *, approvals: dict | None = None) -> dict:
+    return validate_request({"version": 2 if approvals is not None else 1,
+                             **({"approvals": approvals} if approvals is not None else {}),
+                             "id": str(uuid.uuid4()), "session_id": session_id,
                              "holder_public_key": base64.b64encode(holder.to_bytes()).decode(),
                              "description": description, "ttl": ttl, "capabilities": capabilities})
 
@@ -66,7 +68,8 @@ def load_request(path: str | Path) -> dict:
         raw = stream.read(MAX_REQUEST_BYTES + 1)
     if len(raw) > MAX_REQUEST_BYTES:
         raise ValueError("request exceeds 64 KiB")
-    return validate_request(json.loads(raw, object_pairs_hook=_unique_object))
+    from tenuo import parse_strict_json
+    return validate_request(parse_strict_json(raw.decode("utf-8")))
 
 
 def save_request(path: str | Path, request: dict) -> None:
@@ -80,8 +83,14 @@ def review_text(request: dict) -> str:
     # JSON escaping keeps untrusted descriptions/session labels from issuing terminal escapes.
     public = base64.b64decode(request["holder_public_key"])
     fingerprint = hashlib.sha256(public).hexdigest()[:16]
+    approval_info = ""
+    if request.get("approvals"):
+        keys = [hashlib.sha256(base64.b64decode(key)).hexdigest()
+                for key in request["approvals"]["public_keys"]]
+        approval_info = "Approval keys (SHA256): " + ", ".join(keys) + "\n"
     return ("Unsigned authority request; confirm the holder fingerprint independently.\n"
-            f"Holder fingerprint (SHA256 prefix): {fingerprint}\n" + json.dumps(request, indent=2, sort_keys=True))
+            f"Holder fingerprint (SHA256 prefix): {fingerprint}\n" + approval_info
+            + json.dumps(request, indent=2, sort_keys=True))
 
 
 def approve_request(request: dict, issuer, output: str | Path):
@@ -91,7 +100,8 @@ def approve_request(request: dict, issuer, output: str | Path):
     from hermes_tenuo.cli import _parse_ttl
     holder = PublicKey.from_bytes(base64.b64decode(request["holder_public_key"]))
     warrant = mint_for_holder(issuer, holder, compile_capabilities(request["capabilities"]),
-                              _parse_ttl(request["ttl"]), session_id=request["session_id"])
+                              _parse_ttl(request["ttl"]), session_id=request["session_id"],
+                              **approval_mint_kwargs(request.get("approvals")))
     write_private_file(output, warrant.to_base64())
     return warrant
 
@@ -100,8 +110,9 @@ def cmd_request_create(args: argparse.Namespace) -> int:
     try:
         policy = load_policy(args.policy) if args.policy else None
         capabilities = policy["capabilities"] if policy else capabilities_from_allow(args.allow or [])
+        approvals = resolve_policy_approvals(policy, args.policy) if policy else None
         request = new_request(read_public_key(args.holder_public_key), args.session,
-                              capabilities, args.ttl or (policy or {}).get("ttl", "20m"), args.description)
+                              capabilities, args.ttl or (policy or {}).get("ttl", "20m"), args.description, approvals=approvals)
         save_request(args.out, request)
         print(f"Request written: {args.out}\nReview: hermes-tenuo request show {shlex.quote(str(args.out))}")
         return 0

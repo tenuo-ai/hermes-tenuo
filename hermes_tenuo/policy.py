@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import json
 import math
 from pathlib import Path
@@ -80,15 +81,82 @@ def validate_capabilities(capabilities: Any) -> dict:
     return copy.deepcopy(capabilities)
 
 
+def _approval_shape(data, capabilities, key_field):
+    _mapping(data, "approvals")
+    if set(data) != {key_field, "gates"}:
+        raise PolicyError(f"approvals requires exactly {key_field} and gates; one authorized signature is sufficient")
+    keys = data[key_field]
+    if (not isinstance(keys, list) or not 1 <= len(keys) <= 128
+            or any(not isinstance(key, str) or not key.strip() or "\x00" in key for key in keys)):
+        raise PolicyError(f"approvals.{key_field} must contain 1-128 nonempty strings")
+    if len(set(keys)) != len(keys):
+        raise PolicyError("approval keys must be distinct")
+    _mapping(data["gates"], "approvals.gates")
+    if not data["gates"]:
+        raise PolicyError("approvals.gates must not be empty")
+    for tool, gate in data["gates"].items():
+        if tool not in capabilities:
+            raise PolicyError(f"approval gate names an ungranted tool: {tool}")
+        if not isinstance(gate, dict) or set(gate) != {"always"} or gate["always"] is not True:
+            raise PolicyError(f"approvals.gates.{tool} requires always: true")
+    return copy.deepcopy(data)
+
+
+def validate_approval_snapshot(data, capabilities):
+    """Portable requests carry public key bytes, never paths to read at approval time."""
+    from tenuo import PublicKey
+    result = _approval_shape(data, capabilities, "public_keys")
+    try:
+        keys = [PublicKey.from_bytes(base64.b64decode(key, validate=True)) for key in result["public_keys"]]
+    except Exception as exc:
+        raise PolicyError("invalid approval public key") from exc
+    encoded = [base64.b64encode(key.to_bytes()).decode() for key in keys]
+    if len(set(encoded)) != len(encoded):
+        raise PolicyError("approval keys must be distinct")
+    result["public_keys"] = encoded
+    return result
+
+
+def resolve_policy_approvals(policy, policy_path):
+    """Freeze file contents once, relative to the policy file, before review/signing."""
+    if "approvals" not in policy:
+        return None
+    from hermes_tenuo.issuance import read_public_key
+    base = Path(policy_path).expanduser().resolve().parent
+    keys = []
+    for raw in policy["approvals"]["keys"]:
+        path = Path(raw)
+        try:
+            public = read_public_key(path if path.is_absolute() else base / path)
+        except Exception as exc:
+            raise PolicyError(f"cannot load approval public key: {raw}") from exc
+        keys.append(base64.b64encode(public.to_bytes()).decode())
+    return validate_approval_snapshot({"public_keys": keys, "gates": policy["approvals"]["gates"]},
+                                      policy["capabilities"])
+
+
+def approval_mint_kwargs(snapshot):
+    if snapshot is None:
+        return {}
+    from tenuo import PublicKey
+    return {"approval_gates": list(snapshot["gates"]),
+            "approvers": [PublicKey.from_bytes(base64.b64decode(key, validate=True))
+                          for key in snapshot["public_keys"]]}
+
+
 def validate_policy(data: Any) -> dict:
     """Return a JSON-compatible policy snapshot; reject unsupported fields/types."""
     _mapping(data, "policy")
-    unknown = set(data) - {"version", "name", "ttl", "capabilities"}
+    version = data.get("version")
+    if type(version) is not int or version not in (1, 2):
+        raise PolicyError("policy version must be 1 or 2")
+    allowed = {"version", "name", "ttl", "capabilities"}
+    if version == 2:
+        allowed.add("approvals")
+    unknown = set(data) - allowed
     if unknown:
         raise PolicyError(f"unknown policy fields: {', '.join(sorted(unknown))}")
-    if type(data.get("version")) is not int or data["version"] != 1:
-        raise PolicyError("policy version must be 1")
-    result = {"version": 1}
+    result = {"version": version}
     if "name" in data:
         if not isinstance(data["name"], str) or not data["name"].strip():
             raise PolicyError("name must be a nonempty string")
@@ -103,6 +171,8 @@ def validate_policy(data: Any) -> dict:
             raise PolicyError(f"invalid ttl: {data['ttl']!r}") from exc
         result["ttl"] = data["ttl"]
     result["capabilities"] = validate_capabilities(data.get("capabilities"))
+    if "approvals" in data:
+        result["approvals"] = _approval_shape(data["approvals"], result["capabilities"], "keys")
     return result
 
 
@@ -171,11 +241,19 @@ def cmd_policy(args) -> int:
     try:
         policy = load_policy(args.path)
         compile_capabilities(policy["capabilities"])
+        resolved = resolve_policy_approvals(policy, args.path)
     except (PolicyError, ValueError, TypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if args.policy_command == "show":
-        print(json.dumps(policy, indent=2, sort_keys=True))
+        shown = dict(policy)
+        if resolved:
+            from hermes_tenuo.operation_approvals import fingerprint
+            from tenuo import PublicKey
+            shown["resolved_approval_keys"] = [
+                {"public_key": key, "fingerprint": fingerprint(PublicKey.from_bytes(base64.b64decode(key)))}
+                for key in resolved["public_keys"]]
+        print(json.dumps(shown, indent=2, sort_keys=True))
     else:
         print(f"Policy valid: {args.path}")
     return 0
