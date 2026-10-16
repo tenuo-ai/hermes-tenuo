@@ -555,3 +555,7 @@ as the attached grant. Failed validation leaves session membership unchanged.
 Identity/trust rotation is a separate explicit operation; `--replace` does not
 silently rotate keys. Runtime verification still checks the configured trust and
 tool constraints before each call.
+
+
+For recovery of an already-issued artifact, `attach --expected-id WARRANT_ID`
+rejects a substituted file before publication. This does not mint a new warrant.

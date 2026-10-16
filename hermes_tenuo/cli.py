@@ -715,6 +715,7 @@ def main() -> None:
         if name == "attach":
             session_p.add_argument("warrant", help="Encoded warrant file")
             session_p.add_argument("--replace", help="Atomically replace this attached warrant ID")
+            session_p.add_argument("--expected-id", help="Require the exact previously reviewed warrant ID")
         elif name == "detach":
             session_p.add_argument("warrant_id")
 
@@ -775,7 +776,7 @@ def main() -> None:
             if directory is None:
                 raise ValueError("set --directory or session_warrants_dir in plugin config")
             if args.command == "attach":
-                identifier = attach_warrant(args.warrant, args.session, directory, replace_id=args.replace)
+                identifier = attach_warrant(args.warrant, args.session, directory, replace_id=args.replace, expected_id=args.expected_id)
                 print(f"Published {identifier}; runtime verifies before use (not an activation acknowledgement)")
             elif args.command == "detach":
                 detach_warrant(args.session, args.warrant_id, directory)

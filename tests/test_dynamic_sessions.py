@@ -75,10 +75,10 @@ def test_expiry_issuer_holder_and_session_binding(tmp_path):
         path, _ = issue(tmp_path, control, agent)
         attach_warrant(path, 's', directory)
         assert guard.pre_tool_call('read_file', {}, session_id='s')
-    short, _ = issue(tmp_path, issuer, holder, ttl=1)
+    short, _ = issue(tmp_path, issuer, holder, ttl=2)
     attach_warrant(short, 's', directory)
     assert guard.pre_tool_call('read_file', {}, session_id='s') is None
-    time.sleep(1.1)
+    time.sleep(2.1)
     assert guard.pre_tool_call('read_file', {}, session_id='s')
     scoped, _ = issue(tmp_path, issuer, holder, session='other')
     with pytest.raises(ValueError, match='another session'):
@@ -251,3 +251,17 @@ def test_invalid_replacement_preserves_working_grant(tmp_path, failure):
     assert read_session('s', directory) == before
     guard = SessionGuard(directory, signing_key=holder, trusted_roots=[issuer.public_key])
     assert guard.pre_tool_call('read_file', {}, session_id='s') is None
+
+
+
+def test_recovery_attachment_checks_expected_id_before_publication(tmp_path):
+    from hermes_tenuo.session_store import read_session
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    path, identifier = issue(tmp_path, issuer, holder)
+    other_path, _ = issue(tmp_path, issuer, holder, tool='get_status')
+    directory = tmp_path / 'membership'
+    with pytest.raises(ValueError, match='reviewed artifact'):
+        attach_warrant(other_path, 's', directory, expected_id=identifier)
+    assert read_session('s', directory) == []
+    attach_warrant(path, 's', directory, expected_id=identifier)
+    assert len(read_session('s', directory)) == 1

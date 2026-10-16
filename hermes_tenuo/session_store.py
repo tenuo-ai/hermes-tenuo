@@ -121,18 +121,18 @@ def _validate_replacement(candidate, previous) -> None:
 
 
 def attach_warrant(warrant: str | Path, session_id: str, directory: str | Path,
-                   *, replace_id: str | None = None) -> str:
+                   *, replace_id: str | None = None, expected_id: str | None = None) -> str:
     """Publish an encoded warrant file; runtime independently verifies its authority.
 
     replace_id atomically replaces one grant, retaining all unrelated grants.
     """
     with Path(warrant).open() as stream:
         raw = stream.read(_MAX_BYTES + 1).strip()
-    return attach_encoded_warrant(raw, session_id, directory, replace_id=replace_id)
+    return attach_encoded_warrant(raw, session_id, directory, replace_id=replace_id, expected_id=expected_id)
 
 
 def attach_encoded_warrant(raw: str, session_id: str, directory: str | Path,
-                           *, replace_id: str | None = None) -> str:
+                           *, replace_id: str | None = None, expected_id: str | None = None) -> str:
     """Publish an already-reviewed artifact without rereading agent-writable files."""
     if not isinstance(raw, str) or len(raw.encode()) > _MAX_BYTES:
         raise ValueError("warrant exceeds size limit")
@@ -140,6 +140,8 @@ def attach_encoded_warrant(raw: str, session_id: str, directory: str | Path,
     if parsed.session_id is not None and parsed.session_id != session_id:
         raise ValueError("warrant is signed for another session")
     identifier = str(parsed.id)
+    if expected_id is not None and identifier != expected_id:
+        raise ValueError("warrant ID does not match the reviewed artifact")
     with _operator_lock(directory):
         existing = read_session(session_id, directory)
         if replace_id is not None:
