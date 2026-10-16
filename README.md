@@ -654,3 +654,37 @@ signing, approval reports the issued warrant ID and a recovery `attach` command
 with `--expected-id`. Retry that command rather than approving/signing again;
 substituting another artifact is rejected. Publication still does not imply the
 runtime has activated the warrant.
+
+### Renew an existing grant
+
+Renewal signs a new validity window; old copies are not revoked. It uses the
+operator's issuer private key and the previous signed warrant;
+it never needs the holder private key or a saved policy:
+
+```sh
+hermes-tenuo renew --from reports.warrant --issuer-key issuer.key \
+  --ttl 20m --out reports-renewed.warrant
+```
+
+The previous issuer signature is checked even if the grant has expired. Renewal
+preserves the holder public key, exact tool constraints, and signed session
+binding. `--ttl` is required to approve the new lifetime explicitly. A new warrant ID and
+validity window are created; the previous artifact remains valid until its own
+expiry. Renewal does not attach authority or restart Hermes. Deliver and activate
+the replacement separately.
+
+This first renewal flow accepts simple root execution warrants. Delegated grants,
+issuer grants, extensions (including approval gates), and additional restrictions
+are rejected rather than silently removed. Use explicit reviewed issuance for
+those cases or for changes to scope. Existing output files are never overwritten.
+
+For dynamic sessions, activate the renewed grant without restarting the gateway:
+
+```sh
+hermes-tenuo attach reports-renewed.warrant --session example-session --replace OLD_WARRANT_ID
+```
+
+This atomically replaces only the previous grant's session membership, preserving
+other attached warrants. The running plugin verifies the new grant before the
+next protected call. Use `sessions --session example-session` to inspect published
+IDs; old copies elsewhere remain subject to their original expiry.
