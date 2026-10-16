@@ -44,6 +44,7 @@ class HermesAuditEvent:
     tool_call_id: str = ""
     duration_ms: int = 0
     warrant_id: str = ""
+    approvers: List[Dict[str, str]] = field(default_factory=list)
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -116,8 +117,11 @@ class HermesGuard:
         on_denial: str = "block",   # "block" | "log"
         audit_callback: Optional[AuditCallback] = None,
         approval_handler: Optional[Callable] = None,
+        operation_approval_store: Optional[Any] = None,
         require_session_warrant: Optional[bool] = None,
     ):
+        if operation_approval_store is not None and on_denial == 'log':
+            raise ValueError('portable operation approvals require on_denial: block')
         self._static_warrant = warrant
         self._static_signing_key = signing_key
         self._child_warrant = child_warrant
@@ -126,6 +130,7 @@ class HermesGuard:
         self._on_denial = on_denial
         self._audit_callback = audit_callback
         self._approval_handler = approval_handler
+        self._operation_approval_store = operation_approval_store
         # None = on once set_session_warrant has been used; True/False override.
         self._require_session_warrant = require_session_warrant
         self._audit_only_warned = False  # warn once when running without a warrant
@@ -626,15 +631,23 @@ class HermesGuard:
             # warrant in the chain being verified. Deriving trust from the
             # credential under test accepts any chain an attacker signs. Without
             # a configured trusted_root, enforce_tool_call fails closed.
+            approval_handler = (self._operation_approval_store.handler(warrant, session_id, trusted)
+                                if self._operation_approval_store else self._approval_handler)
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
                 bound_warrant=bound,
                 trusted_roots=trusted,
                 warrant_chain=chain or None,
-                approval_handler=self._approval_handler,
+                approval_handler=approval_handler,
             )
         except Exception as exc:
+            from hermes_tenuo.operation_approvals import OperationApprovalPending
+            if isinstance(exc, OperationApprovalPending):
+                reason = str(exc)
+                self._remember_decision(tool_call_id, False, reason)
+                self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+                return {'action': 'block', 'message': reason, 'code': 'operation_approval_required'}
             logger.warning("hermes-tenuo: enforcement error for %s: %s", tool_name, exc)
             # Enforcement exceptions always block — on_denial: log only applies to
             # *policy* denials from the Rust core (result.allowed=False). Internal
@@ -651,7 +664,8 @@ class HermesGuard:
             except Exception:
                 pass
 
-        self._emit_audit(tool_name, args, result.allowed, result.denial_reason or "", session_id, task_id, tool_call_id)
+        self._emit_audit(tool_name, args, result.allowed, result.denial_reason or "", session_id, task_id, tool_call_id,
+                         approvers=getattr(approval_handler, 'approved_by', []) if result.allowed else None)
 
         if not result.allowed:
             reason = _format_denial_reason(result, tool_name)
@@ -738,6 +752,7 @@ class HermesGuard:
         task_id: str = "",
         tool_call_id: str = "",
         duration_ms: int = 0,
+        approvers: Optional[List[Dict[str, str]]] = None,
     ) -> None:
         if self._audit_callback is None:
             return
@@ -750,6 +765,7 @@ class HermesGuard:
             task_id=task_id,
             tool_call_id=tool_call_id,
             duration_ms=duration_ms,
+            approvers=approvers or [],
         )
         try:
             self._audit_callback(event)

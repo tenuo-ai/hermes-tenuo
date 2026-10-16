@@ -23,6 +23,8 @@ class SessionGuard(HermesGuard):
         from tenuo.config import resolve_trusted_roots
         allowed = False
         selected = ""
+        pending = ""
+        approved_by = []
         reason = "tenuo: no attached warrant authorizes this call"
         try:
             if self._static_signing_key is None:
@@ -39,32 +41,42 @@ class SessionGuard(HermesGuard):
                     warrant = _decode(raw)
                     if warrant.session_id is not None and warrant.session_id != session_id:
                         continue
+                    approval_handler = (self._operation_approval_store.handler(warrant, session_id, roots)
+                                        if self._operation_approval_store else self._approval_handler)
                     result = enforce_tool_call(
                         tool_name=tool_name, tool_args=args,
                         bound_warrant=warrant.bind(self._static_signing_key),
-                        trusted_roots=roots, approval_handler=self._approval_handler,
+                        trusted_roots=roots,
+                        approval_handler=approval_handler,
                     )
                     if result.allowed:
                         allowed, selected, reason = True, str(warrant.id), ""
+                        approved_by = getattr(approval_handler, "approved_by", [])
                         break
                     reason = _format_denial_reason(result, tool_name)
-                except Exception:
+                except Exception as exc:
+                    from hermes_tenuo.operation_approvals import OperationApprovalPending
+                    if isinstance(exc, OperationApprovalPending):
+                        pending = str(exc)
                     # A bad or expired grant must not hide an independent valid grant.
                     continue
         except Exception as exc:
             reason = f"tenuo: session authority unavailable: {exc}"
+        if not allowed and pending:
+            reason = pending
         self._remember_decision(tool_call_id, allowed, reason)
         if self._audit_callback:
             event = HermesAuditEvent(tool=tool_name, args=args,
                 decision="ALLOW" if allowed else "DENY", reason=reason,
                 session_id=session_id, task_id=task_id, tool_call_id=tool_call_id,
-                warrant_id=selected)
+                warrant_id=selected, approvers=approved_by)
             try:
                 self._audit_callback(event)
             except Exception:
                 pass
         if not allowed:
-            return {"action": "block", "message": reason}
+            return {"action": "block", "message": reason,
+                    **({"code": "operation_approval_required"} if pending else {})}
         return None
 
     def post_tool_call(self, *args, tool_call_id="", **kwargs):
