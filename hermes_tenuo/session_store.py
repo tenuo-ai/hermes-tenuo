@@ -89,6 +89,37 @@ def _decode(raw: str):
     return Warrant.from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
 
 
+def preflight_attachment(session_id: str, directory: str | Path) -> Path:
+    """Check the publication destination before a separate issuance operation.
+
+    This reserves nothing: later I/O can still fail and must be reported as a
+    publication failure, without obscuring that a warrant has already been issued.
+    """
+    destination = Path(directory).expanduser().resolve()
+    with _operator_lock(destination):
+        existing = read_session(session_id, destination)
+        for raw in existing:
+            _decode(raw)
+        if len(existing) >= _MAX_WARRANTS:
+            raise ValueError("session membership limit reached")
+        descriptor, probe = tempfile.mkstemp(dir=destination, prefix=".preflight-")
+        os.close(descriptor)
+        os.unlink(probe)
+    return destination
+
+
+def _validate_replacement(candidate, previous) -> None:
+    """Replacement preserves identity continuity; rotation is a separate operation."""
+    if candidate.holder_key.to_bytes() != previous.holder_key.to_bytes():
+        raise ValueError("replacement holder does not match the attached warrant")
+    if candidate.issuer.to_bytes() != previous.issuer.to_bytes():
+        raise ValueError("replacement issuer does not match the attached warrant")
+    if not candidate.verify(previous.issuer.to_bytes()):
+        raise ValueError("replacement signature is invalid")
+    if candidate.is_expired():
+        raise ValueError("replacement warrant is expired")
+
+
 def attach_warrant(warrant: str | Path, session_id: str, directory: str | Path,
                    *, replace_id: str | None = None) -> str:
     """Publish an encoded warrant file; runtime independently verifies its authority.
@@ -111,8 +142,11 @@ def attach_encoded_warrant(raw: str, session_id: str, directory: str | Path,
     identifier = str(parsed.id)
     with _operator_lock(directory):
         existing = read_session(session_id, directory)
-        if replace_id is not None and not any(str(_decode(w).id) == replace_id for w in existing):
-            raise ValueError("replacement target is not attached")
+        if replace_id is not None:
+            previous = next((_decode(w) for w in existing if str(_decode(w).id) == replace_id), None)
+            if previous is None:
+                raise ValueError("replacement target is not attached")
+            _validate_replacement(parsed, previous)
         existing = [w for w in existing if str(_decode(w).id) not in (identifier, replace_id)]
         _write(session_id, directory, existing + [raw])
     return identifier

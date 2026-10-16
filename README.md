@@ -548,3 +548,10 @@ Detach prevents later calls in that session; it cannot cancel an operation
 already authorized or revoke other copies of the signed warrant. The directory
 is not a sandbox, and these changes do not add new enforcement coverage to
 Hermes execution paths that bypass its existing tool hooks.
+
+
+Replacement requires a valid, unexpired candidate with the same holder and issuer
+as the attached grant. Failed validation leaves session membership unchanged.
+Identity/trust rotation is a separate explicit operation; `--replace` does not
+silently rotate keys. Runtime verification still checks the configured trust and
+tool constraints before each call.

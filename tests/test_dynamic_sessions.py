@@ -230,3 +230,24 @@ def test_dynamic_diagnostics_accept_empty_authority_without_static_warrant(tmp_p
     monkeypatch.setattr(_config, 'get_trusted_roots', lambda ctx: None)
     assert getattr(cli, 'cmd_' + command)(argparse.Namespace()) == 1
     assert 'calls block' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('failure', ['issuer', 'holder', 'expired'])
+def test_invalid_replacement_preserves_working_grant(tmp_path, failure):
+    from hermes_tenuo.session_store import read_session
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    directory = tmp_path / 'membership'
+    old_path, old_id = issue(tmp_path, issuer, holder)
+    attach_warrant(old_path, 's', directory)
+    before = read_session('s', directory)
+    candidate, _ = issue(tmp_path,
+        SigningKey.generate() if failure == 'issuer' else issuer,
+        SigningKey.generate() if failure == 'holder' else holder,
+        ttl=1 if failure == 'expired' else 60)
+    if failure == 'expired':
+        time.sleep(1.1)
+    with pytest.raises(ValueError):
+        attach_warrant(candidate, 's', directory, replace_id=old_id)
+    assert read_session('s', directory) == before
+    guard = SessionGuard(directory, signing_key=holder, trusted_roots=[issuer.public_key])
+    assert guard.pre_tool_call('read_file', {}, session_id='s') is None
