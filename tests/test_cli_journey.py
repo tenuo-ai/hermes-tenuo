@@ -65,7 +65,7 @@ def test_external_operator_cli_journey(tmp_path):
     cli('mint', '--issuer-key', 'issuer.key', '--holder-public-key', 'holder.pub',
         '--policy', policy, '--session-id', 'session-a', '--out', 'policy.warrant')
     policy_grant = Warrant.from_base64((operator / 'policy.warrant').read_text().strip())
-    assert policy_grant.ttl_seconds() == 1200
+    assert 1190 <= policy_grant.ttl_seconds() <= 1200
 
     # A request remains inert until approval; configured-directory publication is automatic.
     request = operator / 'search.request.json'

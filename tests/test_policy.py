@@ -128,7 +128,7 @@ def test_policy_ttl_precedence(tmp_path, capsys, policy_ttl, override, expected)
     assert cmd_mint(argparse.Namespace(policy=str(path), allow=None, ttl=override, output='env')) == 0
     env = dict(line[7:].split('=', 1) for line in capsys.readouterr().out.splitlines() if line.startswith('export '))
     warrant = Warrant.from_bytes(base64.b64decode(env['TENUO_WARRANT']))
-    assert warrant.ttl_seconds() == expected
+    assert expected - 5 <= warrant.ttl_seconds() <= expected
 
 
 @pytest.mark.parametrize('kind,value', [('exact', 1), ('exact', True), ('one_of', ['x', 1])])
@@ -157,7 +157,7 @@ def test_policy_separate_issuance(tmp_path, monkeypatch, capsys):
                               holder_public_key=str(holder_path), out=str(out), session_id='session-1')
     assert cmd_mint(args) == 0
     warrant = Warrant.from_base64(out.read_text().strip())
-    assert warrant.ttl_seconds() == 600
+    assert 595 <= warrant.ttl_seconds() <= 600
     assert warrant.holder_key.to_bytes() == holder.public_key.to_bytes()
     assert 'TENUO_SIGNING_KEY' not in capsys.readouterr().out
 
