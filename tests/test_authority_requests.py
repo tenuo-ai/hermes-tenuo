@@ -32,7 +32,8 @@ def test_issuer_signs_public_recipient_snapshot_without_holder_secret(tmp_path, 
     assert approved.authorized_holder.to_bytes() == holder.public_key.to_bytes()
     assert approved.session_id == "session-a"
     assert set(approved.capabilities) == {"read_file"}
-    assert Warrant.from_bytes(base64.b64decode(output.read_text())).id == approved.id
+    assert output.read_text().strip() == approved.to_base64()
+    assert Warrant.from_base64(output.read_text().strip()).id == approved.id
     with pytest.raises(FileExistsError):
         approve_request(reviewed, issuer, output)
 

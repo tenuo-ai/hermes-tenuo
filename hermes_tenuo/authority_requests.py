@@ -92,7 +92,7 @@ def approve_request(request: dict, issuer, output: str | Path):
     holder = PublicKey.from_bytes(base64.b64decode(request["holder_public_key"]))
     warrant = mint_for_holder(issuer, holder, compile_capabilities(request["capabilities"]),
                               _parse_ttl(request["ttl"]), session_id=request["session_id"])
-    write_private_file(output, base64.b64encode(warrant.to_bytes()).decode())
+    write_private_file(output, warrant.to_base64())
     return warrant
 
 
@@ -140,7 +140,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
             directory = args.directory or get_session_warrants_dir(None)
             if directory is None:
                 raise ValueError("--attach needs --directory or configured session_warrants_dir; warrant was issued only")
-            attach_encoded_warrant(base64.b64encode(warrant.to_bytes()).decode(), snapshot["session_id"], directory)
+            attach_encoded_warrant(warrant.to_base64(), snapshot["session_id"], directory)
             print("Published to session; runtime verifies on its next tool call. No gateway restart needed.")
         return 0
     except (OSError, ValueError, TypeError, EOFError) as exc:
