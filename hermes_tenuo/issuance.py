@@ -56,3 +56,24 @@ def mint_for_holder(issuer: Any, holder: Any, capabilities: dict[str, dict],
     for tool, constraints in capabilities.items():
         builder = builder.capability(tool, **constraints)
     return builder.mint(issuer)
+
+
+def renew_warrant(previous: Any, issuer: Any, ttl_seconds: int):
+    """Reissue a verified simple root grant; never discard unsupported restrictions."""
+    from tenuo_core import WarrantType
+    if previous.issuer.to_bytes() != issuer.public_key.to_bytes():
+        raise ValueError('issuer key does not match the previous warrant')
+    if not previous.verify(issuer.public_key.to_bytes()):
+        raise ValueError('previous warrant signature is invalid')
+    if previous.depth != 0 or previous.parent_hash is not None or previous.warrant_type != WarrantType.Execution:
+        raise ValueError('renewal supports root execution warrants only')
+    if (previous.extensions() or previous.terminal or previous.agent_id() is not None
+            or previous.clearance is not None
+            or previous.constraint_bounds_dict() is not None
+            or previous.required_approvers() or previous.min_approvals() is not None
+            or previous.max_issue_depth is not None or previous.issuable_tools is not None
+            or previous.max_depth != 64):
+        raise ValueError('warrant has additional restrictions unsupported by renewal; explicitly reissue it')
+    return mint_for_holder(issuer, previous.holder_key, previous.capabilities,
+                           ttl_seconds,
+                           previous.session_id)

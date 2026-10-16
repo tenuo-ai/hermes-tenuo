@@ -48,6 +48,25 @@ def cmd_mint(args: argparse.Namespace) -> int:
     return _mint_local(args)
 
 
+def cmd_renew(args: argparse.Namespace) -> int:
+    """Issue a new validity window without modifying signed scope."""
+    from pathlib import Path
+    from tenuo import Warrant
+    from hermes_tenuo.issuance import read_signing_key, renew_warrant, write_private_file
+    try:
+        previous = Warrant.from_base64(Path(args.from_path).expanduser().read_text().strip())
+        issuer = read_signing_key(args.issuer_key)
+        ttl = _parse_ttl(args.ttl)
+        renewed = renew_warrant(previous, issuer, ttl)
+        write_private_file(args.out, renewed.to_base64())
+    except Exception as exc:
+        print(f"error: renewal failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Renewed warrant saved: {args.out}")
+    print("The previous warrant remains valid until its expiry; attachment is a separate operation.")
+    return 0
+
+
 def cmd_keygen(args: argparse.Namespace) -> int:
     """Create an identity without printing private signing material."""
     from pathlib import Path
@@ -707,6 +726,12 @@ def main() -> None:
     keygen_p.add_argument("--private-key", required=True, metavar="PATH")
     keygen_p.add_argument("--public-key", required=True, metavar="PATH")
 
+    renew_p = subparsers.add_parser("renew", help="Renew a signed grant without changing scope")
+    renew_p.add_argument("--from", dest="from_path", required=True, metavar="PATH")
+    renew_p.add_argument("--issuer-key", required=True, metavar="PATH")
+    renew_p.add_argument("--ttl", required=True, metavar="DURATION", help="Explicitly approved new lifetime")
+    renew_p.add_argument("--out", required=True, metavar="PATH", help="New warrant file; never overwrites")
+
     # mint
     for name in ("attach", "detach", "sessions", "clear-session"):
         session_p = subparsers.add_parser(name, help=f"{name.title()} published session warrants")
@@ -796,6 +821,8 @@ def main() -> None:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+    elif args.command == "renew":
+        sys.exit(cmd_renew(args))
     elif args.command == "mint":
         sys.exit(cmd_mint(args))
     elif args.command == "policy":
