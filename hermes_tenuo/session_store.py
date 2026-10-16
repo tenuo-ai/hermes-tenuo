@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 from contextlib import contextmanager
@@ -65,16 +66,33 @@ def _operator_lock(directory: str | Path):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def _publication_metadata(path: Path):
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("session manifest must be a regular file, not a symlink")
+    if metadata.st_mode & 0o022:
+        raise ValueError("session manifest must not be group- or world-writable")
+    return metadata
+
+
 def _write(session_id: str, directory: str | Path, warrants: list[str]) -> None:
     path = _path(session_id, directory)
-    if path.is_symlink():
-        raise ValueError("session manifest cannot be a symlink")
+    metadata = _publication_metadata(path)
     payload = json.dumps({"version": 1, "session_id": session_id, "warrants": warrants})
     if len(warrants) > _MAX_WARRANTS or len(payload.encode()) > _MAX_BYTES:
         raise ValueError("session membership limit exceeded")
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".publish-")
     try:
         with os.fdopen(fd, "w") as stream:
+            if metadata is not None:
+                current = os.fstat(stream.fileno())
+                if (current.st_uid, current.st_gid) != (metadata.st_uid, metadata.st_gid):
+                    os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+                # Preserve read access, never propagate execute or special bits.
+                os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode) & 0o644)
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
@@ -86,7 +104,17 @@ def _write(session_id: str, directory: str | Path, warrants: list[str]) -> None:
 
 def _decode(raw: str):
     from tenuo import Warrant
-    return Warrant.from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    try:
+        return Warrant.from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    except Exception as exc:
+        raise ValueError("invalid encoded warrant") from exc
+
+
+def _member_id(raw: str) -> str | None:
+    try:
+        return str(_decode(raw).id)
+    except ValueError:
+        return None
 
 
 def preflight_attachment(session_id: str, directory: str | Path) -> Path:
@@ -98,8 +126,7 @@ def preflight_attachment(session_id: str, directory: str | Path) -> Path:
     destination = Path(directory).expanduser().resolve()
     with _operator_lock(destination):
         existing = read_session(session_id, destination)
-        for raw in existing:
-            _decode(raw)
+        _publication_metadata(_path(session_id, destination))
         if len(existing) >= _MAX_WARRANTS:
             raise ValueError("session membership limit reached")
         descriptor, probe = tempfile.mkstemp(dir=destination, prefix=".preflight-")
@@ -145,11 +172,12 @@ def attach_encoded_warrant(raw: str, session_id: str, directory: str | Path,
     with _operator_lock(directory):
         existing = read_session(session_id, directory)
         if replace_id is not None:
-            previous = next((_decode(w) for w in existing if str(_decode(w).id) == replace_id), None)
+            previous = next((_decode(w) for w in existing if _member_id(w) == replace_id), None)
             if previous is None:
                 raise ValueError("replacement target is not attached")
             _validate_replacement(parsed, previous)
-        existing = [w for w in existing if str(_decode(w).id) not in (identifier, replace_id)]
+        existing = [w for w in existing if _member_id(w) != identifier
+                    and (replace_id is None or _member_id(w) != replace_id)]
         _write(session_id, directory, existing + [raw])
     return identifier
 
@@ -157,13 +185,23 @@ def attach_encoded_warrant(raw: str, session_id: str, directory: str | Path,
 def detach_warrant(session_id: str, warrant_id: str, directory: str | Path) -> None:
     with _operator_lock(directory):
         existing = read_session(session_id, directory)
-        _write(session_id, directory, [w for w in existing if str(_decode(w).id) != warrant_id])
+        _write(session_id, directory, [w for w in existing if _member_id(w) != warrant_id])
+
+
+def clear_session(session_id: str, directory: str | Path) -> None:
+    """Remove all membership, even if the existing manifest cannot be parsed."""
+    with _operator_lock(directory):
+        _write(session_id, directory, [])
 
 
 def session_status(session_id: str, directory: str | Path) -> list[dict]:
     """Published membership, not an acknowledgement from the running agent."""
     result = []
     for raw in read_session(session_id, directory):
-        warrant = _decode(raw)
+        try:
+            warrant = _decode(raw)
+        except ValueError:
+            result.append({"invalid": True, "sha256": hashlib.sha256(raw.encode()).hexdigest()})
+            continue
         result.append({"warrant_id": str(warrant.id), "expired": warrant.is_expired()})
     return result

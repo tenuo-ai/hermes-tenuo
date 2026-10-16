@@ -251,4 +251,8 @@ def get_session_warrants_dir(ctx: Any):
         return None
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("session_warrants_dir must be a nonempty path")
-    return Path(raw).expanduser()
+    from hermes_tenuo._home import hermes_home
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = hermes_home() / path
+    return path.resolve()

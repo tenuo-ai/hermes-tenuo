@@ -559,3 +559,28 @@ tool constraints before each call.
 
 For recovery of an already-issued artifact, `attach --expected-id WARRANT_ID`
 rejects a substituted file before publication. This does not mint a new warrant.
+
+Relative `session_warrants_dir` paths resolve under the active Hermes profile home
+(`HERMES_HOME` outside Hermes), independent of the working directory. Explicit CLI
+`--directory` paths use the shell's working directory.
+
+`sessions` reports malformed individual grants as `invalid` with their SHA-256
+fingerprint; unrelated valid grants remain inspectable and removable. Attachment
+and replacement retain malformed entries for diagnosis. To remove all authority
+from a session, including recovery from an invalid JSON manifest, run:
+
+```sh
+hermes-tenuo clear-session --session example-session
+```
+
+This publishes an empty manifest without decoding the old contents. Symlinks are
+rejected, and other sessions remain unchanged. Detachment/clearing affects future
+checks, not already authorized operations or copies attached elsewhere.
+
+New directories and manifests default to permissions `0700` and `0600`. For a
+separate agent OS user, provision a shared read group, make the directory `0750`
+with the appropriate group, and set each published manifest to `0640` before
+agent use. Atomic updates preserve existing ownership and read permissions;
+failed ownership preservation leaves the previous manifest intact. Group- or
+world-writable manifests are rejected. Keep the directory operator-writable only
+and mount it read-only into the agent. These commands require Unix file locking.

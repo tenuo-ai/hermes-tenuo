@@ -11,7 +11,7 @@ class SessionGuard(HermesGuard):
 
     def __init__(self, directory: Path, **kwargs):
         super().__init__(require_session_warrant=True, **kwargs)
-        self.directory = directory
+        self.directory = Path(directory).expanduser().resolve()
 
     @property
     def has_warrant(self):

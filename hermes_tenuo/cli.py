@@ -708,7 +708,7 @@ def main() -> None:
     keygen_p.add_argument("--public-key", required=True, metavar="PATH")
 
     # mint
-    for name in ("attach", "detach", "sessions"):
+    for name in ("attach", "detach", "sessions", "clear-session"):
         session_p = subparsers.add_parser(name, help=f"{name.title()} published session warrants")
         session_p.add_argument("--session", required=True)
         session_p.add_argument("--directory", help="Operator-published session directory; defaults to plugin config")
@@ -767,9 +767,9 @@ def main() -> None:
 
     if args.command == "keygen":
         sys.exit(cmd_keygen(args))
-    elif args.command in ("attach", "detach", "sessions"):
+    elif args.command in ("attach", "detach", "sessions", "clear-session"):
         from hermes_tenuo._config import get_session_warrants_dir
-        from hermes_tenuo.session_store import attach_warrant, detach_warrant, session_status
+        from hermes_tenuo.session_store import attach_warrant, clear_session, detach_warrant, session_status
         import json
         try:
             directory = args.directory or get_session_warrants_dir(None)
@@ -778,6 +778,9 @@ def main() -> None:
             if args.command == "attach":
                 identifier = attach_warrant(args.warrant, args.session, directory, replace_id=args.replace, expected_id=args.expected_id)
                 print(f"Published {identifier}; runtime verifies before use (not an activation acknowledgement)")
+            elif args.command == "clear-session":
+                clear_session(args.session, directory)
+                print("Cleared all warrants from this session; other copies remain valid")
             elif args.command == "detach":
                 detach_warrant(args.session, args.warrant_id, directory)
                 print("Detached from this session; this does not revoke other copies")
