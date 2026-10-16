@@ -120,31 +120,45 @@ def cmd_request_show(args: argparse.Namespace) -> int:
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
+    issued = None
+    directory = None
     try:
         snapshot = load_request(args.request)
         print(review_text(snapshot))
         output = args.out or str(Path(args.request).with_suffix(".warrant"))
         print(f"Output: {output}")
+        if args.directory and not args.attach:
+            raise ValueError("--directory requires --attach")
         if args.attach:
-            print("Also attach to the request's session in the configured local store.")
+            from hermes_tenuo._config import get_session_warrants_dir
+            from hermes_tenuo.session_store import preflight_attachment
+            directory = args.directory or get_session_warrants_dir(None)
+            if directory is None:
+                raise ValueError("--attach needs --directory or configured session_warrants_dir; nothing was issued")
+            directory = preflight_attachment(snapshot["session_id"], directory)
+            print(f"Attach destination: {directory}")
         if not args.yes:
             if input("Sign exactly this request? [y/N] ").strip().lower() not in ("y", "yes"):
                 print("Not approved.")
                 return 1
         issuer = read_signing_key(args.issuer_key)
         warrant = approve_request(snapshot, issuer, output)
+        issued = warrant
         print(f"Issued warrant: {warrant.id}; file: {output}")
         if args.attach:
             from hermes_tenuo.session_store import attach_encoded_warrant
-            from hermes_tenuo._config import get_session_warrants_dir
-            directory = args.directory or get_session_warrants_dir(None)
-            if directory is None:
-                raise ValueError("--attach needs --directory or configured session_warrants_dir; warrant was issued only")
             attach_encoded_warrant(warrant.to_base64(), snapshot["session_id"], directory)
             print("Published to session; runtime verifies on its next tool call. No gateway restart needed.")
         return 0
     except (OSError, ValueError, TypeError, EOFError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if issued is not None:
+            recovery = ("hermes-tenuo attach " + shlex.quote(str(output)) +
+                        " --session " + shlex.quote(snapshot["session_id"]) +
+                        " --directory " + shlex.quote(str(directory)) +
+                        " --expected-id " + shlex.quote(str(issued.id)))
+            print(f"Warrant {issued.id} was issued but not attached. Do not approve again.\n"
+                  f"Retry the exact signed artifact: {recovery}", file=sys.stderr)
         return 1
 
 

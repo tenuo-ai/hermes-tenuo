@@ -642,3 +642,15 @@ same unrestricted OS account is not isolation. Operator approval works in a
 separate terminal on the same machine; remote transport is optional deployment
 work, not part of this protocol. The tool caps request size, scope count and
 retained requests per session; archive old requests after review when needed.
+
+Generated approval commands include the originating session store explicitly, so
+approval from another terminal/profile does not select a different store by
+accident. `approve --attach` displays and checks that destination before loading
+the issuer key or signing. Missing configuration, invalid membership, and ordinary
+write-permission failures therefore leave no newly issued warrant.
+
+Preflight cannot prevent every later I/O failure. If publication fails after
+signing, approval reports the issued warrant ID and a recovery `attach` command
+with `--expected-id`. Retry that command rather than approving/signing again;
+substituting another artifact is rejected. Publication still does not imply the
+runtime has activated the warrant.

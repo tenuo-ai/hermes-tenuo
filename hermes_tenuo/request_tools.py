@@ -18,9 +18,11 @@ def register_request_tool(ctx) -> bool:
         return False
     if not isinstance(directory, str) or not directory.strip():
         raise ValueError("requests_dir must be a nonempty path")
-    if get_session_warrants_dir(ctx) is None:
+    session_directory = get_session_warrants_dir(ctx)
+    if session_directory is None:
         raise ValueError("requests_dir requires session_warrants_dir (no static authority fallback)")
     base = Path(directory).expanduser().resolve()
+    session_directory = Path(session_directory).expanduser().resolve()
 
     def handler(args, *, session_id="", **_kwargs):
         try:
@@ -48,7 +50,7 @@ def register_request_tool(ctx) -> bool:
             save_request(path, request)
             return json.dumps({"status": "pending_external_approval", "request": str(path),
                                "approve_command": "hermes-tenuo approve " + shlex.quote(str(path)) +
-                               " --issuer-key /path/to/issuer.key --attach",
+                               " --issuer-key /path/to/issuer.key --attach --directory " + shlex.quote(str(session_directory)),
                                "message": "No authority was granted. Ask the operator to review this file outside Hermes."})
         except (OSError, ValueError, TypeError) as exc:
             return json.dumps({"error": str(exc)})

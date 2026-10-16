@@ -153,3 +153,79 @@ def test_invalid_request_duration_does_not_create_file(tmp_path, duration):
     with pytest.raises(ValueError):
         save_request(tmp_path / "invalid.json", request)
     assert not (tmp_path / "invalid.json").exists()
+
+
+def test_missing_attachment_config_fails_before_signing(tmp_path, monkeypatch):
+    import hermes_tenuo.authority_requests as requests
+    path = tmp_path / 'request.json'
+    save_request(path, sample(SigningKey.generate()))
+    monkeypatch.setattr('hermes_tenuo._config.get_session_warrants_dir', lambda _: None)
+    signing_attempts = []
+    monkeypatch.setattr(requests, 'read_signing_key', lambda _: signing_attempts.append(True))
+    args = argparse.Namespace(request=str(path), issuer_key='issuer.key', out=None,
+                              yes=True, attach=True, directory=None)
+    assert cmd_approve(args) == 1
+    assert signing_attempts == []
+    assert not path.with_suffix('.warrant').exists()
+
+
+def test_generated_command_routes_to_originating_store(tmp_path, monkeypatch):
+    import shlex
+    holder = SigningKey.generate()
+    destination = tmp_path / 'publisher with spaces'
+    monkeypatch.setattr('hermes_tenuo._config._get_plugin_entry', lambda _: {
+        'requests_dir': str(tmp_path / 'requests'), 'session_warrants_dir': str(destination)})
+    monkeypatch.setattr('hermes_tenuo._config.get_signing_key', lambda _: holder)
+    class Context:
+        def register_tool(self, **tool):
+            self.handler = tool['handler']
+    ctx = Context()
+    register_request_tool(ctx)
+    result = json.loads(ctx.handler({'allow': ['get_status'], 'ttl': '20m',
+                                    'description': 'Check status'}, session_id='session-a'))
+    command = shlex.split(result['approve_command'])
+    assert '--directory' in command
+    assert command[command.index('--directory') + 1] == str(destination)
+
+
+def test_unwritable_attachment_store_fails_before_loading_issuer(tmp_path, monkeypatch):
+    import hermes_tenuo.authority_requests as requests
+    path = tmp_path / 'request.json'
+    save_request(path, sample(SigningKey.generate()))
+    def unavailable(*args, **kwargs):
+        raise PermissionError('publication store is read-only')
+    monkeypatch.setattr('hermes_tenuo.session_store.preflight_attachment', unavailable)
+    monkeypatch.setattr(requests, 'read_signing_key', lambda _: pytest.fail('issuer must not be loaded'))
+    args = argparse.Namespace(request=str(path), issuer_key='issuer.key', out=None,
+                              yes=True, attach=True, directory=str(tmp_path / 'membership'))
+    assert cmd_approve(args) == 1
+    assert not path.with_suffix('.warrant').exists()
+
+
+def test_late_publication_failure_can_retry_without_issuing_again(tmp_path, monkeypatch, capsys):
+    import shlex
+    from hermes_tenuo import session_store
+    from hermes_tenuo.cli import main
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    path, key = tmp_path / 'request.json', tmp_path / 'issuer.key'
+    save_request(path, sample(holder))
+    key.write_text(base64.b64encode(issuer.secret_key_bytes()).decode())
+    args = argparse.Namespace(request=str(path), issuer_key=str(key), out=None,
+                              yes=True, attach=True, directory=str(tmp_path / 'membership'))
+    publish = session_store.attach_encoded_warrant
+    def unavailable(*args, **kwargs):
+        raise PermissionError('publication failed after preflight')
+    monkeypatch.setattr(session_store, 'attach_encoded_warrant', unavailable)
+    assert cmd_approve(args) == 1
+    assert path.with_suffix('.warrant').is_file()
+    error = capsys.readouterr().err
+    assert 'was issued but not attached' in error
+    assert 'Do not approve again' in error
+    recovery = shlex.split(error.split('Retry the exact signed artifact: ', 1)[1].strip())
+    assert '--expected-id' in recovery
+    monkeypatch.setattr(session_store, 'attach_encoded_warrant', publish)
+    monkeypatch.setattr('sys.argv', recovery)
+    with pytest.raises(SystemExit) as result:
+        main()
+    assert result.value.code == 0
+    assert len(session_store.read_session('session-a', args.directory)) == 1
