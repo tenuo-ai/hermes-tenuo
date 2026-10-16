@@ -210,7 +210,9 @@ def test_doctor_holder_match_true_positive(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "✓  signing key matches warrant holder" in out
     assert "does not match" not in out
-    assert "reading" in out and "config.yaml directly" in out
+    from hermes_tenuo._home import hermes_cli_available
+    if not hermes_cli_available():
+        assert "reading" in out and "config.yaml directly" in out
 
 
 def test_doctor_holder_match_true_negative(tmp_path, monkeypatch, capsys):

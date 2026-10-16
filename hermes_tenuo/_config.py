@@ -149,10 +149,38 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
     return raw
 
 
+def _read_key_file(value: Any) -> str:
+    """Bounded base64 text; relative paths belong to the active Hermes profile."""
+    from hermes_tenuo._home import hermes_home
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("key file setting must be a nonempty path")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = hermes_home() / path
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("key file exceeds 64 KiB")
+    value = raw.decode("ascii").strip()
+    if not value:
+        raise ValueError("key file is empty")
+    base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    return value
+
+
 def get_signing_key(ctx: Any):
     """Return SigningKey from env or config, or None."""
     entry = _get_plugin_entry(ctx)
     key_env = entry.get("signing_key_env", "TENUO_SIGNING_KEY")
+    if "signing_key_file" in entry:
+        try:
+            if "signing_key_env" in entry or _env_secret("TENUO_SIGNING_KEY") is not None:
+                raise ValueError("conflicting key sources")
+            from tenuo_core import SigningKey
+            return SigningKey.from_bytes(_b64_to_bytes(_read_key_file(entry["signing_key_file"])))
+        except Exception:
+            logger.warning("hermes-tenuo: signing_key_file is unreadable, invalid, or conflicts with another source")
+            return None
     raw = _env_secret(key_env)
     if not raw:
         return None
@@ -167,6 +195,15 @@ def get_signing_key(ctx: Any):
 def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
     """Return list of trusted PublicKeys from env or config, or None."""
     entry = _get_plugin_entry(ctx)
+    if "trusted_root_file" in entry:
+        try:
+            if "trusted_root" in entry or _env_secret("TENUO_TRUSTED_ROOT") is not None:
+                raise ValueError("conflicting key sources")
+            from tenuo_core import PublicKey
+            return [PublicKey.from_bytes(_b64_to_bytes(_read_key_file(entry["trusted_root_file"])))]
+        except Exception:
+            logger.warning("hermes-tenuo: trusted_root_file is unreadable, invalid, or conflicts with another source")
+            return None
     raw = entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
     if not raw:
         return None
