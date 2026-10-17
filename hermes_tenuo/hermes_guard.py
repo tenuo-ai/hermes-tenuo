@@ -43,6 +43,7 @@ class HermesAuditEvent:
     task_id: str = ""
     tool_call_id: str = ""
     duration_ms: int = 0
+    warrant_id: str = ""
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

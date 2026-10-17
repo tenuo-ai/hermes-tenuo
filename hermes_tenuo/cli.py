@@ -345,6 +345,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         note(f"could not read Hermes config ({exc})")
 
+    if "local_home" in config_entry:
+        from hermes_tenuo.local_guard import report_shared_local_config
+        check(report_shared_local_config(), "shared local session setup ready",
+              "run tenuo-cli doctor and attach a warrant, or tenuo-cli mode observe")
+        note("Configuration checks do not prove the running Hermes process loaded the plugin.")
+        return 0 if ok else 1
+
     # 4. Configured? Same resolution the plugin uses (kanban task first).
     from hermes_tenuo._config import (
         _b64_to_bytes,
