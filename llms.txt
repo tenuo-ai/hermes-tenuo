@@ -1,0 +1,6 @@
+# Hermes-Tenuo
+
+- [Shared local CLI](docs/local-cli.md): Unreleased common SDK setup using `local_home`, explicit session attachments, full native chains and file approvals. The plugin consumes the SDK parser and native verification; it does not issue authority.
+- Keep issuer and approver private keys outside Hermes. Give each profile its own workspace and holder. Each call must fit one attached grant; attachments survive turns and are never merged. Missing or invalid configured files deny calls.
+- Signed warrants remain valid until expiry or revocation. Attaching is not activation, and detaching is not revocation. Approvals are exact-call signatures, reusable until expiry; they do not expand authority or prove human identity.
+- Existing legacy commands remain available. Shared `approvals.required` YAML and legacy `approvals.gates` YAML are distinct grammars; do not substitute one for the other.
