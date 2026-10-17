@@ -29,6 +29,19 @@ def test_file_keys_authorize_real_guard(tmp_path, monkeypatch):
     assert guard.pre_tool_call_hook('other_tool', {}, session_id='conversation')
 
 
+@pytest.mark.parametrize('alias', [False, True])
+def test_trust_file_cannot_point_to_private_key(tmp_path, monkeypatch, alias):
+    entry, _, _ = setup_keys(tmp_path, monkeypatch)
+    path = tmp_path / 'holder.key'
+    if alias:
+        link = tmp_path / 'alias.pub'
+        link.symlink_to(path)
+        path = link
+    entry['trusted_root_file'] = str(path)
+    with pytest.raises(WarrantLoadError):
+        build_plugin_guard(None)
+
+
 @pytest.mark.parametrize('filename', ['holder.key', 'issuer.pub'])
 @pytest.mark.parametrize('failure', ['missing', 'bad', 'oversize'])
 def test_bad_file_never_falls_back_even_without_warrant(tmp_path, monkeypatch, filename, failure):

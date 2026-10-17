@@ -149,7 +149,7 @@ def get_child_warrant_raw(ctx: Any) -> Optional[str]:
     return raw
 
 
-def _read_key_file(value: Any) -> str:
+def _read_key_file(value: Any, *, public: bool = False) -> str:
     """Bounded base64 text; relative paths belong to the active Hermes profile."""
     from hermes_tenuo._home import hermes_home
     if not isinstance(value, str) or not value.strip():
@@ -157,6 +157,11 @@ def _read_key_file(value: Any) -> str:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = hermes_home() / path
+    path = path.resolve(strict=True)
+    if public and path.suffix.lower() != ".pub":
+        raise ValueError("public key files must use .pub, never a private key")
+    if not public and path.suffix.lower() == ".pub":
+        raise ValueError("signing key files cannot be public .pub files")
     with path.open("rb") as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
@@ -200,7 +205,7 @@ def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
             if "trusted_root" in entry or _env_secret("TENUO_TRUSTED_ROOT") is not None:
                 raise ValueError("conflicting key sources")
             from tenuo_core import PublicKey
-            return [PublicKey.from_bytes(_b64_to_bytes(_read_key_file(entry["trusted_root_file"])))]
+            return [PublicKey.from_bytes(_b64_to_bytes(_read_key_file(entry["trusted_root_file"], public=True)))]
         except Exception:
             logger.warning("hermes-tenuo: trusted_root_file is unreadable, invalid, or conflicts with another source")
             return None

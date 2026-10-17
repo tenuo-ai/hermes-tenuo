@@ -11,6 +11,16 @@ metadata:
 
 # Scope a Hermes agent with Tenuo
 
+For a matching SDK/plugin checkout with shared local CLI support, prefer
+`docs/local-cli.md`: `tenuo-cli` owns issuance and YAML parsing, while Hermes
+uses `local_home` and explicit operator-controlled session attachments. Never
+give Hermes the issuer or approver private key. The first denial reports the
+session ID; use that in `tenuo-cli session attach`. Attachments survive turns,
+each call must fit one full grant, and new children inherit no authority.
+Use common file approval requests and return native signed responses. Attaching
+is not activation and detaching is not revocation. The shared YAML format uses
+`approvals.required`; the legacy `--policy` syntax below is a compatibility path.
+
 Load this skill when the user wants to limit what a Hermes agent may call,
 or when they are about to add `delegate_task`, cron, kanban, or a
 multi-user gateway.

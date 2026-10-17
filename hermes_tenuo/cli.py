@@ -456,8 +456,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from hermes_tenuo.session_diagnostics import report_dynamic_config
     dynamic = report_dynamic_config()
     if dynamic is not None:
-        check(dynamic, "dynamic session identity and trust configured",
-              "configure a holder signing key and explicit trusted issuer")
+        check(dynamic, "shared local session setup ready" if "local_home" in config_entry
+              else "dynamic session identity and trust configured",
+              "run tenuo-cli doctor and attach a warrant" if "local_home" in config_entry
+              else "configure a holder signing key and explicit trusted issuer")
         note("Configuration checks do not prove the running Hermes process loaded the plugin.")
         return 0 if ok else 1
 

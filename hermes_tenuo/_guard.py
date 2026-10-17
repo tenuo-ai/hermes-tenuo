@@ -39,6 +39,30 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     # even before a warrant is present; a bad file must never become passthrough.
     from hermes_tenuo._config import _get_plugin_entry
     entry = _get_plugin_entry(ctx)
+    if "local_home" in entry:
+        from pathlib import Path
+        from hermes_tenuo._home import hermes_home
+        from hermes_tenuo.audit import LocalAuditLog
+
+        try:
+            from hermes_tenuo.local_guard import SharedLocalGuard
+
+            raw = entry["local_home"]
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError("local_home must be a nonempty path")
+            conflicts = {"warrant", "child_warrant", "signing_key_file", "signing_key_env",
+                         "trusted_root", "trusted_root_file", "session_warrants_dir",
+                         "operation_requests_dir", "operation_approvals_dir", "revocations_dir"}
+            if conflicts.intersection(entry) or get_on_denial(ctx) != "block":
+                raise ValueError("local_home cannot be combined with legacy authority settings or log-only mode")
+            home = Path(raw).expanduser()
+            if not home.is_absolute():
+                home = hermes_home() / home
+            audit = get_audit_log_path(ctx)
+            return PluginGuard(SharedLocalGuard(home, key=entry.get("local_key", "agent"),
+                audit_callback=LocalAuditLog(audit) if audit else None))
+        except Exception as exc:
+            raise WarrantLoadError("local authority setup failed; install the matching Tenuo SDK and run tenuo-cli doctor") from exc
     for setting, loader in (("signing_key_file", get_signing_key), ("trusted_root_file", get_trusted_roots)):
         if setting in entry and loader(ctx) is None:
             raise WarrantLoadError(f"{setting} is invalid, unreadable, or conflicts with another key source")

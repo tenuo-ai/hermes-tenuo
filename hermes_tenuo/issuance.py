@@ -19,6 +19,15 @@ def read_signing_key(path: str | Path):
 
 
 def read_public_key(path: str | Path):
+    try:
+        from tenuo.local import load_public_key
+    except ImportError:
+        resolved = Path(path).expanduser().resolve(strict=True)
+        if resolved.suffix.lower() != '.pub':
+            raise ValueError('public keys must use a .pub file; never pass a private signing key')
+        path = resolved
+    else:
+        return load_public_key(path)
     from tenuo import PublicKey
     return PublicKey.from_bytes(_read_key(path))
 
@@ -57,6 +66,10 @@ def mint_for_holder(issuer: Any, holder: Any, capabilities: dict[str, dict],
                     min_approvals: int = 1):
     """Sign a root execution warrant using only the recipient's public key."""
     from tenuo import Warrant
+    import hmac
+    if any(hmac.compare_digest(bytes(issuer.secret_key_bytes()), bytes(public.to_bytes()))
+           for public in [holder, *(approvers or [])]):
+        raise ValueError('public warrant fields contain private signing material; use a public key')
     if not capabilities:
         raise ValueError('at least one capability is required')
     if ttl_seconds <= 0:
