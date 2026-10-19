@@ -43,7 +43,8 @@ class SharedLocalGuard(HermesGuard):
                         raise ValueError("warrant ID does not match its stored filename")
                     if chain[-1].session_id is not None and chain[-1].session_id != session_id:
                         raise ValueError("warrant is bound to a different session")
-                    snapshot.authorizer.verify_chain(chain)
+                    # Expiry, revocation and trust are judged by the runtime's authorizer,
+                    # which signs a receipt for the refusal; checking here first would skip it.
                     with self.authority.scope(replace(snapshot, chain=chain)) as (current, session, approvals):
                         result = enforce_tool_call(tool_name=tool_name, tool_args=args,
                                                    bound_warrant=session.bound, trusted_roots=current.roots,
