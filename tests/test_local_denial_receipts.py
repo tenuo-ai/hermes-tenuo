@@ -40,7 +40,8 @@ def test_revoked_attachment_is_receipted(workspace, capsys):
     attach(workspace, "chat-a", [warrant])
     guard = SharedLocalGuard(workspace.path)
     update_revocations(workspace.path / "revocations.srl", workspace.signing_key("issuer"), [warrant.id])
-    assert "revoked" in guard.pre_tool_call("get_order", ARGS, session_id="chat-a")["message"]
+    message = guard.pre_tool_call("get_order", ARGS, session_id="chat-a")["message"]
+    assert message == f"Warrant '{warrant.id}' has been revoked. Ask the operator for new authority."
     assert receipts(workspace, capsys) == [("DENY", str(warrant.id), "warrant-revoked")]
 
 
@@ -49,7 +50,8 @@ def test_expired_attachment_is_receipted(workspace, capsys):
     attach(workspace, "chat-a", [warrant])
     guard = SharedLocalGuard(workspace.path)
     time.sleep(2.1)
-    assert "expired" in guard.pre_tool_call("get_order", ARGS, session_id="chat-a")["message"]
+    message = guard.pre_tool_call("get_order", ARGS, session_id="chat-a")["message"]
+    assert message == f"Warrant '{warrant.id}' has expired. Ask the operator to issue a replacement."
     assert receipts(workspace, capsys) == [("DENY", str(warrant.id), "warrant-expired")]
 
 
@@ -68,3 +70,34 @@ def test_constraint_denial_is_receipted_once(workspace, capsys):
     guard = SharedLocalGuard(workspace.path)
     assert guard.pre_tool_call("get_order", {"order_id": "OTHER"}, session_id="chat-a")["action"] == "block"
     assert receipts(workspace, capsys) == [("DENY", str(warrant.id), "constraint-violation")]
+
+
+def test_untrusted_warrant_planted_in_workspace_is_refused(workspace, capsys):
+    """attach() checks trust, but the guard must not rely on that: files can change afterwards."""
+    from tenuo import SigningKey
+    from tenuo.local_cli.files import write_yaml
+    from tenuo.local_cli.sessions import session_path
+    from tenuo.local_cli.warrants import encode_chain
+
+    template = {"version": 2, "ttl": "30m", "capabilities": {"get_order": {"order_id": "A-1001"}}}
+    forged = WarrantTemplate(template).mint(SigningKey.generate(), workspace.public_key("agent"))
+    (workspace.path / "warrants" / f"{forged.id}.warrant").write_text(encode_chain([forged]) + "\n")
+    write_yaml(session_path(workspace, "chat-a"), {"version": 1, "session_id": "chat-a", "warrants": [str(forged.id)]})
+    guard = SharedLocalGuard(workspace.path)
+    result = guard.pre_tool_call("get_order", ARGS, session_id="chat-a")
+    assert result["action"] == "block"
+    assert result["message"].endswith("Run tenuo-cli doctor.")
+
+
+@pytest.mark.skipif(
+    not hasattr(__import__("tenuo._enforcement", fromlist=["x"]), "_refusal_before_approval"),
+    reason="needs the tenuo SDK that checks chain validity before requesting approval",
+)
+def test_expired_gated_warrant_writes_no_approval_request(workspace, capsys):
+    template = {"version": 2, "ttl": "1s", "capabilities": {"get_order": {"order_id": "A-1001"}},
+                "approvals": {"keys": [str(workspace.path / "keys/approver.pub")], "required": {"get_order": "always"}}}
+    attach(workspace, "chat-a", [WarrantTemplate(template).mint(workspace.signing_key("issuer"), workspace.public_key("agent"))])
+    guard = SharedLocalGuard(workspace.path)
+    time.sleep(2.1)
+    assert "has expired" in guard.pre_tool_call("get_order", ARGS, session_id="chat-a")["message"]
+    assert not list((workspace.path / "requests").glob("*.yaml"))
