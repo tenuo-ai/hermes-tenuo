@@ -8,6 +8,19 @@ from dataclasses import replace
 from hermes_tenuo.hermes_guard import HermesAuditEvent, HermesGuard, _format_denial_reason
 
 
+# What the operator can do about a refusal of an attached warrant.
+_NEXT_STEP = {
+    "expired": "Ask the operator to issue a replacement.",
+    "revoked": "Ask the operator for new authority.",
+    "untrusted_issuer": "Run tenuo-cli doctor.",
+}
+
+
+def _with_next_step(reason, error_type):
+    step = _NEXT_STEP.get(error_type)
+    return f"{reason.rstrip('.')}. {step}" if step else reason
+
+
 class SharedLocalGuard(HermesGuard):
     """Check one attached full warrant per call; never combine partial grants."""
 
@@ -43,7 +56,8 @@ class SharedLocalGuard(HermesGuard):
                         raise ValueError("warrant ID does not match its stored filename")
                     if chain[-1].session_id is not None and chain[-1].session_id != session_id:
                         raise ValueError("warrant is bound to a different session")
-                    snapshot.authorizer.verify_chain(chain)
+                    # Expiry, revocation and trust are judged by the runtime's authorizer,
+                    # which signs a receipt for the refusal; checking here first would skip it.
                     with self.authority.scope(replace(snapshot, chain=chain)) as (current, session, approvals):
                         result = enforce_tool_call(tool_name=tool_name, tool_args=args,
                                                    bound_warrant=session.bound, trusted_roots=current.roots,
@@ -51,16 +65,16 @@ class SharedLocalGuard(HermesGuard):
                     if result.allowed:
                         allowed, selected, reason = True, wid, ""
                         break
-                    reason = _format_denial_reason(result, tool_name)
+                    reason = _with_next_step(_format_denial_reason(result, tool_name), result.error_type)
                 except ApprovalRequired as exc:
                     pending = str(exc)
                 except Exception as exc:
-                    from tenuo.exceptions import ExpiredError, RevokedError
+                    from tenuo.exceptions import ExpiredError, RevokedError, UntrustedRoot
 
-                    if isinstance(exc, RevokedError):
-                        reason = f"Warrant {wid} is revoked; ask the operator for new authority"
-                    elif isinstance(exc, ExpiredError):
-                        reason = f"Warrant {wid} has expired; ask the operator to issue a replacement"
+                    kinds = ((RevokedError, "revoked"), (ExpiredError, "expired"), (UntrustedRoot, "untrusted_issuer"))
+                    kind = next((k for cls, k in kinds if isinstance(exc, cls)), None)
+                    if kind is not None:
+                        reason = _with_next_step(str(exc), kind)
                     else:
                         reason = f"tenuo: attached warrant unavailable ({type(exc).__name__}); run tenuo-cli doctor"
         except FileNotFoundError:
