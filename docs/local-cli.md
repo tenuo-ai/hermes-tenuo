@@ -125,8 +125,8 @@ The first blocked tool call reports the session ID and an attachment command.
 Use that exact session ID in the controller workspace:
 
 ```bash
-tenuo-cli session attach --session SESSION_ID --file .tenuo/warrants/WARRANT_ID.warrant
-tenuo-cli session show --session SESSION_ID
+hermes-tenuo session attach --session SESSION_ID --file .tenuo/warrants/WARRANT_ID.warrant
+hermes-tenuo session show --session SESSION_ID
 ```
 
 Deliver the updated public artifacts and manifest to the runtime directory,
@@ -148,7 +148,7 @@ isn't known in advance. Attach the warrant to the job instead; it covers every
 run of that job and no other session:
 
 ```bash
-tenuo-cli session attach --session cron_JOB_ID --file nightly.warrant
+hermes-tenuo session attach --session cron_JOB_ID --file nightly.warrant
 ```
 
 A run's own attachment, if it has one, takes precedence over its job's. In

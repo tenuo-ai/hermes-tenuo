@@ -21,7 +21,7 @@ hermes -p reviewer …                           # its config: local_home, local
 cp recipes/review-pr/warrant.yaml review.yaml  # the PR number
 tenuo-cli warrant issue --template review.yaml --holder reviewer \
     --from fix-412.warrant --out review-57.warrant
-tenuo-cli session attach --session <reviewer's session ID> --file review-57.warrant --holder reviewer
+hermes-tenuo session attach --session <reviewer's session ID> --file review-57.warrant --holder reviewer
 ```
 
 ## What it allows and refuses

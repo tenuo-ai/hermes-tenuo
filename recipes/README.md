@@ -23,7 +23,7 @@ tenuo-cli calls summary                # what it called, with which arguments, i
 cp recipes/<recipe>/warrant.yaml .     # change the lines marked EDIT to your values
 tenuo-cli template validate --file warrant.yaml
 tenuo-cli warrant issue --template warrant.yaml --holder agent --out job.warrant
-tenuo-cli session attach --session <session or cron_JOB_ID> --file job.warrant
+hermes-tenuo session attach --session <session or cron_JOB_ID> --file job.warrant
 tenuo-cli calls summary                # still observing: what this warrant would allow and refuse
 tenuo-cli mode enforce                 # the next call is checked
 ```

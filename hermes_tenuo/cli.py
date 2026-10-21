@@ -682,6 +682,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     default = Path(os.environ.get("TENUO_HOME", "~/.tenuo")).expanduser().absolute()
     tenuo_cli = "tenuo-cli" if home == default else f"tenuo-cli --home {shlex.quote(str(home))}"
+    hermes_session = ("hermes-tenuo session" if home == default
+                      else f"hermes-tenuo session --home {shlex.quote(str(home))}")
     print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
           + (" with development identities" if created else ""))
     print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
@@ -692,13 +694,41 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("Every tool call is recorded with its arguments. Then:")
         print(f"  1. {tenuo_cli} calls summary")
         print("     what it called, and the commands to draft and issue a warrant")
-        print(f"  2. {tenuo_cli} session attach --session cron_JOB_ID --file JOB.warrant")
+        print(f"  2. {hermes_session} attach --session cron_JOB_ID --file JOB.warrant")
         print("     one attach covers every run of a cron job; use the session ID for a chat")
         print(f"  3. {tenuo_cli} mode enforce")
         print("     the next call is checked; no gateway restart")
     else:
         print("Calls are enforced. A session needs an attached warrant:")
-        print(f"  {tenuo_cli} session attach --session SESSION_ID --file WARRANT")
+        print(f"  {hermes_session} attach --session SESSION_ID --file WARRANT")
+    return 0
+
+
+def cmd_session(args: argparse.Namespace) -> int:
+    """Route warrants to Hermes sessions: the attachments local_home mode reads."""
+    import yaml
+    from tenuo.local import attach, detach, list_sessions, load_warrant_chain, read_session
+    from tenuo.local_cli.workspace import Workspace
+
+    workspace = Workspace(args.home)
+    try:
+        workspace.config
+        if args.action == "list":
+            result = {"sessions": list_sessions(workspace)}
+        elif args.action == "attach":
+            result = {"session": attach(workspace, args.session, load_warrant_chain(args.file), holder=args.holder)}
+        elif args.action == "detach":
+            result = {"session": detach(workspace, args.session, args.id)}
+        else:
+            result = {"session": read_session(workspace, args.session)}
+    except FileNotFoundError:
+        print(f"✗  no attachments for session {args.session!r}" if args.action != "list"
+              else "✗  workspace not found; run hermes-tenuo setup", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"✗  {exc}", file=sys.stderr)
+        return 1
+    print(yaml.safe_dump(result, sort_keys=False).rstrip())
     return 0
 
 
@@ -742,6 +772,20 @@ def main() -> None:
 
     subparsers.add_parser("demo", help="Print a local allow/deny transcript (no Hermes process)")
 
+    session_p = subparsers.add_parser(
+        "session", help="Attach warrants to Hermes sessions (a chat, or cron_<job_id> for every run of a job)")
+    session_p.add_argument("--home", metavar="DIR", help="Tenuo workspace (default: TENUO_HOME or ~/.tenuo)")
+    session_actions = session_p.add_subparsers(dest="action", required=True)
+    session_actions.add_parser("list")
+    for action in ("show", "attach", "detach"):
+        sub = session_actions.add_parser(action)
+        sub.add_argument("--session", required=True, help="Hermes session ID, or cron_<job_id>")
+        if action == "attach":
+            sub.add_argument("--file", required=True, help="the warrant file from tenuo-cli warrant issue")
+            sub.add_argument("--holder", default="agent", help="the agent key the warrant was issued to")
+        if action == "detach":
+            sub.add_argument("--id", required=True, help="the warrant ID to detach")
+
     setup_p = subparsers.add_parser(
         "setup", help="Connect this Hermes profile to a tenuo-cli workspace and start in observe mode")
     setup_p.add_argument("--home", metavar="DIR", help="Tenuo workspace (default: TENUO_HOME or ~/.tenuo)")
@@ -759,6 +803,8 @@ def main() -> None:
         sys.exit(cmd_doctor(args))
     elif args.command == "audit":
         sys.exit(cmd_audit(args))
+    elif args.command == "session":
+        sys.exit(cmd_session(args))
     elif args.command == "setup":
         sys.exit(cmd_setup(args))
     elif args.command == "demo":

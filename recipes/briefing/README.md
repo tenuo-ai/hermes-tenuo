@@ -20,7 +20,7 @@ hermes cron list                       # the job's ID, e.g. 1a2b3c
 hermes-tenuo setup                     # if you haven't: observe mode
 cp recipes/briefing/warrant.yaml briefing.yaml   # set the folder
 tenuo-cli warrant issue --template briefing.yaml --holder agent --out briefing.warrant
-tenuo-cli session attach --session cron_1a2b3c --file briefing.warrant
+hermes-tenuo session attach --session cron_1a2b3c --file briefing.warrant
 tenuo-cli mode enforce
 ```
 

@@ -31,7 +31,7 @@ Per issue, edit the owner, repo, issue number and branch, then:
 
 ```bash
 tenuo-cli warrant issue --template fix-issue.yaml --holder agent --out fix-412.warrant
-tenuo-cli session attach --session <the chat's session ID> --file fix-412.warrant
+hermes-tenuo session attach --session <the chat's session ID> --file fix-412.warrant
 ```
 
 ## What it allows and refuses

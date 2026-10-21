@@ -52,3 +52,30 @@ def test_setup_refuses_a_profile_with_legacy_authority(profile, tmp_path, monkey
     assert run(monkeypatch, "--home", str(tmp_path / ".tenuo")) == 2
     assert "local_home" not in (profile / "config.yaml").read_text()
     assert not (tmp_path / ".tenuo").exists()
+
+
+def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
+    from tenuo import WarrantTemplate
+    from tenuo.local_cli.warrants import encode_chain
+    from tenuo.local_cli.workspace import Workspace
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    warrant = WarrantTemplate({"version": 2, "ttl": "1h", "capabilities": {"web_search": {}}}).mint(
+        workspace.signing_key("issuer"), workspace.public_key("agent"))
+    path = tmp_path / "job.warrant"
+    path.write_text(encode_chain([warrant]))
+
+    def session(*argv):
+        monkeypatch.setattr(sys, "argv", ["hermes-tenuo", "session", "--home", str(workspace.path), *argv])
+        with pytest.raises(SystemExit) as done:
+            cli.main()
+        return done.value.code, capsys.readouterr()
+
+    code, out = session("attach", "--session", "cron_briefing", "--file", str(path))
+    assert code == 0 and str(warrant.id) in out.out
+    assert str(warrant.id) in session("list")[1].out
+    assert str(warrant.id) in session("show", "--session", "cron_briefing")[1].out
+    assert session("detach", "--session", "cron_briefing", "--id", str(warrant.id))[0] == 0
+    code, out = session("show", "--session", "chat-x")
+    assert code == 1 and "no attachments" in out.err

@@ -21,7 +21,7 @@ cp recipes/house-sitter/warrant.yaml sitter.yaml   # your entity IDs and the sta
 tenuo-cli warrant issue --template sitter.yaml --holder agent --out sitter.warrant
 # the sitter sends their first message; their session ID is in:
 tenuo-cli calls list --limit 5         # observe mode, or the first refusal names it
-tenuo-cli session attach --session <their session ID> --file sitter.warrant
+hermes-tenuo session attach --session <their session ID> --file sitter.warrant
 tenuo-cli mode enforce
 ```
 

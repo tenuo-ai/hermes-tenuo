@@ -37,7 +37,7 @@ class SharedLocalGuard(HermesGuard):
     """Check one attached full warrant per call; never combine partial grants.
 
     A cron run uses its own session's attachments if it has any, else those of
-    its job (``tenuo-cli session attach --session cron_<job_id>``), so an
+    its job (``hermes-tenuo session attach --session cron_<job_id>``), so an
     unattended job needs one attachment rather than one per run.
 
     With the workspace in observe mode (``tenuo-cli mode observe``) nothing is
@@ -83,11 +83,11 @@ class SharedLocalGuard(HermesGuard):
         job = cron_job(session_id)
         if job:
             reason = (f"Cron job {job[len('cron_'):]!r} has no attached authority. Ask an operator to run "
-                      f"tenuo-cli session attach --session {shlex.quote(job)} --file WARRANT "
+                      f"hermes-tenuo session attach --session {shlex.quote(job)} --file WARRANT "
                       "(it covers every run of this job)")
         else:
             reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
-                      f"tenuo-cli session attach --session {shlex.quote(session_id)} --file WARRANT")
+                      f"hermes-tenuo session attach --session {shlex.quote(session_id)} --file WARRANT")
         try:
             snapshot = self.authority.snapshot()
             manifest = self._manifest(session_id, job)
@@ -196,10 +196,10 @@ class SharedLocalGuard(HermesGuard):
         pass  # A new child session must receive explicit authority.
 
     def set_session_warrant(self, *args, **kwargs):
-        raise ValueError("local_home uses tenuo-cli session attach, not in-memory attachments")
+        raise ValueError("local_home uses hermes-tenuo session attach, not in-memory attachments")
 
     def clear_session_warrant(self, *args, **kwargs):
-        raise ValueError("local_home uses tenuo-cli session detach")
+        raise ValueError("local_home uses hermes-tenuo session detach")
 
     def set_trusted_roots(self, *args, **kwargs):
         raise ValueError("local_home reads operator-controlled trust files")
@@ -237,7 +237,7 @@ def report_shared_local_config():
         print("  Mode: shared local CLI files (enforcement enabled)")
         print(f"  Verified {valid} current session attachment(s)")
         if not valid:
-            print("  Calls deny until an operator uses tenuo-cli session attach for the reported session ID")
+            print("  Calls deny until an operator uses hermes-tenuo session attach for the reported session ID")
         return valid > 0
     except Exception:
         print("  ✗  shared local setup invalid; use the matching SDK and tenuo-cli doctor")
