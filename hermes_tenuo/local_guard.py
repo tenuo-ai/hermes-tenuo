@@ -151,10 +151,11 @@ class SharedLocalGuard(HermesGuard):
         allowed, selected, reason, pending, kind, argument = self._evaluate(
             tool_name, args, session_id, observing=observing)
         # Hermes can run both the pre_tool_call hook and the registry callback
-        # for one call. Both check it; only the first records and audits it.
+        # for one call. Both check it; a second check that reaches the same
+        # outcome isn't recorded or audited again, but a changed one is.
         with self._pre_decisions_lock:
-            repeat = bool(tool_call_id) and tool_call_id in self._pre_decisions
-        if observing and not repeat:
+            previous = self._pre_decisions.get(tool_call_id) if tool_call_id else None
+        if observing and not (previous is not None and previous[0]):
             decision = "allow" if allowed else (None if kind == "no_warrant" else "deny")
             try:
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
@@ -167,6 +168,7 @@ class SharedLocalGuard(HermesGuard):
             if not allowed:
                 reason = f"observe: would deny: {reason}"
             allowed, pending = True, ""
+        repeat = previous is not None and previous[0] == allowed
         self._remember_decision(tool_call_id, allowed, reason)
         if self._audit_callback and not repeat:
             try:

@@ -122,3 +122,13 @@ def test_hook_and_registry_paths_record_and_audit_one_call_once(observing):
     guard.pre_tool_call("terminal", {"command": "ls"}, session_id="chat-a", tool_call_id="t2")
     assert [line["args"] for line in recorded(observing)] == [{"command": "ls"}, {"command": "ls"}]
     assert [event.tool_call_id for event in events] == ["t1", "t2"]
+
+
+def test_a_decision_that_changes_between_hook_and_registry_is_audited(observing):
+    events = []
+    guard = SharedLocalGuard(observing.path, audit_callback=events.append)
+    assert guard.pre_tool_call("terminal", {"command": "ls"}, session_id="chat-a", tool_call_id="t1") is None
+    observing.set_mode("enforce")  # switched between the hook and the registry callback
+    assert guard.pre_tool_call("terminal", {"command": "ls"}, session_id="chat-a", tool_call_id="t1")["action"] == "block"
+    assert [(event.tool_call_id, event.decision) for event in events] == [("t1", "ALLOW"), ("t1", "DENY")]
+    assert len(recorded(observing)) == 1
