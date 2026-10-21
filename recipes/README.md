@@ -32,13 +32,13 @@ attach a warrant for yourself first (see [house-sitter/owner.yaml](house-sitter/
 ## The steps
 
 ```bash
-hermes-tenuo setup                       # workspace, plugin on, observe mode: nothing blocked
+tenuo-cli hermes setup                       # workspace, plugin on, observe mode: nothing blocked
 # use Hermes as usual for a day or two
 tenuo-cli calls summary                  # what it called, with which arguments, grouped by job or person
 curl -O https://raw.githubusercontent.com/tenuo-ai/hermes-tenuo/main/recipes/<recipe>/warrant.yaml
 # change the lines marked EDIT
 tenuo-cli warrant issue --template warrant.yaml --holder agent --out job.warrant
-hermes-tenuo session attach --session <who> --file job.warrant
+tenuo-cli hermes session attach --session <who> --file job.warrant
 tenuo-cli mode enforce                   # the next call is checked
 ```
 

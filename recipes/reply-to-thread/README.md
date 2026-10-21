@@ -29,7 +29,7 @@ Per thread, edit your address, the thread ID (from the Gmail URL or
 
 ```bash
 tenuo-cli warrant issue --template warrant.yaml --holder agent --out reply.warrant
-hermes-tenuo session attach --session telegram:<your user ID> --file reply.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --file reply.warrant
 ```
 
 ## What it allows and refuses

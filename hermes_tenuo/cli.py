@@ -682,8 +682,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     default = Path(os.environ.get("TENUO_HOME", "~/.tenuo")).expanduser().absolute()
     tenuo_cli = "tenuo-cli" if home == default else f"tenuo-cli --home {shlex.quote(str(home))}"
-    hermes_session = ("hermes-tenuo session" if home == default
-                      else f"hermes-tenuo session --home {shlex.quote(str(home))}")
+    hermes_session = ("tenuo-cli hermes session" if home == default
+                      else f"tenuo-cli hermes session --home {shlex.quote(str(home))}")
     print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
           + (" with development identities" if created else ""))
     print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
@@ -723,7 +723,7 @@ def cmd_session(args: argparse.Namespace) -> int:
             result = {"session": read_session(workspace, args.session)}
     except FileNotFoundError:
         print(f"✗  no attachments for session {args.session!r}" if args.action != "list"
-              else "✗  workspace not found; run hermes-tenuo setup", file=sys.stderr)
+              else "✗  workspace not found; run tenuo-cli hermes setup", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"✗  {exc}", file=sys.stderr)
@@ -732,9 +732,9 @@ def cmd_session(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> None:
+def build_parser(prog: str = "tenuo-cli hermes") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="hermes-tenuo",
+        prog=prog,
         description="Tenuo authorization plugin for Hermes Agent",
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -791,28 +791,31 @@ def main() -> None:
     setup_p.add_argument("--home", metavar="DIR", help="Tenuo workspace (default: TENUO_HOME or ~/.tenuo)")
     setup_p.add_argument("--enforce", action="store_true", help="Start in enforce mode instead of observe")
 
-    args = parser.parse_args()
+    return parser
 
-    if args.command == "mint":
-        sys.exit(cmd_mint(args))
-    elif args.command == "status":
-        sys.exit(cmd_status(args))
-    elif args.command == "verify":
-        sys.exit(cmd_verify(args))
-    elif args.command == "doctor":
-        sys.exit(cmd_doctor(args))
-    elif args.command == "audit":
-        sys.exit(cmd_audit(args))
-    elif args.command == "session":
-        sys.exit(cmd_session(args))
-    elif args.command == "setup":
-        sys.exit(cmd_setup(args))
-    elif args.command == "demo":
+
+def run(argv: list[str] | None = None, prog: str = "tenuo-cli hermes") -> int:
+    parser = build_parser(prog)
+    args = parser.parse_args(argv)
+    commands = {"mint": cmd_mint, "status": cmd_status, "verify": cmd_verify, "doctor": cmd_doctor,
+                "audit": cmd_audit, "session": cmd_session, "setup": cmd_setup}
+    if args.command in commands:
+        return commands[args.command](args)
+    if args.command == "demo":
         from hermes_tenuo.demo import main as cmd_demo
-        sys.exit(cmd_demo())
-    else:
-        parser.print_help()
-        sys.exit(0)
+        return cmd_demo() or 0
+    parser.print_help()
+    return 0
+
+
+def tenuo_cli(argv: list[str]) -> int:
+    """`tenuo-cli hermes …`, registered as a tenuo.cli entry point."""
+    return run(argv)
+
+
+def main() -> None:
+    """The standalone `hermes-tenuo` command, same subcommands."""
+    sys.exit(run(prog="hermes-tenuo"))
 
 
 if __name__ == "__main__":

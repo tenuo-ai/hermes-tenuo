@@ -23,7 +23,7 @@ hermes profile create reviewer                       # in its config: hermes-ten
                                                      # and the same github MCP server
 curl -O …/recipes/review-prs/warrant.yaml            # owner, repo, the PR numbers
 tenuo-cli warrant issue --template warrant.yaml --holder reviewer --out review.warrant
-hermes-tenuo session attach --session <reviewer's user ID or job> --file review.warrant --holder reviewer
+tenuo-cli hermes session attach --session <reviewer's user ID or job> --file review.warrant --holder reviewer
 ```
 
 New PRs to review: issue a warrant naming them and attach it alongside.

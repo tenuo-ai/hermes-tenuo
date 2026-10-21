@@ -1,4 +1,4 @@
-"""hermes-tenuo setup: one command from install to observing, without hand-editing YAML."""
+"""tenuo-cli hermes setup: one command from install to observing, without hand-editing YAML."""
 import pytest
 
 pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
@@ -66,11 +66,14 @@ def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
     path = tmp_path / "job.warrant"
     path.write_text(encode_chain([warrant]))
 
+    from tenuo.local_cli import commands
+    if not hasattr(commands, "integrations"):
+        pytest.skip("tenuo-cli without integration commands")
+    assert commands.integrations()["hermes"].value == "hermes_tenuo.cli:tenuo_cli"
+
     def session(*argv):
-        monkeypatch.setattr(sys, "argv", ["hermes-tenuo", "session", "--home", str(workspace.path), *argv])
-        with pytest.raises(SystemExit) as done:
-            cli.main()
-        return done.value.code, capsys.readouterr()
+        code = commands.main(["--home", str(workspace.path), "hermes", "session", *argv])
+        return code, capsys.readouterr()
 
     code, out = session("attach", "--session", "cron_briefing", "--file", str(path))
     assert code == 0 and str(warrant.id) in out.out
@@ -79,3 +82,8 @@ def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
     assert session("detach", "--session", "cron_briefing", "--id", str(warrant.id))[0] == 0
     code, out = session("show", "--session", "chat-x")
     assert code == 1 and "no attachments" in out.err
+    # The standalone command still works.
+    monkeypatch.setattr(sys, "argv", ["hermes-tenuo", "session", "--home", str(workspace.path), "list"])
+    with pytest.raises(SystemExit) as done:
+        cli.main()
+    assert done.value.code == 0

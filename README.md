@@ -12,7 +12,7 @@ naming the tools it may call and the argument values it may use, for a set time.
 | [Reply to a thread](recipes/reply-to-thread/) | send the reply itself instead of a draft: one thread, one recipient, one hour |
 | [Project task](recipes/project-task/) | work in one repo: files under the project, exactly the commands you list |
 
-Start with `hermes-tenuo setup`: it watches what Hermes calls without blocking
+Start with `tenuo-cli hermes setup`: it watches what Hermes calls without blocking
 anything, then you pick a recipe and switch to enforce
 ([recipes](recipes/), [local CLI setup](docs/local-cli.md)). The recipes use
 `local_home` mode and `tenuo-cli`, which aren't released yet; until they are,

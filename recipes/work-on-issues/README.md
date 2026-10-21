@@ -37,7 +37,7 @@ permission, and protect `main` with required reviews.
 ```bash
 curl -O …/recipes/work-on-issues/warrant.yaml        # owner and repo
 tenuo-cli warrant issue --template warrant.yaml --holder agent --out issues.warrant
-hermes-tenuo session attach --session telegram:<your user ID> --file issues.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --file issues.warrant
 ```
 
 Attach it to whoever hands out the work: your user ID for issues sent from chat,

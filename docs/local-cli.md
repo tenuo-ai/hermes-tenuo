@@ -12,7 +12,7 @@ unavailable SDK helper blocks tools rather than falling back to legacy mode.
 ## Start in one command
 
 ```bash
-hermes-tenuo setup
+tenuo-cli hermes setup
 ```
 
 This creates the Tenuo workspace at `TENUO_HOME` or `~/.tenuo` with
@@ -125,8 +125,8 @@ The first blocked tool call reports the session ID and an attachment command.
 Use that exact session ID in the controller workspace:
 
 ```bash
-hermes-tenuo session attach --session SESSION_ID --file .tenuo/warrants/WARRANT_ID.warrant
-hermes-tenuo session show --session SESSION_ID
+tenuo-cli hermes session attach --session SESSION_ID --file .tenuo/warrants/WARRANT_ID.warrant
+tenuo-cli hermes session show --session SESSION_ID
 ```
 
 Deliver the updated public artifacts and manifest to the runtime directory,
@@ -148,7 +148,7 @@ isn't known in advance. Attach the warrant to the job instead; it covers every
 run of that job and no other session:
 
 ```bash
-hermes-tenuo session attach --session cron_JOB_ID --file nightly.warrant
+tenuo-cli hermes session attach --session cron_JOB_ID --file nightly.warrant
 ```
 
 A run's own attachment, if it has one, takes precedence over its job's. In

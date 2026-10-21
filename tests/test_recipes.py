@@ -119,7 +119,7 @@ def test_house_sitter_by_person_not_session(workspace, monkeypatch):
         ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})]) == [True]
     blocked = guard.pre_tool_call("ha_get_state", {"entity_id": "light.guest_room"},
                                   session_id="20261021_110000_dddd4444", tool_call_id="x")
-    assert "telegram:5550099" in blocked["message"] and "hermes-tenuo session attach" in blocked["message"]
+    assert "telegram:5550099" in blocked["message"] and "tenuo-cli hermes session attach" in blocked["message"]
 
 
 GH = {"owner": "your-org", "repo": "your-repo"}

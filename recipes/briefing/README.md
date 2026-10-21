@@ -18,10 +18,10 @@ arguments; `read_file` and `write_file` under the notes folder.
 
 ```bash
 hermes cron list                       # the job's ID, e.g. 1a2b3c
-hermes-tenuo setup                     # if you haven't: observe mode
+tenuo-cli hermes setup                     # if you haven't: observe mode
 curl -O …/recipes/briefing/warrant.yaml   # set the folder
 tenuo-cli warrant issue --template warrant.yaml --holder agent --out briefing.warrant
-hermes-tenuo session attach --session cron_1a2b3c --file briefing.warrant
+tenuo-cli hermes session attach --session cron_1a2b3c --file briefing.warrant
 tenuo-cli mode enforce                 # see "Before you switch to enforce" in the index
 ```
 
