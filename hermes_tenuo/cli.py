@@ -35,6 +35,7 @@ import math
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -626,6 +627,72 @@ def _parse_ttl(ttl: str) -> int:
 # Entry point
 # ---------------------------------------------------------------------------
 
+_LEGACY_KEYS = ("warrant", "child_warrant", "signing_key_file", "signing_key_env", "trusted_root",
+                "trusted_root_file", "session_warrants_dir", "operation_requests_dir",
+                "operation_approvals_dir", "revocations_dir")
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Connect this Hermes profile to a tenuo-cli workspace and start in observe mode."""
+    import shutil
+
+    import yaml
+    from tenuo.local_cli.workspace import Workspace
+
+    from hermes_tenuo._home import config_path
+
+    home = Path(args.home or os.environ.get("TENUO_HOME", "~/.tenuo")).expanduser().absolute()
+
+    path = config_path()
+    config = yaml.safe_load(path.read_text()) if path.exists() else {}
+    if not isinstance(config, dict):
+        print(f"✗  {path} is not a YAML mapping; fix it before running setup", file=sys.stderr)
+        return 2
+    plugins = config.setdefault("plugins", {}) or {}
+    config["plugins"] = plugins
+    entries = plugins.setdefault("entries", {}) or {}
+    plugins["entries"] = entries
+    entry = entries.get("hermes-tenuo") or {}
+    legacy = sorted(key for key in _LEGACY_KEYS if key in entry)
+    if legacy or entry.get("on_denial", "block") != "block":
+        print(f"✗  {path} configures hermes-tenuo with {', '.join(legacy) or 'on_denial: log'}; "
+              "remove those settings to use a tenuo-cli workspace", file=sys.stderr)
+        return 2
+    workspace = Workspace(home)
+    created = not (home / "config.yaml").exists()
+    if created:
+        workspace.initialize(dev=True)
+    mode = "enforce" if args.enforce else "observe"
+    workspace.set_mode(mode)
+
+    enabled = plugins.get("enabled") or []
+    if "hermes-tenuo" not in enabled:
+        plugins["enabled"] = [*enabled, "hermes-tenuo"]
+    entry["local_home"] = str(home)
+    entries["hermes-tenuo"] = entry
+    if path.exists():
+        backup = path.with_name(path.name + ".before-hermes-tenuo")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+            print(f"  saved the previous config to {backup}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
+          + (" with development identities" if created else ""))
+    print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
+    print(f"✓  mode: {mode}")
+    print()
+    if mode == "observe":
+        print("Nothing is blocked yet. Run Hermes as usual: chats, cron jobs, subagents.")
+        print("Every tool call is recorded with its arguments. Then:")
+        print("  tenuo-cli calls summary        what it called, and the commands to draft a warrant")
+    else:
+        print("Calls are enforced. A session needs an attached warrant:")
+        print("  tenuo-cli session attach --session SESSION_ID --file WARRANT")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="hermes-tenuo",
@@ -666,6 +733,11 @@ def main() -> None:
 
     subparsers.add_parser("demo", help="Print a local allow/deny transcript (no Hermes process)")
 
+    setup_p = subparsers.add_parser(
+        "setup", help="Connect this Hermes profile to a tenuo-cli workspace and start in observe mode")
+    setup_p.add_argument("--home", metavar="DIR", help="Tenuo workspace (default: TENUO_HOME or ~/.tenuo)")
+    setup_p.add_argument("--enforce", action="store_true", help="Start in enforce mode instead of observe")
+
     args = parser.parse_args()
 
     if args.command == "mint":
@@ -678,6 +750,8 @@ def main() -> None:
         sys.exit(cmd_doctor(args))
     elif args.command == "audit":
         sys.exit(cmd_audit(args))
+    elif args.command == "setup":
+        sys.exit(cmd_setup(args))
     elif args.command == "demo":
         from hermes_tenuo.demo import main as cmd_demo
         sys.exit(cmd_demo())

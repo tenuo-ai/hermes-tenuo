@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 from dataclasses import replace
 
@@ -16,6 +17,17 @@ _NEXT_STEP = {
 }
 
 
+# Hermes names each cron run cron_<job_id>_<YYYYmmdd_HHMMSS>. Attaching to
+# cron_<job_id> covers every run of that one job, and nothing else.
+_CRON_RUN = re.compile(r"(cron_.+)_\d{8}_\d{6}")
+
+
+def cron_job(session_id):
+    """The job key a cron run's attachments live under, or None for other sessions."""
+    match = _CRON_RUN.fullmatch(session_id or "")
+    return match.group(1) if match else None
+
+
 def _with_next_step(reason, error_type):
     step = _NEXT_STEP.get(error_type)
     return f"{reason.rstrip('.')}. {step}" if step else reason
@@ -24,18 +36,23 @@ def _with_next_step(reason, error_type):
 class SharedLocalGuard(HermesGuard):
     """Check one attached full warrant per call; never combine partial grants.
 
+    A cron run uses its own session's attachments if it has any, else those of
+    its job (``tenuo-cli session attach --session cron_<job_id>``), so an
+    unattended job needs one attachment rather than one per run.
+
     With the workspace in observe mode (``tenuo-cli mode observe``) nothing is
     blocked: each call is recorded to the workspace's observations.jsonl, with
     its arguments and the decision enforcement would have made, for drafting a
-    warrant. The Hermes session is the recorded run.
+    warrant. The Hermes session is the recorded run; the step is ``step`` when
+    given, else the cron job key for a cron run, else ``hermes``.
     """
 
-    def __init__(self, home, *, key="agent", step="hermes", audit_callback=None):
+    def __init__(self, home, *, key="agent", step=None, audit_callback=None):
         from tenuo.local import LocalAuthority
 
         if not isinstance(key, str) or not key.strip():
             raise ValueError("local_key must name the agent key or a private key file")
-        if not isinstance(step, str) or not step.strip():
+        if step is not None and (not isinstance(step, str) or not step.strip()):
             raise ValueError("local_step must be a nonempty name")
         super().__init__(require_session_warrant=True, audit_callback=audit_callback)
         self.authority = LocalAuthority(path=home, key=key)
@@ -58,21 +75,27 @@ class SharedLocalGuard(HermesGuard):
         """
         from tenuo._enforcement import enforce_tool_call
         from tenuo.approval import ApprovalRequired
-        from tenuo.local import load_warrant_chain, read_session
+        from tenuo.local import load_warrant_chain
 
         allowed, selected, pending, kind, argument = False, "", "", "no_warrant", None
         snapshot = None
-        reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
-                  f"tenuo-cli session attach --session {shlex.quote(session_id)} --file WARRANT")
+        job = cron_job(session_id)
+        if job:
+            reason = (f"Cron job {job[len('cron_'):]!r} has no attached authority. Ask an operator to run "
+                      f"tenuo-cli session attach --session {shlex.quote(job)} --file WARRANT "
+                      "(it covers every run of this job)")
+        else:
+            reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
+                      f"tenuo-cli session attach --session {shlex.quote(session_id)} --file WARRANT")
         try:
             snapshot = self.authority.snapshot()
-            manifest = read_session(self.authority.workspace, session_id)
+            manifest = self._manifest(session_id, job)
             for wid in manifest["warrants"]:
                 try:
                     chain = load_warrant_chain(self.authority.workspace.path / "warrants" / (wid + ".warrant"))
                     if str(chain[-1].id) != wid:
                         raise ValueError("warrant ID does not match its stored filename")
-                    if chain[-1].session_id is not None and chain[-1].session_id != session_id:
+                    if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, job):
                         raise ValueError("warrant is bound to a different session")
                     selected = wid
                     # Expiry, revocation and trust are judged by the runtime's authorizer,
@@ -109,6 +132,17 @@ class SharedLocalGuard(HermesGuard):
             reason = pending
         return allowed, selected, reason, pending, kind, argument
 
+    def _manifest(self, session_id, job):
+        """This session's attachments, else its cron job's."""
+        from tenuo.local import read_session
+
+        try:
+            return read_session(self.authority.workspace, session_id)
+        except FileNotFoundError:
+            if job is None:
+                raise
+            return read_session(self.authority.workspace, job)
+
     def pre_tool_call(self, tool_name, args, *, session_id="", task_id="", tool_call_id=""):
         observing = self._observing()
         allowed, selected, reason, pending, kind, argument = self._evaluate(
@@ -118,7 +152,8 @@ class SharedLocalGuard(HermesGuard):
             try:
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
                                       warrant_id=selected or None, argument=argument,
-                                      run=session_id or None, step=self.step)
+                                      run=session_id or None,
+                                      step=self.step or cron_job(session_id) or "hermes")
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
             if not allowed:

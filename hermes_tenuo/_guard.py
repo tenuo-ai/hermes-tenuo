@@ -135,7 +135,7 @@ def _build_shared_local_guard(ctx: Any, entry: dict) -> "PluginGuard":
             home = hermes_home() / home
         audit = get_audit_log_path(ctx)
         return PluginGuard(SharedLocalGuard(home, key=entry.get("local_key", "agent"),
-                                            step=entry.get("local_step", "hermes"),
+                                            step=entry.get("local_step"),
                                             audit_callback=LocalAuditLog(audit) if audit else None))
     except Exception as exc:
         raise WarrantLoadError(

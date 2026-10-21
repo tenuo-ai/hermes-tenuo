@@ -9,6 +9,20 @@ This is unreleased. Install the matching Tenuo SDK and plugin checkouts into
 your test environment; the published SDK may not expose these APIs yet. An
 unavailable SDK helper blocks tools rather than falling back to legacy mode.
 
+## Start in one command
+
+```bash
+hermes-tenuo setup
+```
+
+This creates the Tenuo workspace at `TENUO_HOME` or `~/.tenuo` with
+development identities if there isn't one, puts it in observe mode, and adds
+`local_home` to this profile's `config.yaml` (the previous file is kept as
+`config.yaml.before-hermes-tenuo`). Use `--home DIR` for another workspace and
+`--enforce` to start enforcing. Then run Hermes as usual and continue at
+[observe before you write a warrant](#observe-before-you-write-a-warrant).
+The sections below set the same things up by hand.
+
 ## Issue outside Hermes
 
 In your controller workspace:
@@ -126,6 +140,22 @@ existing grant; it is not activation. `session detach` removes one reference,
 while `revocations add --id ID` denies the warrant wherever the updated list is
 enforced. Issuing a replacement does not revoke the previous grant. Attach the
 new ID explicitly and detach or revoke the old one as intended.
+
+### Cron jobs
+
+Hermes names each cron run `cron_<job_id>_<date>_<time>`, so a run's session ID
+isn't known in advance. Attach the warrant to the job instead; it covers every
+run of that job and no other session:
+
+```bash
+tenuo-cli session attach --session cron_JOB_ID --file nightly.warrant
+```
+
+A run's own attachment, if it has one, takes precedence over its job's. In
+observe mode each cron run is recorded with the job as its `step`, so
+`tenuo-cli calls summary` prints one `warrantgen template` command per job.
+Give the warrant a TTL that covers the runs you expect, and reissue it with
+`tenuo-cli warrant reissue` before it expires.
 
 ## Approvals, inspection and validation
 
