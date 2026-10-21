@@ -1,7 +1,10 @@
 """hermes-tenuo setup: one command from install to observing, without hand-editing YAML."""
+import pytest
+
+pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
+
 import sys
 
-import pytest
 import yaml
 
 from hermes_tenuo import cli
@@ -34,7 +37,8 @@ def test_setup_creates_the_workspace_enables_the_plugin_and_observes(profile, tm
     assert yaml.safe_load((workspace / "config.yaml").read_text())["mode"] == "observe"
     assert (profile / "config.yaml.before-hermes-tenuo").read_text().startswith("model:")
     out = capsys.readouterr().out
-    assert "tenuo-cli calls summary" in out
+    assert f"tenuo-cli --home {workspace} calls summary" in out
+    assert f"tenuo-cli --home {workspace} mode enforce" in out
     # Rerunning keeps the workspace and its keys.
     key = (workspace / "keys/agent.key").read_bytes()
     assert run(monkeypatch, "--home", str(workspace), "--enforce") == 0

@@ -1,6 +1,9 @@
 """The plugin consumes the SDK's common format without its own parser or signer."""
 import pytest
 
+pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
+
+
 from tenuo import SigningKey, WarrantTemplate
 from tenuo.local_cli.approvals import sign_response
 from tenuo.local_cli.files import load_yaml, update_revocations, write_yaml

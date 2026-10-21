@@ -1,7 +1,10 @@
 """An unattended cron job needs one attachment for all of its runs, and only its own."""
+import pytest
+
+pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
+
 import json
 
-import pytest
 
 from tenuo import WarrantTemplate
 from tenuo.local_cli.sessions import attach

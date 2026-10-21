@@ -137,10 +137,12 @@ def _build_shared_local_guard(ctx: Any, entry: dict) -> "PluginGuard":
         return PluginGuard(SharedLocalGuard(home, key=entry.get("local_key", "agent"),
                                             step=entry.get("local_step"),
                                             audit_callback=LocalAuditLog(audit) if audit else None))
-    except Exception as exc:
+    except ImportError as exc:
         raise WarrantLoadError(
-            "local authority setup failed; install the matching Tenuo SDK and run tenuo-cli doctor"
+            "local authority setup failed: install the Tenuo SDK that provides tenuo.local, then run tenuo-cli doctor"
         ) from exc
+    except Exception as exc:
+        raise WarrantLoadError(f"local authority setup failed: {exc}; run tenuo-cli doctor") from exc
 
 
 class PluginGuard:

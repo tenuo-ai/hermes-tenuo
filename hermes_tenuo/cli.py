@@ -678,6 +678,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(config, sort_keys=False))
 
+    import shlex
+
+    default = Path(os.environ.get("TENUO_HOME", "~/.tenuo")).expanduser().absolute()
+    tenuo_cli = "tenuo-cli" if home == default else f"tenuo-cli --home {shlex.quote(str(home))}"
     print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
           + (" with development identities" if created else ""))
     print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
@@ -686,14 +690,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if mode == "observe":
         print("Nothing is blocked yet. Run Hermes as usual: chats, cron jobs, subagents.")
         print("Every tool call is recorded with its arguments. Then:")
-        print("  1. tenuo-cli calls summary          what it called, and the commands to draft and issue a warrant")
-        print("  2. tenuo-cli session attach --session cron_JOB_ID --file JOB.warrant")
-        print("                                      one attach covers every run of a cron job;")
-        print("                                      use the session ID for a chat")
-        print("  3. tenuo-cli mode enforce           the next call is checked; no gateway restart")
+        print(f"  1. {tenuo_cli} calls summary")
+        print("     what it called, and the commands to draft and issue a warrant")
+        print(f"  2. {tenuo_cli} session attach --session cron_JOB_ID --file JOB.warrant")
+        print("     one attach covers every run of a cron job; use the session ID for a chat")
+        print(f"  3. {tenuo_cli} mode enforce")
+        print("     the next call is checked; no gateway restart")
     else:
         print("Calls are enforced. A session needs an attached warrant:")
-        print("  tenuo-cli session attach --session SESSION_ID --file WARRANT")
+        print(f"  {tenuo_cli} session attach --session SESSION_ID --file WARRANT")
     return 0
 
 

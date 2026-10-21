@@ -78,6 +78,7 @@ class SharedLocalGuard(HermesGuard):
         from tenuo.local import load_warrant_chain
 
         allowed, selected, pending, kind, argument = False, "", "", "no_warrant", None
+        pending_wid = ""
         snapshot = None
         job = cron_job(session_id)
         if job:
@@ -111,7 +112,7 @@ class SharedLocalGuard(HermesGuard):
                     argument = result.constraint_violated if kind == "constraint_violation" else None
                     reason = _with_next_step(_format_denial_reason(result, tool_name), result.error_type)
                 except ApprovalRequired as exc:
-                    pending, kind = str(exc), "approval_required"
+                    pending, pending_wid = str(exc), wid
                 except Exception as exc:
                     from tenuo.exceptions import ExpiredError, RevokedError, UntrustedRoot
 
@@ -129,7 +130,9 @@ class SharedLocalGuard(HermesGuard):
             kind = "unavailable:" + type(exc).__name__
             reason = f"tenuo: session authority unavailable ({type(exc).__name__}); run tenuo-cli doctor"
         if pending:
-            reason = pending
+            # An approval would have allowed the call: report that warrant,
+            # not a later attachment that refused it outright.
+            selected, reason, kind, argument = pending_wid, pending, "approval_required", None
         return allowed, selected, reason, pending, kind, argument
 
     def _manifest(self, session_id, job):
@@ -147,7 +150,11 @@ class SharedLocalGuard(HermesGuard):
         observing = self._observing()
         allowed, selected, reason, pending, kind, argument = self._evaluate(
             tool_name, args, session_id, observing=observing)
-        if observing:
+        # Hermes can run both the pre_tool_call hook and the registry callback
+        # for one call. Both check it; only the first records and audits it.
+        with self._pre_decisions_lock:
+            repeat = bool(tool_call_id) and tool_call_id in self._pre_decisions
+        if observing and not repeat:
             decision = "allow" if allowed else (None if kind == "no_warrant" else "deny")
             try:
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
@@ -156,11 +163,12 @@ class SharedLocalGuard(HermesGuard):
                                       step=self.step or cron_job(session_id) or "hermes")
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
+        if observing:
             if not allowed:
                 reason = f"observe: would deny: {reason}"
             allowed, pending = True, ""
         self._remember_decision(tool_call_id, allowed, reason)
-        if self._audit_callback:
+        if self._audit_callback and not repeat:
             try:
                 self._audit_callback(HermesAuditEvent(tool=tool_name, args=args,
                     decision="ALLOW" if allowed else "DENY", reason=reason, session_id=session_id,
