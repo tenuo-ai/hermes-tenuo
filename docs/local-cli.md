@@ -58,7 +58,8 @@ plugins:
 Use a separate workspace, holder identity, state and credentials per profile.
 `local_key` can be a local key name or an explicit private-key path. Do not mix
 this mode with legacy warrant, key, session-directory or approval settings.
-It requires enforcement mode and has no static install-wide warrant fallback.
+It refuses `on_denial: log`; to watch calls without blocking, put the workspace
+in observe mode instead (below). It has no static install-wide warrant fallback.
 Legacy environment credentials are not used by the shared local mode.
 
 Provision only these files inside the agent boundary:
@@ -69,7 +70,7 @@ Provision only these files inside the agent boundary:
 | `trust/*.pub`, `revocations.srl` | Read-only verification data |
 | `warrants/*.warrant`, `sessions/*.yaml` | Read-only operator publications |
 | `approvals/*.yaml` | Read-only signed responses |
-| `requests/`, configured receipt destination | Writable runtime state |
+| `requests/`, configured receipt destination, `observations.jsonl` | Writable runtime state |
 
 The controller and approver private keys stay outside these mounts. Local
 development under one OS user does not provide process isolation. Mount parent
@@ -77,6 +78,32 @@ verification directories read-only so atomic replacements are visible; a bind
 mount of one file can retain an old inode. Transporting files is the operator's
 deployment responsibility; no networking or hosted service is required by the
 file protocol.
+
+## Observe before you write a warrant
+
+Start the profile with the workspace in observe mode to see what Hermes calls
+before you scope it:
+
+```bash
+tenuo-cli mode observe
+# run the profile for a few tasks
+tenuo-cli calls summary
+```
+
+In observe mode no tool call is blocked and no session attachment is needed.
+Each call is appended to `observations.jsonl` in the workspace with its
+arguments. A call checked against an attached warrant also records what
+enforcement would have decided: `allow`, or `deny` with the reason, including
+`approval_required` for a gated call; no approval request is written. The
+Hermes session ID is the recorded `run`, and `local_step` (default `hermes`)
+the `step`. That is the trace format
+[warrantgen](https://github.com/RajanChavada/warrantgen) reads, so you can draft
+a template from the recorded calls, issue it, attach it and run
+`tenuo-cli mode enforce`. The switch applies on the next call; no gateway
+restart is needed. `hermes-tenuo doctor` reports the mode.
+
+The file holds argument values, so it is created readable by its owner only.
+Observe mode writes no signed receipts.
 
 ## Attach to a session
 

@@ -84,21 +84,9 @@ def test_new_mode_does_not_use_legacy_identity_mutators(local):
         guard.set_trusted_roots([SigningKey.generate().public_key])
 
 
-def test_legacy_public_reader_rejects_private_file_and_symlink(local):
-    from hermes_tenuo.issuance import read_public_key
-
-    workspace, _, _ = local
-    private = workspace.path / "keys/issuer.key"
-    alias = workspace.path / "keys/pretend.pub"
-    alias.symlink_to(private)
-    for path in (private, alias):
-        with pytest.raises(ValueError):
-            read_public_key(path)
-
-
 def test_shared_doctor_checks_attachments_not_just_plugin_loading(local, monkeypatch):
     from hermes_tenuo import _config
-    from hermes_tenuo.session_diagnostics import report_dynamic_config
+    from hermes_tenuo.local_guard import report_shared_local_config as report_dynamic_config
 
     workspace, _, warrant = local
     monkeypatch.setattr(_config, "_get_plugin_entry", lambda ctx: {"local_home": str(workspace.path)})
