@@ -1,0 +1,22 @@
+# A coding task in one project with Hermes' own tools: files under the
+# project, and only the commands listed in the regex.
+version: 2
+name: project-task
+ttl: 4h
+capabilities:
+  read_file:
+    path: {subpath: /home/you/code/billing}          # EDIT: the project
+  search_files:
+    pattern: any
+    path: {subpath: /home/you/code/billing}
+  write_file:
+    path: {subpath: /home/you/code/billing}
+    content: any
+  patch:
+    mode: replace
+    path: {subpath: /home/you/code/billing}
+    old_string: any
+    new_string: any
+  terminal:
+    command: {regex: '^(pytest|ruff check|git status|git diff)( [^;&|`$<>(){}]*)?$'}   # EDIT
+    workdir: /home/you/code/billing

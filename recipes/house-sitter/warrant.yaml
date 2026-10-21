@@ -1,0 +1,11 @@
+# What your house-sitter's Hermes conversation may do, for their stay.
+version: 2
+name: house-sitter
+ttl: 7d                                   # EDIT: the length of their stay
+capabilities:
+  ha_get_state:
+    entity_id: [climate.guest_room, light.guest_room, binary_sensor.front_door]   # EDIT
+  ha_call_service:
+    domain: [light, scene]
+    service: [turn_on, turn_off]
+    entity_id: [light.guest_room, scene.guest_room_comfort]                     # EDIT

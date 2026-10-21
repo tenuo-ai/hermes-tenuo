@@ -1,0 +1,15 @@
+# Answer one email thread through Google Workspace MCP, configured in Hermes as
+# `google_workspace`. Only that thread, only to that address, for an hour.
+version: 2
+name: reply-to-thread
+ttl: 1h
+capabilities:
+  mcp__google_workspace__get_gmail_thread_content:
+    user_google_email: you@yourco.com     # EDIT
+    thread_id: 18f2a9c0d1e2b3a4           # EDIT: the thread
+  mcp__google_workspace__send_gmail_message:
+    user_google_email: you@yourco.com
+    thread_id: 18f2a9c0d1e2b3a4
+    to: bob@vendor.com                    # EDIT: who it may answer
+    subject: any
+    body: any

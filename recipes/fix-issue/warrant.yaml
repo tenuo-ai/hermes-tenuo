@@ -1,0 +1,51 @@
+# One GitHub issue, end to end, through the GitHub MCP server configured in
+# Hermes as `github` (tools appear as mcp__github__*). Never main, never merge.
+version: 2
+name: fix-issue-412
+ttl: 2h
+capabilities:
+  mcp__github__issue_read:
+    method: [get, get_comments]
+    owner: your-org                       # EDIT
+    repo: your-repo                       # EDIT
+    issue_number: "412..412"              # EDIT: the issue
+  mcp__github__get_file_contents:
+    owner: your-org
+    repo: your-repo
+    path: any
+  mcp__github__create_branch:
+    owner: your-org
+    repo: your-repo
+    branch: agent/issue-412               # EDIT
+    from_branch: main
+  mcp__github__push_files:
+    owner: your-org
+    repo: your-repo
+    branch: agent/issue-412
+    files: any
+    message: any
+  mcp__github__create_pull_request:
+    owner: your-org
+    repo: your-repo
+    head: agent/issue-412
+    base: main
+    title: any
+    body: any
+  mcp__github__add_issue_comment:
+    owner: your-org
+    repo: your-repo
+    issue_number: "412..412"
+    body: any
+  # Lets this agent hand the PR's review to another (see review-pr).
+  mcp__github__pull_request_read:
+    method: [get, get_diff, get_files]
+    owner: your-org
+    repo: your-repo
+    pullNumber: any
+  mcp__github__pull_request_review_write:
+    method: create
+    event: COMMENT
+    owner: your-org
+    repo: your-repo
+    pullNumber: any
+    body: any

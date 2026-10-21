@@ -1,9 +1,23 @@
 # hermes-tenuo
 
-For the unreleased common Python CLI, see [shared local CLI setup](docs/local-cli.md).
-It uses `tenuo-cli` YAML templates and explicit session attachments through
-`local_home`, with no issuer key in Hermes. Install the matching SDK checkout
-before trying this mode; the commands below retain the legacy setup path.
+Let Hermes do more on its own: each conversation and cron job gets a warrant
+naming the tools it may call and the argument values it may use, for a set time.
+
+| Recipe | You can now let Hermes… |
+|--------|-------------------------|
+| [Morning briefing](recipes/briefing/) | run a daily cron job that reads the web and writes notes, with no way to read your files or run commands |
+| [House-sitter](recipes/house-sitter/) | answer your house-sitter for their stay: the guest room and nothing else, ending on its own |
+| [Fix an issue](recipes/fix-issue/) | take one GitHub issue to a pull request: its own branch, never `main`, never a merge |
+| [Review a PR](recipes/review-pr/) | hand the review to a second agent that can only read that PR and comment on it |
+| [Reply to a thread](recipes/reply-to-thread/) | send the reply itself instead of a draft: one thread, one recipient, one hour |
+| [Project task](recipes/project-task/) | work in one repo on its own: files under the project, only the commands you list |
+
+Start with `hermes-tenuo setup`: it watches what Hermes calls without blocking
+anything, then you pick a recipe and switch to enforce
+([recipes](recipes/), [local CLI setup](docs/local-cli.md)). The recipes use
+`local_home` mode and `tenuo-cli`, which aren't released yet; until they are,
+install the matching SDK checkout. The install steps below are the current
+release's setup.
 
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
 [![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)

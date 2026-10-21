@@ -1,0 +1,12 @@
+# The morning briefing cron job: search and read the web, keep notes in one folder.
+# The job's own `deliver` setting sends you the result; Hermes turns off messaging
+# tools in cron, and this warrant grants none either.
+version: 2
+name: briefing
+ttl: 30d                                  # EDIT: how long before you renew it
+capabilities:
+  web_search: {}                          # {} = any arguments
+  web_extract: {}
+  write_file:
+    path: {subpath: /home/you/briefings}  # EDIT: the job's notes folder
+    content: any
