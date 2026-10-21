@@ -50,7 +50,7 @@ def test_observe_with_an_attachment_records_what_enforcement_would_decide(observ
         ("allow", str(warrant.id), "support"),
         ("deny", str(warrant.id), "support"),
     ]
-    assert lines[1]["reason"]
+    assert (lines[1]["reason"], lines[1]["argument"]) == ("constraint_violation", "order_id")
     assert not (observing.path / "receipts.jsonl").read_text().strip()
 
 

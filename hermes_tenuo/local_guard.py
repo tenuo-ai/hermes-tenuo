@@ -52,12 +52,15 @@ class SharedLocalGuard(HermesGuard):
             return False  # An unreadable config enforces, and the snapshot then refuses.
 
     def _evaluate(self, tool_name, args, session_id, *, observing):
-        """Return (allowed, warrant_id, reason, pending, kind) over the session's attachments."""
+        """Return (allowed, warrant_id, reason, pending, kind, argument) over the session's attachments.
+
+        ``argument`` names the argument a constraint denial failed on, never its value.
+        """
         from tenuo._enforcement import enforce_tool_call
         from tenuo.approval import ApprovalRequired
         from tenuo.local import load_warrant_chain, read_session
 
-        allowed, selected, pending, kind = False, "", "", "no_warrant"
+        allowed, selected, pending, kind, argument = False, "", "", "no_warrant", None
         snapshot = None
         reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
                   f"tenuo-cli session attach --session {shlex.quote(session_id)} --file WARRANT")
@@ -80,8 +83,9 @@ class SharedLocalGuard(HermesGuard):
                                                    warrant_chain=chain[:-1],
                                                    approval_handler=None if observing else approvals)
                     if result.allowed:
-                        return True, wid, "", "", None
+                        return True, wid, "", "", None, None
                     kind = result.error_type or "denied"
+                    argument = result.constraint_violated if kind == "constraint_violation" else None
                     reason = _with_next_step(_format_denial_reason(result, tool_name), result.error_type)
                 except ApprovalRequired as exc:
                     pending, kind = str(exc), "approval_required"
@@ -103,16 +107,18 @@ class SharedLocalGuard(HermesGuard):
             reason = f"tenuo: session authority unavailable ({type(exc).__name__}); run tenuo-cli doctor"
         if pending:
             reason = pending
-        return allowed, selected, reason, pending, kind
+        return allowed, selected, reason, pending, kind, argument
 
     def pre_tool_call(self, tool_name, args, *, session_id="", task_id="", tool_call_id=""):
         observing = self._observing()
-        allowed, selected, reason, pending, kind = self._evaluate(tool_name, args, session_id, observing=observing)
+        allowed, selected, reason, pending, kind, argument = self._evaluate(
+            tool_name, args, session_id, observing=observing)
         if observing:
             decision = "allow" if allowed else (None if kind == "no_warrant" else "deny")
             try:
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
-                                      warrant_id=selected or None, run=session_id or None, step=self.step)
+                                      warrant_id=selected or None, argument=argument,
+                                      run=session_id or None, step=self.step)
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
             if not allowed:
