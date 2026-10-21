@@ -686,7 +686,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if mode == "observe":
         print("Nothing is blocked yet. Run Hermes as usual: chats, cron jobs, subagents.")
         print("Every tool call is recorded with its arguments. Then:")
-        print("  tenuo-cli calls summary        what it called, and the commands to draft a warrant")
+        print("  1. tenuo-cli calls summary          what it called, and the commands to draft and issue a warrant")
+        print("  2. tenuo-cli session attach --session cron_JOB_ID --file JOB.warrant")
+        print("                                      one attach covers every run of a cron job;")
+        print("                                      use the session ID for a chat")
+        print("  3. tenuo-cli mode enforce           the next call is checked; no gateway restart")
     else:
         print("Calls are enforced. A session needs an attached warrant:")
         print("  tenuo-cli session attach --session SESSION_ID --file WARRANT")
