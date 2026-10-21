@@ -1,36 +1,46 @@
 # House-sitter
 
-Let your house-sitter message your Hermes for the length of their stay. Their
-conversation gets its own warrant: the guest room's light and comfort scene, a
-few sensors, nothing else, and it ends on its own. Your own conversation keeps
-whatever you give it; the sitter's warrant never reaches it.
+Let your house-sitter message your Hermes on the same bot you use, for the
+length of their stay. Everything they send runs under their own warrant: the
+guest room's light and comfort scene and a few sensors, nothing else, ending on
+its own. Your messages run under yours.
 
-Today, everyone who can talk to your Hermes gets the same tools, and Home
-Assistant's own limits are set and undone by hand.
+What Hermes already does: everyone allowed on a bot gets the same tools (Hermes
+issue #35479), pairings don't expire, and a Home Assistant entity allowlist
+applies to the whole profile. The native way to give someone less is a second
+profile with its own bot and allowlist. What the warrant adds: a different scope
+per person on one bot, limits on services as well as entities (lights on and
+off, never unlock), an end date, and revocation in one command.
 
-[`warrant.yaml`](warrant.yaml): `ha_get_state` on three entities, and
-`ha_call_service` for `light`/`scene` `turn_on`/`turn_off` on two, for 7 days.
-Set the temperature you want in a Home Assistant scene; the warrant refuses
-service `data`, so the sitter can't target an area or "all".
+Files: [`warrant.yaml`](warrant.yaml) for the sitter; [`owner.yaml`](owner.yaml)
+for you, because enforcement covers every conversation.
 
 ## Set it up
 
+You need both Telegram user IDs; the sitter's is the one you add to
+`TELEGRAM_ALLOWED_USERS` (or their pairing). Do this before they send their first
+message, so nothing they send runs unchecked.
+
 ```bash
-hermes-tenuo setup                     # if you haven't
-cp recipes/house-sitter/warrant.yaml sitter.yaml   # your entity IDs and the stay
-tenuo-cli warrant issue --template sitter.yaml --holder agent --out sitter.warrant
-# the sitter sends their first message; their session ID is in:
-tenuo-cli calls list --limit 5         # observe mode, or the first refusal names it
-hermes-tenuo session attach --session <their session ID> --file sitter.warrant
+hermes-tenuo setup                                   # if you haven't
+curl -O …/recipes/house-sitter/warrant.yaml          # their entity IDs and the stay
+curl -O …/recipes/house-sitter/owner.yaml            # the tools you use
+tenuo-cli warrant issue --template owner.yaml --holder agent --out owner.warrant
+tenuo-cli warrant issue --template warrant.yaml --holder agent --out sitter.warrant
+hermes-tenuo session attach --session telegram:<your user ID> --file owner.warrant
+hermes-tenuo session attach --session telegram:<their user ID> --file sitter.warrant
 tenuo-cli mode enforce
 ```
 
-Plans change: `tenuo-cli revocations add --id <warrant id>`. No restart.
+Attach any cron jobs you run, too (`cron_<job_id>`), or they'll be refused once
+you enforce. Plans change: `tenuo-cli revocations add --id <warrant id>`, effective
+on their next message.
 
 ## What it allows and refuses
 
-| Call | Result |
-|------|--------|
+| Their call | Result |
+|------------|--------|
+| `ha_list_entities` for lights, scenes or climate | allowed |
 | `ha_get_state climate.guest_room` | allowed |
 | `ha_call_service scene.turn_on scene.guest_room_comfort` | allowed |
 | `ha_call_service light.turn_off light.guest_room` | allowed |
@@ -38,5 +48,18 @@ Plans change: `tenuo-cli revocations add --id <warrant id>`. No restart.
 | `ha_call_service light.turn_on light.bedroom` | refused: Constraint 'entity_id' not satisfied |
 | `ha_call_service` with `data: {"area_id": …}` | refused: 'data' unknown field not allowed |
 | `ha_get_state alarm_control_panel.home` | refused: Constraint 'entity_id' not satisfied |
-| anything from a conversation with nothing attached | refused, with the attach command |
-| any call after day 7 | refused: the warrant has expired |
+| anything after day 7 | refused: the warrant has expired |
+
+`/new` or a reset gives them a new session; their warrant follows their user ID.
+
+## Limits
+
+- The warrant limits what Hermes can do, not what it can say. Hermes puts your
+  memory and profile into the model's context, so the sitter can ask what it
+  knows about you. Keep anything private out of memory, or give them a separate
+  profile.
+- In a group chat with both of you, each message runs under its sender's warrant.
+  Attaching to the group's chat ID instead grants everyone in it.
+- Domain, service and entity are checked independently, so pairs that don't
+  exist in Home Assistant (`scene.turn_off`) are allowed and do nothing. The
+  comfort scene runs whatever you put in it; keep it to the guest room.

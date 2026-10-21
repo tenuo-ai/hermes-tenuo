@@ -28,6 +28,48 @@ def cron_job(session_id):
     return match.group(1) if match else None
 
 
+def sender_keys(session_id):
+    """Attachment keys for who is talking: <platform>:<user_id>, then <platform>:<chat_id>.
+
+    Read from the gateway's session context (set by Hermes, not the model), or
+    from Hermes' session store for the session. Empty for local CLI sessions.
+    """
+    platform = user = chat = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        user = get_session_env("HERMES_SESSION_USER_ID", "")
+        chat = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    except Exception:
+        pass
+    if not platform and session_id:
+        try:
+            from hermes_state import SessionDB
+
+            row = SessionDB(read_only=True).get_session(session_id) or {}
+            platform, user, chat = row.get("source") or "", row.get("user_id") or "", row.get("chat_id") or ""
+        except Exception:
+            pass
+    if not platform or platform == "cli":
+        return []
+    keys = [f"{platform}:{value}" for value in (user, chat) if value]
+    return list(dict.fromkeys(keys))
+
+
+def parent_session(session_id):
+    """The session this one continues (compression) or was delegated from, per Hermes' session store."""
+    try:
+        from hermes_state import SessionDB
+
+        return (SessionDB(read_only=True).get_session(session_id) or {}).get("parent_session_id") or None
+    except Exception:
+        return None
+
+
+_MAX_PARENT_HOPS = 5
+
+
 def _with_next_step(reason, error_type):
     step = _NEXT_STEP.get(error_type)
     return f"{reason.rstrip('.')}. {step}" if step else reason
@@ -86,17 +128,20 @@ class SharedLocalGuard(HermesGuard):
                       f"hermes-tenuo session attach --session {shlex.quote(job)} --file WARRANT "
                       "(it covers every run of this job)")
         else:
-            reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
-                      f"hermes-tenuo session attach --session {shlex.quote(session_id)} --file WARRANT")
+            senders = sender_keys(session_id)
+            target = senders[0] if senders else session_id
+            who = f"{target} (session {session_id!r})" if senders else f"Session {session_id!r}"
+            reason = (f"{who} has no attached authority. Ask an operator to run "
+                      f"hermes-tenuo session attach --session {shlex.quote(target)} --file WARRANT")
         try:
             snapshot = self.authority.snapshot()
-            manifest = self._manifest(session_id, job)
+            key, manifest = self._manifest(session_id, job)
             for wid in manifest["warrants"]:
                 try:
                     chain = load_warrant_chain(self.authority.workspace.path / "warrants" / (wid + ".warrant"))
                     if str(chain[-1].id) != wid:
                         raise ValueError("warrant ID does not match its stored filename")
-                    if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, job):
+                    if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, key):
                         raise ValueError("warrant is bound to a different session")
                     selected = wid
                     # Expiry, revocation and trust are judged by the runtime's authorizer,
@@ -136,15 +181,27 @@ class SharedLocalGuard(HermesGuard):
         return allowed, selected, reason, pending, kind, argument
 
     def _manifest(self, session_id, job):
-        """This session's attachments, else its cron job's."""
+        """The first attachments found for this session, its cron job, the person, or the chat.
+
+        A session with none falls back to the one it continues or was delegated
+        from (Hermes' parent_session_id), so a cron run whose ID rotated during
+        compression, or a delegate_task child, keeps its parent's attachments.
+        """
         from tenuo.local import read_session
 
-        try:
-            return read_session(self.authority.workspace, session_id)
-        except FileNotFoundError:
-            if job is None:
-                raise
-            return read_session(self.authority.workspace, job)
+        current, seen = session_id, set()
+        for _ in range(_MAX_PARENT_HOPS + 1):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            parent_job = cron_job(current)
+            for key in [current, *([parent_job] if parent_job else []), *sender_keys(current)]:
+                try:
+                    return key, read_session(self.authority.workspace, key)
+                except FileNotFoundError:
+                    continue
+            current = parent_session(current)
+        raise FileNotFoundError(session_id)
 
     def pre_tool_call(self, tool_name, args, *, session_id="", task_id="", tool_call_id=""):
         observing = self._observing()
@@ -161,7 +218,8 @@ class SharedLocalGuard(HermesGuard):
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
                                       warrant_id=selected or None, argument=argument,
                                       run=session_id or None,
-                                      step=self.step or cron_job(session_id) or "hermes")
+                                      step=self.step or cron_job(session_id)
+                                      or next(iter(sender_keys(session_id)), "hermes"))
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
         if observing:

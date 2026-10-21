@@ -1,0 +1,44 @@
+# Work on issues in one repository through the GitHub MCP server, configured in
+# Hermes as `github` (tools appear as mcp__github__*). Branches under agent/,
+# pull requests into main, never a merge, never another repository.
+version: 2
+name: work-on-issues
+ttl: 7d
+capabilities:
+  mcp__github__issue_read:
+    method: [get, get_comments]
+    owner: your-org                       # EDIT
+    repo: your-repo                       # EDIT
+    issue_number: any
+    page: {optional: any}
+    perPage: {optional: any}
+  mcp__github__get_file_contents:
+    owner: your-org
+    repo: your-repo
+    path: any
+    ref: {optional: any}
+    sha: {optional: any}
+  mcp__github__create_branch:
+    owner: your-org
+    repo: your-repo
+    branch: {pattern: "agent/*"}
+    from_branch: {optional: main}
+  mcp__github__push_files:
+    owner: your-org
+    repo: your-repo
+    branch: {pattern: "agent/*"}
+    files: any
+    message: any
+  mcp__github__create_pull_request:
+    owner: your-org
+    repo: your-repo
+    head: {pattern: "agent/*"}
+    base: main
+    title: any
+    body: {optional: any}
+    draft: {optional: any}
+  mcp__github__add_issue_comment:
+    owner: your-org
+    repo: your-repo
+    issue_number: any
+    body: any

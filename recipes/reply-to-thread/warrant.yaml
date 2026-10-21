@@ -7,9 +7,13 @@ capabilities:
   mcp__google_workspace__get_gmail_thread_content:
     user_google_email: you@yourco.com     # EDIT
     thread_id: 18f2a9c0d1e2b3a4           # EDIT: the thread
+    body_format: {optional: [text, html]}
   mcp__google_workspace__send_gmail_message:
     user_google_email: you@yourco.com
     thread_id: 18f2a9c0d1e2b3a4
-    to: bob@vendor.com                    # EDIT: who it may answer
+    to: bob@vendor.com                    # EDIT: who it may answer, lowercase
     subject: any
     body: any
+    in_reply_to: {optional: any}
+    references: {optional: any}
+    body_format: {optional: [plain, html]}

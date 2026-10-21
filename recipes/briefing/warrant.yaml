@@ -7,6 +7,10 @@ ttl: 30d                                  # EDIT: how long before you renew it
 capabilities:
   web_search: {}                          # {} = any arguments
   web_extract: {}
-  write_file:
+  read_file:
     path: {subpath: /home/you/briefings}  # EDIT: the job's notes folder
+    offset: {optional: any}
+    limit: {optional: any}
+  write_file:
+    path: {subpath: /home/you/briefings}
     content: any

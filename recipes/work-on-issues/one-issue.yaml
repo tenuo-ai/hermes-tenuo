@@ -1,0 +1,12 @@
+# The same, for one issue and one branch: issue it per task when you hand the
+# agent a single issue and want nothing else in the repo touched.
+version: 2
+name: issue-412
+ttl: 2h
+capabilities:
+  mcp__github__issue_read: {method: [get, get_comments], owner: your-org, repo: your-repo, issue_number: [412], page: {optional: any}, perPage: {optional: any}}
+  mcp__github__get_file_contents: {owner: your-org, repo: your-repo, path: any, ref: {optional: any}, sha: {optional: any}}
+  mcp__github__create_branch: {owner: your-org, repo: your-repo, branch: agent/issue-412, from_branch: {optional: main}}
+  mcp__github__push_files: {owner: your-org, repo: your-repo, branch: agent/issue-412, files: any, message: any}
+  mcp__github__create_pull_request: {owner: your-org, repo: your-repo, head: agent/issue-412, base: main, title: any, body: {optional: any}, draft: {optional: any}}
+  mcp__github__add_issue_comment: {owner: your-org, repo: your-repo, issue_number: [412], body: any}

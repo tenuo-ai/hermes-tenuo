@@ -1,14 +1,22 @@
 # A coding task in one project with Hermes' own tools: files under the
-# project, and only the commands listed in the regex.
+# project, and exactly the commands listed, run in the project directory.
 version: 2
 name: project-task
 ttl: 4h
 capabilities:
   read_file:
     path: {subpath: /home/you/code/billing}          # EDIT: the project
+    offset: {optional: any}
+    limit: {optional: any}
   search_files:
     pattern: any
     path: {subpath: /home/you/code/billing}
+    target: {optional: [content, files]}
+    file_glob: {optional: any}
+    limit: {optional: any}
+    offset: {optional: any}
+    output_mode: {optional: any}
+    context: {optional: any}
   write_file:
     path: {subpath: /home/you/code/billing}
     content: any
@@ -17,6 +25,8 @@ capabilities:
     path: {subpath: /home/you/code/billing}
     old_string: any
     new_string: any
+    replace_all: {optional: any}
   terminal:
-    command: {regex: '^(pytest|ruff check|git status|git diff)( [^;&|`$<>(){}]*)?$'}   # EDIT
-    workdir: /home/you/code/billing
+    command: [pytest -q, ruff check ., git status, git diff]    # EDIT: exact commands, no arguments added
+    workdir: [/home/you/code/billing, /home/you/code/billing/]
+    timeout: {optional: 1..600}

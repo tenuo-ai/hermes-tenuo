@@ -1,0 +1,13 @@
+# Your own messages, before you switch to enforce: enforcement applies to every
+# Hermes conversation and cron job, so yours needs a warrant too. List the tools
+# you use; {} allows any arguments for that tool.
+version: 2
+name: owner
+ttl: 30d
+capabilities:
+  ha_list_entities: {}
+  ha_list_services: {}
+  ha_get_state: {}
+  ha_call_service: {}
+  web_search: {}                          # EDIT: the other tools you use
+  web_extract: {}

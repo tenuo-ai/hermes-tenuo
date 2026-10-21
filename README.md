@@ -5,12 +5,12 @@ naming the tools it may call and the argument values it may use, for a set time.
 
 | Recipe | You can now let Hermes… |
 |--------|-------------------------|
-| [Morning briefing](recipes/briefing/) | run a daily cron job that reads the web and writes notes, with no way to read your files or run commands |
-| [House-sitter](recipes/house-sitter/) | answer your house-sitter for their stay: the guest room and nothing else, ending on its own |
-| [Fix an issue](recipes/fix-issue/) | take one GitHub issue to a pull request: its own branch, never `main`, never a merge |
-| [Review a PR](recipes/review-pr/) | hand the review to a second agent that can only read that PR and comment on it |
+| [Morning briefing](recipes/briefing/) | run a daily cron job that reads the web and one notes folder, and writes only there |
+| [House-sitter](recipes/house-sitter/) | take your house-sitter's messages on your own bot: guest-room lights and scene, ending with their stay |
+| [Work on issues](recipes/work-on-issues/) | take issues in one repo to pull requests: `agent/*` branches, PRs into `main`, never a merge |
+| [Review PRs](recipes/review-prs/) | let a second agent review the PRs you name: read and comment, never approve or push |
 | [Reply to a thread](recipes/reply-to-thread/) | send the reply itself instead of a draft: one thread, one recipient, one hour |
-| [Project task](recipes/project-task/) | work in one repo on its own: files under the project, only the commands you list |
+| [Project task](recipes/project-task/) | work in one repo: files under the project, exactly the commands you list |
 
 Start with `hermes-tenuo setup`: it watches what Hermes calls without blocking
 anything, then you pick a recipe and switch to enforce

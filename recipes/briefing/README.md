@@ -1,38 +1,40 @@
 # Morning briefing
 
 The daily briefing is the most common Hermes cron job: search the web, read a
-few pages, write a summary, deliver it to Telegram or Slack. This warrant lets
-it run every day without you approving anything, and limits it to exactly that.
+few pages, write a summary, deliver it. This warrant lets it run every day with
+nobody approving anything, reading and writing only its own notes folder.
 
-Hermes already turns off messaging tools in cron and delivers the result through
-the job's own `deliver` setting. What the warrant adds: the job can't read your
-files (the kind of call that once sent a `~/.hermes/.env` to a model provider),
-can't write outside its notes folder, can't run commands, and can't call any MCP
-tool you have configured, because none of those are on it.
+What Hermes already does: cron jobs get only the toolsets you enable, messaging
+tools are off in cron, and the job's `deliver` setting sends you the result.
+`HERMES_WRITE_SAFE_ROOT` can keep writes under one directory, but for the whole
+process, not this job, and Hermes has no read sandbox. What the warrant adds:
+this job reads and writes only its folder (other jobs and your chats aren't
+affected), can't run commands or call MCP tools, and stops after 30 days.
 
 [`warrant.yaml`](warrant.yaml): `web_search` and `web_extract` with any
-arguments, and `write_file` under one folder, for 30 days.
+arguments; `read_file` and `write_file` under the notes folder.
 
 ## Set it up
 
 ```bash
 hermes cron list                       # the job's ID, e.g. 1a2b3c
 hermes-tenuo setup                     # if you haven't: observe mode
-cp recipes/briefing/warrant.yaml briefing.yaml   # set the folder
-tenuo-cli warrant issue --template briefing.yaml --holder agent --out briefing.warrant
+curl -O …/recipes/briefing/warrant.yaml   # set the folder
+tenuo-cli warrant issue --template warrant.yaml --holder agent --out briefing.warrant
 hermes-tenuo session attach --session cron_1a2b3c --file briefing.warrant
-tenuo-cli mode enforce
+tenuo-cli mode enforce                 # see "Before you switch to enforce" in the index
 ```
 
-Reissue before the 30 days are up: `tenuo-cli warrant reissue --id <warrant id> --ttl 30d`.
+Before the 30 days are up: `tenuo-cli warrant reissue --id <warrant id> --ttl 30d`,
+then attach the new warrant.
 
 ## What it allows and refuses
 
 | Call | Result |
 |------|--------|
 | `web_search`, `web_extract`, any arguments | allowed |
-| `write_file` to `/home/you/briefings/2026-10-22.md` | allowed |
-| `read_file ~/.hermes/.env` | refused: Tool 'read_file' is not authorized |
+| `read_file` / `write_file` under `/home/you/briefings` | allowed |
+| `read_file ~/.hermes/.env` or `…/briefings/../.ssh/id_rsa` | refused: Constraint 'path' not satisfied |
 | `write_file ~/.bashrc` | refused: Constraint 'path' not satisfied |
 | `terminal "cat ~/.ssh/id_rsa"` | refused: Tool 'terminal' is not authorized |
 | `send_message` to another chat | refused: Tool 'send_message' is not authorized |
@@ -40,5 +42,7 @@ Reissue before the 30 days are up: `tenuo-cli warrant reissue --id <warrant id> 
 
 ## Limits
 
-What the summary says, and which pages it reads, are up to the model; the
-warrant decides what the job can touch, not what it writes.
+`web_extract` may fetch any URL, which is the job. That also means text the
+model has in context (its memory, your profile, the notes it read) could be sent
+out in a URL if a page talks it into that; the warrant decides which tools and
+folders the job can touch, not what it puts in a request.

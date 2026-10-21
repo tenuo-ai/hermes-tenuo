@@ -1,0 +1,21 @@
+# A reviewer agent (its own Hermes profile and key) for the pull requests you
+# name: read them and leave review comments. Never approve, never push.
+version: 2
+name: review-prs
+ttl: 1d
+capabilities:
+  mcp__github__pull_request_read:
+    method: [get, get_diff, get_files, get_comments, get_review_comments]
+    owner: your-org                       # EDIT
+    repo: your-repo                       # EDIT
+    pullNumber: [57, 58]                  # EDIT: the PRs to review
+    page: {optional: any}
+    perPage: {optional: any}
+  mcp__github__pull_request_review_write:
+    method: create
+    event: COMMENT
+    owner: your-org
+    repo: your-repo
+    pullNumber: [57, 58]
+    body: any
+    commitID: {optional: any}
