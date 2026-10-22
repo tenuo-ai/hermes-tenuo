@@ -1,0 +1,60 @@
+# Work on issues in one repository through the GitHub MCP server, configured in
+# Hermes as `github`: read issues and code, push to agent/* branches, open pull
+# requests into main, comment. Never a merge, never another repository.
+#   tenuo-cli warrant issue --template work-on-issues.yaml --holder agent --set owner=ORG --set repo=REPO --out issues.warrant
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --file issues.warrant
+version: 2
+name: work-on-issues
+ttl: 7d
+vars:
+  owner: {description: "the repository owner (user or org)"}
+  repo: {description: "the repository name"}
+  base: {default: main}
+capabilities:
+  mcp__github__issue_read:
+    method: [get, get_comments]
+    owner: ${owner}
+    repo: ${repo}
+    issue_number: any
+    page: {optional: any}
+    perPage: {optional: any}
+  mcp__github__list_issues:               # for a cron job that picks up labelled issues
+    owner: ${owner}
+    repo: ${repo}
+    state: {optional: any}
+    labels: {optional: any}
+    orderBy: {optional: any}
+    direction: {optional: any}
+    since: {optional: any}
+    perPage: {optional: any}
+    after: {optional: any}
+  mcp__github__get_file_contents:
+    owner: ${owner}
+    repo: ${repo}
+    path: any                             # any file in this repository; see Limits
+    ref: {optional: any}
+    sha: {optional: any}
+  mcp__github__create_branch:
+    owner: ${owner}
+    repo: ${repo}
+    branch: {pattern: "agent/*"}
+    from_branch: {optional: "${base}"}
+  mcp__github__push_files:
+    owner: ${owner}
+    repo: ${repo}
+    branch: {pattern: "agent/*"}
+    files: any
+    message: any
+  mcp__github__create_pull_request:
+    owner: ${owner}
+    repo: ${repo}
+    head: {pattern: "agent/*"}
+    base: ${base}
+    title: any
+    body: {optional: any}
+    draft: {optional: any}
+  mcp__github__add_issue_comment:
+    owner: ${owner}
+    repo: ${repo}
+    issue_number: any
+    body: any

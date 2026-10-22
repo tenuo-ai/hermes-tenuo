@@ -115,6 +115,20 @@ def test_a_warrant_held_by_another_key_is_refused_with_both_keys_named(tmp_path)
     assert "--holder agent" in blocked["message"]
 
 
+def test_setup_installs_the_recipes_without_overwriting_edits(profile, tmp_path, monkeypatch, capsys):
+    home = tmp_path / ".tenuo"
+    assert run(monkeypatch, "--home", str(home)) == 0
+    recipes = home / "recipes" / "hermes"
+    names = sorted(p.stem for p in recipes.glob("*.yaml"))
+    assert {"briefing", "house-sitter", "house-sitter-owner", "project-task", "reply-to-thread", "review-prs",
+            "work-on-issues", "work-on-issues-one-issue"} <= set(names)
+    out = capsys.readouterr().out
+    assert "warrant issue --template" in out and "attach --session telegram:YOUR_ID --file project.warrant" in out
+    (recipes / "project-task.yaml").write_text("# mine\n")
+    assert run(monkeypatch, "--home", str(home)) == 0
+    assert (recipes / "project-task.yaml").read_text() == "# mine\n"
+
+
 def test_observe_records_with_an_sdk_that_does_not_tag_integrations(tmp_path, monkeypatch):
     """An SDK whose record() has no via= must still get every observation."""
     from tenuo.local_cli.runtime import LocalAuthority

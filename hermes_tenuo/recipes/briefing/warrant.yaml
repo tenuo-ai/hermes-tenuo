@@ -1,0 +1,20 @@
+# A daily cron job: search and read the web, read and write one notes folder.
+# Issue and attach in one step:
+#   tenuo-cli warrant issue --template briefing.yaml --holder agent --set folder=$HOME/briefings --out briefing.warrant
+#   tenuo-cli hermes session attach --session cron_JOB_ID --file briefing.warrant
+version: 2
+name: briefing
+ttl: ${ttl}
+vars:
+  folder: {description: "the notes folder, an absolute path"}
+  ttl: {default: 30d}
+capabilities:
+  web_search: {}
+  web_extract: {}
+  read_file:
+    path: {subpath: "${folder}"}
+    offset: {optional: any}
+    limit: {optional: any}
+  write_file:
+    path: {subpath: "${folder}"}
+    content: any

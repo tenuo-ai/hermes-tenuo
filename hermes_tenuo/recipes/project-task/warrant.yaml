@@ -1,0 +1,38 @@
+# A coding task in one project with Hermes' own tools: files under the project,
+# and exactly the commands listed, run in the project directory.
+#   tenuo-cli warrant issue --template project-task.yaml --holder agent --set project=$PWD --out project.warrant
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --file project.warrant
+version: 2
+name: project-task
+ttl: 4h
+vars:
+  project: {description: "the project's absolute path"}
+  commands: {default: [pytest -q, ruff check ., git status, git diff],
+             description: "the exact commands it may run, as a list"}
+capabilities:
+  read_file:
+    path: {subpath: "${project}"}
+    offset: {optional: any}
+    limit: {optional: any}
+  search_files:
+    pattern: any
+    path: {subpath: "${project}"}
+    target: {optional: [content, files]}
+    file_glob: {optional: any}
+    limit: {optional: any}
+    offset: {optional: any}
+    output_mode: {optional: any}
+    context: {optional: any}
+  write_file:
+    path: {subpath: "${project}"}
+    content: any
+  patch:
+    mode: {optional: replace}             # Hermes leaves it out; if sent, only replace
+    path: {subpath: "${project}"}
+    old_string: any
+    new_string: any
+    replace_all: {optional: any}
+  terminal:
+    command: ${commands}
+    workdir: ["${project}", "${project}/"]
+    timeout: {optional: 1..600}

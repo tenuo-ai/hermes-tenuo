@@ -1,6 +1,7 @@
 """Hermes session routing over the shared Python SDK's local artifacts."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shlex
@@ -26,6 +27,70 @@ def cron_job(session_id):
     """The job key a cron run's attachments live under, or None for other sessions."""
     match = _CRON_RUN.fullmatch(session_id or "")
     return match.group(1) if match else None
+
+
+def sender_keys(session_id):
+    """Attachment keys for who is talking: <platform>:<user_id>, then <platform>:<chat_id>.
+
+    Read from the gateway's session context (set by Hermes, not the model), or
+    from Hermes' session store for the session. Empty for local CLI sessions.
+    """
+    platform = user = chat = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        user = get_session_env("HERMES_SESSION_USER_ID", "")
+        chat = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    except Exception:
+        pass
+    if not platform and session_id:
+        try:
+            from hermes_state import SessionDB
+
+            row = SessionDB(read_only=True).get_session(session_id) or {}
+            platform, user, chat = row.get("source") or "", row.get("user_id") or "", row.get("chat_id") or ""
+        except Exception:
+            pass
+    if not platform or platform == "cli":
+        return []
+    keys = [f"{platform}:{value}" for value in (user, chat) if value]
+    return list(dict.fromkeys(keys))
+
+
+def parent_session(session_id):
+    """The session this one continues (compression) or was delegated from, per Hermes' session store.
+
+    A reset also links to the old conversation, but starts a new one, so the
+    lineage ends there. A reset is a row whose ``_reset_from`` names its own
+    parent: a compressed child can inherit an older ancestor's marker and still
+    continue its parent. A store that can't be read raises: treating it as "no
+    parent" could skip a narrow parent warrant and fall back to a broader one.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+    except ImportError:  # no session store in this Hermes: nothing to inherit from
+        return None
+    database = get_hermes_home() / "state.db"
+    if not database.exists():  # no sessions recorded yet: nothing to inherit from
+        return None
+    try:
+        row = SessionDB(database, read_only=True).get_session(session_id) or {}
+    except Exception as exc:
+        if "no such table" in str(exc):  # created but nothing recorded yet
+            return None
+        raise
+    config = row.get("model_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            config = {}
+    parent = row.get("parent_session_id") or None
+    if parent and isinstance(config, dict) and config.get("_reset_from") == parent:
+        return None
+    return parent
 
 
 def _with_next_step(reason, error_type):
@@ -91,11 +156,14 @@ class SharedLocalGuard(HermesGuard):
                       f"tenuo-cli hermes session attach --session {shlex.quote(job)} --file WARRANT "
                       "(it covers every run of this job)")
         else:
-            reason = (f"Session {session_id!r} has no attached authority. Ask an operator to run "
-                      f"tenuo-cli hermes session attach --session {shlex.quote(session_id)} --file WARRANT")
+            senders = sender_keys(session_id)
+            target = senders[0] if senders else session_id
+            who = f"{target} (session {session_id!r})" if senders else f"Session {session_id!r}"
+            reason = (f"{who} has no attached authority. Ask an operator to run "
+                      f"tenuo-cli hermes session attach --session {shlex.quote(target)} --file WARRANT")
         try:
             snapshot = self.authority.snapshot()
-            manifest = self._manifest(session_id, job)
+            key, manifest = self._manifest(session_id, job)
             for wid in manifest["warrants"]:
                 # A refusal is attributed to the warrant that produced it, never
                 # to an earlier attachment's ID or failed argument.
@@ -104,7 +172,7 @@ class SharedLocalGuard(HermesGuard):
                     chain = load_warrant_chain(self.authority.workspace.path / "warrants" / (wid + ".warrant"))
                     if str(chain[-1].id) != wid:
                         raise ValueError("warrant ID does not match its stored filename")
-                    if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, job):
+                    if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, key):
                         raise ValueError("warrant is bound to a different session")
                     holder = bytes(chain[-1].holder_key.to_bytes())
                     if snapshot.key is not None and holder != bytes(snapshot.key.public_key.to_bytes()):
@@ -154,15 +222,29 @@ class SharedLocalGuard(HermesGuard):
         return allowed, selected, reason, pending, kind, argument
 
     def _manifest(self, session_id, job):
-        """This session's attachments, else its cron job's."""
+        """The first attachments found for this session or its cron job, then the
+        sessions it continues or was delegated from (Hermes' parent_session_id),
+        and only then the person or chat that sent it.
+
+        Explicit task scope comes before sender authority: a compressed or
+        delegated session keeps a narrow warrant its parent was given rather than
+        falling back to the broader one its sender holds.
+        """
         from tenuo.local import read_session
 
-        try:
-            return read_session(self.authority.workspace, session_id)
-        except FileNotFoundError:
-            if job is None:
-                raise
-            return read_session(self.authority.workspace, job)
+        lineage, current = [], session_id
+        while current and current not in lineage:  # until the lineage ends or repeats
+            lineage.append(current)
+            current = parent_session(current)
+        task_keys = [key for s in lineage for key in (s, cron_job(s)) if key]
+        # Only the nearest sender: a parent session's sender is another person's authority.
+        sender = next((keys for keys in map(sender_keys, lineage) if keys), [])
+        for key in dict.fromkeys(task_keys + sender):
+            try:
+                return key, read_session(self.authority.workspace, key)
+            except FileNotFoundError:
+                continue
+        raise FileNotFoundError(session_id)
 
     def pre_tool_call(self, tool_name, args, *, session_id="", task_id="", tool_call_id=""):
         observing = self._observing()
@@ -179,7 +261,8 @@ class SharedLocalGuard(HermesGuard):
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
                                       warrant_id=selected or None, argument=argument,
                                       run=session_id or None,
-                                      step=self.step or cron_job(session_id) or "hermes", **self._via)
+                                      step=self.step or cron_job(session_id)
+                                      or next(iter(sender_keys(session_id)), "hermes"), **self._via)
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
         if observing:

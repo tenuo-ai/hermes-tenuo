@@ -1,0 +1,29 @@
+# A reviewer agent (its own Hermes profile and key) for the pull requests you
+# name: read them and leave review comments. Never approve, never push.
+#   tenuo-cli warrant issue --template review-prs.yaml --holder reviewer \
+#     --set owner=ORG --set repo=REPO --set "prs=[57, 58]" --out review.warrant
+#   tenuo-cli hermes session attach --session SESSION --file review.warrant --holder reviewer
+version: 2
+name: review-prs
+ttl: 1d
+vars:
+  owner: {description: "the repository owner"}
+  repo: {description: "the repository name"}
+  prs: {description: "the pull request numbers to review, as a list"}
+capabilities:
+  mcp__github__pull_request_read:
+    method: [get, get_diff, get_files, get_comments, get_review_comments]
+    owner: ${owner}
+    repo: ${repo}
+    pullNumber: ${prs}
+    page: {optional: any}
+    perPage: {optional: any}
+    after: {optional: any}                # the cursor get_review_comments pages with
+  mcp__github__pull_request_review_write:
+    method: create
+    event: COMMENT
+    owner: ${owner}
+    repo: ${repo}
+    pullNumber: ${prs}
+    body: any
+    commitID: {optional: any}

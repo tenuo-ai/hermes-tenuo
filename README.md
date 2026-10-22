@@ -1,9 +1,31 @@
 # hermes-tenuo
 
-For the unreleased common Python CLI, see [shared local CLI setup](docs/local-cli.md).
-It uses `tenuo-cli` YAML templates and explicit session attachments through
-`local_home`, with no issuer key in Hermes. Install the matching SDK checkout
-before trying this mode; the commands below retain the legacy setup path.
+Let Hermes do more on its own: each conversation and cron job gets a warrant
+naming the tools it may call and the argument values it may use, for a set time.
+
+| Recipe | You can now let Hermes… |
+|--------|-------------------------|
+| [Morning briefing](hermes_tenuo/recipes/briefing/) | run a daily cron job that reads the web and one notes folder, and writes only there |
+| [House-sitter](hermes_tenuo/recipes/house-sitter/) | take your house-sitter's messages on your own bot: guest-room lights and scene, ending with their stay |
+| [Work on issues](hermes_tenuo/recipes/work-on-issues/) | take issues in one repo to pull requests: `agent/*` branches, PRs into `main`, never a merge |
+| [Review PRs](hermes_tenuo/recipes/review-prs/) | let a second agent review the PRs you name: read and comment, never approve or push |
+| [Reply to a thread](hermes_tenuo/recipes/reply-to-thread/) | send the reply itself instead of a draft: one thread, one recipient, one hour |
+| [Project task](hermes_tenuo/recipes/project-task/) | work in one repo: files under the project, exactly the commands you list |
+
+```bash
+tenuo-cli hermes setup          # observe: nothing blocked; recipes in ~/.tenuo/recipes/hermes
+# use Hermes as usual
+tenuo-cli calls summary         # what each person, job and session called
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/project-task.yaml --holder agent \
+  --set project=$PWD --out project.warrant
+tenuo-cli hermes session attach --session telegram:YOUR_ID --file project.warrant
+tenuo-cli mode enforce          # the next call is checked
+```
+
+([recipes](hermes_tenuo/recipes/), [local CLI setup](docs/local-cli.md)). The recipes use
+`local_home` mode and `tenuo-cli`, which aren't released yet; until they are,
+install the matching SDK checkout. The install steps below are the current
+release's setup.
 
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
 [![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)

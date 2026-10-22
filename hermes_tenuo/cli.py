@@ -687,21 +687,46 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
           + (" with development identities" if created else ""))
     print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
+    recipes = _install_recipes(home)
+    print(f"✓  recipes in {recipes}: {', '.join(sorted(p.stem for p in recipes.glob('*.yaml')))}")
     print(f"✓  mode: {mode}")
     print()
+    example = shlex.quote(str(recipes / "project-task.yaml"))
     if mode == "observe":
         print("Nothing is blocked yet. Run Hermes as usual: chats, cron jobs, subagents.")
         print("Every tool call is recorded with its arguments. Then:")
         print(f"  1. {tenuo_cli} calls summary")
-        print("     what it called, and the commands to draft and issue a warrant")
-        print(f"  2. {hermes_session} attach --session cron_JOB_ID --file JOB.warrant")
-        print("     one attach covers every run of a cron job; use the session ID for a chat")
+        print("     what each person, job and session called, and the attach command for each")
+        print("  2. issue a recipe (or your own template) and attach it to who it's for, e.g.")
+        print(f"     {tenuo_cli} warrant issue --template {example} --holder agent --set project=$PWD --out project.warrant")
+        print(f"     {hermes_session} attach --session telegram:YOUR_ID --file project.warrant")
+        print("     a recipe's first lines say which values it needs; --session takes cron_JOB_ID for every")
+        print("     run of a job, <platform>:<user id> for a person, or a session ID")
         print(f"  3. {tenuo_cli} mode enforce")
         print("     the next call is checked; no gateway restart")
     else:
-        print("Calls are enforced. A session needs an attached warrant:")
-        print(f"  {hermes_session} attach --session SESSION_ID --file WARRANT")
+        print("Calls are enforced. Issue a warrant and attach it to who it's for:")
+        print(f"  {tenuo_cli} warrant issue --template {example} --holder agent --set project=$PWD --out project.warrant")
+        print(f"  {hermes_session} attach --session telegram:YOUR_ID --file project.warrant")
     return 0
+
+
+def _install_recipes(home):
+    """Copy the bundled recipes into the workspace; never overwrite one already there."""
+    from importlib.resources import files
+
+    target = Path(home) / "recipes" / "hermes"
+    target.mkdir(parents=True, exist_ok=True)
+    for folder in files("hermes_tenuo").joinpath("recipes").iterdir():
+        if not folder.is_dir():
+            continue
+        for item in folder.iterdir():
+            if item.name.endswith(".yaml"):
+                name = folder.name if item.name == "warrant.yaml" else f"{folder.name}-{item.name[:-5]}"
+                destination = target / f"{name}.yaml"
+                if not destination.exists():
+                    destination.write_text(item.read_text())
+    return target
 
 
 def cmd_session(args: argparse.Namespace) -> int:

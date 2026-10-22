@@ -28,7 +28,7 @@ tenuo-cli calls summary                     # each tool, its arguments, what enf
 tenuo-cli template new --out job.yaml       # fill in from the summary
 tenuo-cli template validate --file job.yaml
 tenuo-cli warrant issue --template job.yaml --holder agent --out job.warrant
-tenuo-cli hermes session attach --session cron_JOB_ID --file job.warrant   # or a chat's session ID
+tenuo-cli hermes session attach --session cron_JOB_ID --file job.warrant   # or telegram:USER_ID, or a session ID
 tenuo-cli mode enforce                      # the next call is checked
 ```
 
@@ -41,8 +41,10 @@ Rules:
    tool sends only sometimes in `{optional: …}`.
 3. **Constrain arguments, not just tool names.** `read_file: {path: {subpath: /data/reports}}`
    is a job; `read_file: {}` is an open read of the machine.
-4. **One attachment per cron job** (`cron_<job_id>`) covers every run. A chat
-   uses its session ID, which the first denial reports.
+4. **Attach to what stays put.** `cron_<job_id>` covers every run of a job;
+   `<platform>:<user id>` (e.g. `telegram:5550001`) covers everything one person
+   sends, across /new and compression; a session ID covers one conversation.
+   The first denial names the key to use. Ready-made warrants are in `recipes/`.
 5. **Attaching is not activation and detaching is not revocation.** To take a
    warrant back everywhere: `tenuo-cli revocations add --id WARRANT_ID`.
 6. **Observe, not `on_denial: log`.** `local_home` refuses `on_denial: log`;
