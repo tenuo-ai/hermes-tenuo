@@ -55,6 +55,8 @@ def test_setup_refuses_a_profile_with_legacy_authority(profile, tmp_path, monkey
 
 
 def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
+    import json
+
     from tenuo import WarrantTemplate
     from tenuo.local_cli.warrants import encode_chain
     from tenuo.local_cli.workspace import Workspace
@@ -65,25 +67,26 @@ def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
         workspace.signing_key("issuer"), workspace.public_key("agent"))
     path = tmp_path / "job.warrant"
     path.write_text(encode_chain([warrant]))
-
-    from tenuo.local_cli import commands
-    if not hasattr(commands, "integrations"):
-        pytest.skip("tenuo-cli without integration commands")
-    assert commands.integrations()["hermes"].value == "hermes_tenuo.cli:tenuo_cli"
+    monkeypatch.setenv("TENUO_JSON", "0")
 
     def session(*argv):
-        code = commands.main(["--home", str(workspace.path), "hermes", "session", *argv])
-        return code, capsys.readouterr()
+        return cli.run(["session", "--home", str(workspace.path), *argv]), capsys.readouterr()
 
     code, out = session("attach", "--session", "cron_briefing", "--file", str(path))
     assert code == 0 and str(warrant.id) in out.out
     assert str(warrant.id) in session("list")[1].out
     assert str(warrant.id) in session("show", "--session", "cron_briefing")[1].out
+    monkeypatch.setenv("TENUO_JSON", "1")
+    code, out = session("show", "--session", "cron_briefing")
+    assert code == 0 and str(warrant.id) in json.dumps(json.loads(out.out))
+    monkeypatch.setenv("TENUO_JSON", "0")
     assert session("detach", "--session", "cron_briefing", "--id", str(warrant.id))[0] == 0
     code, out = session("show", "--session", "chat-x")
     assert code == 1 and "no attachments" in out.err
-    # The standalone command still works.
-    monkeypatch.setattr(sys, "argv", ["hermes-tenuo", "session", "--home", str(workspace.path), "list"])
-    with pytest.raises(SystemExit) as done:
-        cli.main()
-    assert done.value.code == 0
+
+    # The same command as `tenuo-cli hermes session`, when the SDK routes integration commands (tenuo#976).
+    from tenuo.local_cli import commands
+    if hasattr(commands, "integrations"):
+        assert commands.integrations()["hermes"].value == "hermes_tenuo.cli:tenuo_cli"
+        assert commands.main(["--home", str(workspace.path), "--json", "hermes", "session", "list"]) == 0
+        assert "sessions" in json.loads(capsys.readouterr().out)

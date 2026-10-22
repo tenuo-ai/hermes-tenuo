@@ -728,7 +728,10 @@ def cmd_session(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"✗  {exc}", file=sys.stderr)
         return 1
-    print(yaml.safe_dump(result, sort_keys=False).rstrip())
+    if args.json or os.environ.get("TENUO_JSON") == "1":  # tenuo-cli --json hermes session …
+        print(json.dumps(result, default=str))
+    else:
+        print(yaml.safe_dump(result, sort_keys=False).rstrip())
     return 0
 
 
@@ -775,6 +778,7 @@ def build_parser(prog: str = "tenuo-cli hermes") -> argparse.ArgumentParser:
     session_p = subparsers.add_parser(
         "session", help="Attach warrants to Hermes sessions (a chat, or cron_<job_id> for every run of a job)")
     session_p.add_argument("--home", metavar="DIR", help="Tenuo workspace (default: TENUO_HOME or ~/.tenuo)")
+    session_p.add_argument("--json", action="store_true", help="Print one JSON object")
     session_actions = session_p.add_subparsers(dest="action", required=True)
     session_actions.add_parser("list")
     for action in ("show", "attach", "detach"):

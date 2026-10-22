@@ -59,7 +59,9 @@ def call(order, session='chat-a'):
         tool_call_id='call-' + str(counter))
 first = call('A-1001')
 assert calls == [] and 'chat-a' in first, first
-cli('session', 'attach', '--session', 'chat-a', '--file', grant)
+attached = subprocess.run([sys.executable, '-m', 'hermes_tenuo.cli', 'session', '--home', str(operator.path),
+    '--json', 'attach', '--session', 'chat-a', '--file', str(grant)], capture_output=True, text=True)
+assert attached.returncode == 0 and json.loads(attached.stdout)['session'], attached.stderr
 for directory in ['warrants', 'sessions']:
     shutil.copytree(operator.path / directory, runtime / directory, dirs_exist_ok=True)
 call('A-1001')

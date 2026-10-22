@@ -63,5 +63,11 @@ or `cron_<job_id>` for a job that picks up labelled issues.
   workflow on the agent's branch with the repository's secrets, which is why the
   token above has no Workflows permission.
 - A PR body with "Closes #2" closes that issue when someone merges the PR.
+- `get_file_contents` takes any `path`, because reading the code is the job.
+  It's a path inside the one repository the warrant names, not on your machine,
+  but it does mean the agent can read every file in that repository, including
+  anything secret committed to it. `tenuo-cli warrant review` flags it for that
+  reason. If parts of the repository are off limits, replace `any` with
+  `{pattern: "src/*"}` or a list of folders.
 - The warrant decides where code goes, not what it does; that's for the PR
   review.

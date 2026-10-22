@@ -23,6 +23,13 @@ run: the warrant compares the whole string, so `pytest -q` doesn't allow
 the project: `billing/invoice.py` and `~/code/…` are checked as written and
 refused.
 
+The warrant requires `workdir` on every `terminal` call, so commands run in the
+project and not wherever Hermes happens to be. Hermes often leaves it out, and
+then the call is refused with `Constraint 'workdir' not satisfied: missing
+required argument`. Tell the task to pass `workdir`. To see this before
+enforcing, attach the warrant while still in observe mode: `tenuo-cli calls
+summary` shows `denied_on: workdir` for those calls.
+
 ## What it allows and refuses
 
 | Call | Result |
@@ -33,6 +40,7 @@ refused.
 | `terminal "git status \nrm -rf ~"` | refused: Constraint 'command' not satisfied |
 | `terminal "git diff --output=/home/you/.bashrc"` | refused: Constraint 'command' not satisfied |
 | `terminal "pytest -q"` with `workdir: /` | refused: Constraint 'workdir' not satisfied |
+| `terminal "pytest -q"` with no `workdir` | refused: Constraint 'workdir' not satisfied: missing required argument |
 | `terminal` with `background: true` | refused: unknown field not allowed |
 
 ## Limits

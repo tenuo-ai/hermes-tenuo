@@ -15,7 +15,7 @@ capabilities:
   mcp__github__get_file_contents:
     owner: your-org
     repo: your-repo
-    path: any
+    path: any                             # any file in this repository; see Limits
     ref: {optional: any}
     sha: {optional: any}
   mcp__github__create_branch:
