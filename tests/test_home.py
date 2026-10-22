@@ -204,13 +204,15 @@ def test_doctor_uses_kanban_task_warrant(tmp_path, monkeypatch, capsys):
 
 
 def test_doctor_holder_match_true_positive(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo._home import hermes_cli_available
     from hermes_tenuo.cli import cmd_doctor
     _configured_home(tmp_path, monkeypatch, "matching")
     cmd_doctor(argparse.Namespace())
     out = capsys.readouterr().out
     assert "✓  signing key matches warrant holder" in out
     assert "does not match" not in out
-    assert "reading" in out and "config.yaml directly" in out
+    # The fallback note appears only when Hermes itself can't be imported.
+    assert ("config.yaml directly" in out) == (not hermes_cli_available())
 
 
 def test_doctor_holder_match_true_negative(tmp_path, monkeypatch, capsys):
