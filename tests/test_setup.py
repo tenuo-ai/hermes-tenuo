@@ -147,3 +147,25 @@ def test_setup_installs_the_recipes_without_overwriting_edits(profile, tmp_path,
     (recipes / "project-task.yaml").write_text("# mine\n")
     assert run(monkeypatch, "--home", str(home)) == 0
     assert (recipes / "project-task.yaml").read_text() == "# mine\n"
+
+
+def test_observe_records_with_an_sdk_that_does_not_tag_integrations(tmp_path, monkeypatch):
+    """An SDK whose record() has no via= must still get every observation."""
+    from tenuo.local_cli.runtime import LocalAuthority
+    from tenuo.local_cli.workspace import Workspace
+
+    from hermes_tenuo.local_guard import SharedLocalGuard
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    workspace.set_mode("observe")
+    seen = []
+
+    def old_record(self, tool, arguments, *, decision=None, reason=None, warrant_id=None, argument=None,
+                   run=None, step=None):
+        seen.append(tool)
+
+    monkeypatch.setattr(LocalAuthority, "record", old_record)
+    guard = SharedLocalGuard(workspace.path)
+    assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="s1", tool_call_id="t1") is None
+    assert seen == ["web_search"]
