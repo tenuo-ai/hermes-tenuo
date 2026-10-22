@@ -11,6 +11,7 @@ capabilities:
     pullNumber: [57, 58]                  # EDIT: the PRs to review
     page: {optional: any}
     perPage: {optional: any}
+    after: {optional: any}                # the cursor get_review_comments pages with
   mcp__github__pull_request_review_write:
     method: create
     event: COMMENT

@@ -113,13 +113,34 @@ def test_house_sitter_by_person_not_session(workspace, monkeypatch):
                              "data": '{"area_id": "upstairs"}'}),
         ("ha_get_state", {"entity_id": "alarm_control_panel.home"}),
         ("ha_list_entities", {"domain": "lock"}),
-    ]) == [False] * 5
+        ("ha_list_entities", {}),  # no domain lists everything, locks and alarms included
+    ]) == [False] * 6
     # The owner's own conversation runs on the owner's warrant; someone else gets nothing.
     assert check(guard, "20261021_100000_cccc3333", [
         ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})]) == [True]
     blocked = guard.pre_tool_call("ha_get_state", {"entity_id": "light.guest_room"},
                                   session_id="20261021_110000_dddd4444", tool_call_id="x")
     assert "telegram:5550099" in blocked["message"] and "tenuo-cli hermes session attach" in blocked["message"]
+
+
+
+def test_task_scope_outranks_sender_across_compression_and_delegation(workspace, monkeypatch):
+    """A session given a narrow warrant keeps it in its compressed or delegated
+    children, even when the person who sent it holds a broader one."""
+    owner = "telegram:5550002"
+    attach(workspace, owner, issue(workspace, "house-sitter", "owner.yaml"))
+    attach(workspace, "task-session", issue(workspace, "house-sitter"))
+    parents = {"child": "task-session"}
+    lineage = [f"hop-{n}" for n in range(8)]  # longer than any fixed hop limit
+    parents.update(zip(lineage, lineage[1:] + ["task-session"]))
+    monkeypatch.setattr(local_guard, "parent_session", parents.get)
+    monkeypatch.setattr(local_guard, "sender_keys", lambda session_id: [owner])
+    guard = SharedLocalGuard(workspace.path)
+    unlock = ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})
+    for session in ("child", "hop-0"):
+        assert check(guard, session, [("ha_get_state", {"entity_id": "climate.guest_room"}), unlock]) == [True, False]
+    # With no task attachment anywhere in its lineage, the sender's warrant applies.
+    assert check(guard, "fresh-chat", [unlock]) == [True]
 
 
 GH = {"owner": "your-org", "repo": "your-repo"}
@@ -173,9 +194,10 @@ def test_review_prs_held_by_the_reviewer_key(workspace):
     assert check(reviewer, "reviewer-chat", [
         (P + "pull_request_read", {"method": "get_diff", **GH, "pullNumber": 57}),
         (P + "pull_request_read", {"method": "get_files", **GH, "pullNumber": 58, "perPage": 100}),
+        (P + "pull_request_read", {"method": "get_review_comments", **GH, "pullNumber": 58, "after": "Y3Vyc29y"}),
         (P + "pull_request_review_write", {"method": "create", "event": "COMMENT", **GH, "pullNumber": 57,
                                            "body": "Looks right.", "commitID": "abc123"}),
-    ]) == [True] * 3
+    ]) == [True] * 4
     assert check(reviewer, "reviewer-chat", [
         (P + "pull_request_review_write", {"method": "create", "event": "APPROVE", **GH, "pullNumber": 57, "body": "x"}),
         (P + "pull_request_read", {"method": "get", **GH, "pullNumber": 59}),

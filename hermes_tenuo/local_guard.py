@@ -67,9 +67,6 @@ def parent_session(session_id):
         return None
 
 
-_MAX_PARENT_HOPS = 5
-
-
 def _with_next_step(reason, error_type):
     step = _NEXT_STEP.get(error_type)
     return f"{reason.rstrip('.')}. {step}" if step else reason
@@ -181,26 +178,27 @@ class SharedLocalGuard(HermesGuard):
         return allowed, selected, reason, pending, kind, argument
 
     def _manifest(self, session_id, job):
-        """The first attachments found for this session, its cron job, the person, or the chat.
+        """The first attachments found for this session or its cron job, then the
+        sessions it continues or was delegated from (Hermes' parent_session_id),
+        and only then the person or chat that sent it.
 
-        A session with none falls back to the one it continues or was delegated
-        from (Hermes' parent_session_id), so a cron run whose ID rotated during
-        compression, or a delegate_task child, keeps its parent's attachments.
+        Explicit task scope comes before sender authority: a compressed or
+        delegated session keeps a narrow warrant its parent was given rather than
+        falling back to the broader one its sender holds.
         """
         from tenuo.local import read_session
 
-        current, seen = session_id, set()
-        for _ in range(_MAX_PARENT_HOPS + 1):
-            if not current or current in seen:
-                break
-            seen.add(current)
-            parent_job = cron_job(current)
-            for key in [current, *([parent_job] if parent_job else []), *sender_keys(current)]:
-                try:
-                    return key, read_session(self.authority.workspace, key)
-                except FileNotFoundError:
-                    continue
+        lineage, current = [], session_id
+        while current and current not in lineage:  # until the lineage ends or repeats
+            lineage.append(current)
             current = parent_session(current)
+        task_keys = [key for s in lineage for key in (s, cron_job(s)) if key]
+        sender = [key for s in lineage for key in sender_keys(s)]
+        for key in dict.fromkeys(task_keys + sender):
+            try:
+                return key, read_session(self.authority.workspace, key)
+            except FileNotFoundError:
+                continue
         raise FileNotFoundError(session_id)
 
     def pre_tool_call(self, tool_name, args, *, session_id="", task_id="", tool_call_id=""):
