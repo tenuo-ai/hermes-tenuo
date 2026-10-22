@@ -4,8 +4,8 @@ Most people stop at drafts: the agent writes the reply, a person presses send.
 This lets Hermes send the reply itself, on one thread, to one address, within
 the hour.
 
-What Hermes and Google already do: an OAuth scope can make Gmail read-only or
-drafts-only, and Hermes can drop the send tool by name. Once send is allowed,
+What Hermes and Google already do: an OAuth scope can make Gmail read-only,
+and Hermes can drop the send tool by name to keep it at drafts. Once send is allowed,
 `gmail.send` reaches anyone, on any thread, until you revoke it. What the
 warrant adds: the thread and the recipient, checked on every send, for an hour.
 
@@ -14,6 +14,8 @@ warrant adds: the thread and the recipient, checked on every send, for an hour.
 configured in Hermes as `google_workspace`. Arguments it doesn't list (`cc`,
 `bcc`, `forward_message_id`, `attachments`, `reply_all`, `quote_original`) are
 refused.
+The recipient is the boundary: subject and reply headers aren't pinned, so a
+reply Gmail doesn't thread still goes only to `to`.
 
 ## Set it up
 
