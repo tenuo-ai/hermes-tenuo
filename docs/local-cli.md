@@ -6,7 +6,10 @@ only connects those artifacts to Hermes hooks. It does not implement another
 warrant-template parser or signer.
 
 This is unreleased. Install the matching Tenuo SDK and plugin checkouts into
-your test environment; the published SDK may not expose these APIs yet. An
+your test environment; the published SDK may not expose these APIs yet. The SDK
+needs the local CLI (tenuo-ai/tenuo#970) and, for `tenuo-cli hermes …`, its
+integration commands (#976); without #976, run the same commands as
+`hermes-tenuo …`. An
 unavailable SDK helper blocks tools rather than falling back to legacy mode.
 
 ## Start in one command
