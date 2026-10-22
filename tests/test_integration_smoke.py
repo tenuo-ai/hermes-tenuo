@@ -743,11 +743,15 @@ class TestUnconfiguredInstall:
 
 
 @pytest.mark.parametrize("missing_task_warrant", [False, True])
-def test_block_all_covers_registry_and_inline_tools(agent_key, root_key, missing_task_warrant):
+def test_block_all_covers_registry_and_inline_tools(
+    parent_warrant, agent_key, root_key, missing_task_warrant
+):
     """Failure handling must block both dispatch paths when registry support exists."""
     env = {"HERMES_KANBAN_TASK": "task-without-warrant"} if missing_task_warrant else None
+    warrant = _warrant_b64(parent_warrant) if missing_task_warrant else "not-a-warrant!!"
+    expected_message = "has no warrant" if missing_task_warrant else "could not be loaded"
     with _plugin_ctx(
-        "not-a-warrant!!", agent_key, root_key,
+        warrant, agent_key, root_key,
         has_registry_enforcement_fn=True, env_overrides=env,
     ) as (ctx, reg_mod):
         (block_registry,) = reg_mod.registry._enforcement_fn_store
@@ -757,3 +761,4 @@ def test_block_all_covers_registry_and_inline_tools(agent_key, root_key, missing
             result = ctx.call_hook("pre_tool_call", tool_name=tool, args={})
             assert result is not None, f"inline tool {tool} must be blocked"
             assert result["action"] == "block"
+            assert expected_message in result["message"]
