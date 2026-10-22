@@ -97,6 +97,9 @@ class SharedLocalGuard(HermesGuard):
             snapshot = self.authority.snapshot()
             manifest = self._manifest(session_id, job)
             for wid in manifest["warrants"]:
+                # A refusal is attributed to the warrant that produced it, never
+                # to an earlier attachment's ID or failed argument.
+                selected, argument = wid, None
                 try:
                     chain = load_warrant_chain(self.authority.workspace.path / "warrants" / (wid + ".warrant"))
                     if str(chain[-1].id) != wid:

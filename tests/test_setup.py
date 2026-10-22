@@ -135,3 +135,29 @@ def test_observe_records_with_an_sdk_that_does_not_tag_integrations(tmp_path, mo
     guard = SharedLocalGuard(workspace.path)
     assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="s1", tool_call_id="t1") is None
     assert seen == ["web_search"]
+
+
+def test_a_refusal_names_the_warrant_that_refused(tmp_path):
+    """With two attachments, a later one's failure isn't reported under the first one's ID."""
+    from tenuo import WarrantTemplate
+    from tenuo.local import attach
+    from tenuo.local_cli.files import keygen
+    from tenuo.local_cli.workspace import Workspace
+
+    from hermes_tenuo.local_guard import SharedLocalGuard
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    workspace.set_mode("enforce")
+    keygen(workspace.path / "keys" / "reviewer")
+    first = WarrantTemplate({"version": 2, "ttl": "1h", "capabilities": {"get_order": {"order_id": "A-1"}}}).mint(
+        workspace.signing_key("issuer"), workspace.public_key("agent"))
+    second = WarrantTemplate({"version": 2, "ttl": "1h", "capabilities": {"get_order": {}}}).mint(
+        workspace.signing_key("issuer"), workspace.public_key("reviewer"))
+    attach(workspace, "s1", [first])
+    attach(workspace, "s1", [second], holder="reviewer")
+    events = []
+    guard = SharedLocalGuard(workspace.path, audit_callback=events.append)
+    blocked = guard.pre_tool_call("get_order", {"order_id": "B-2"}, session_id="s1", tool_call_id="t1")
+    assert "is held by key" in blocked["message"]
+    assert events[-1].warrant_id == str(second.id)
