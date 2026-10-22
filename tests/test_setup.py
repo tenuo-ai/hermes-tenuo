@@ -90,3 +90,46 @@ def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
         assert commands.integrations()["hermes"].value == "hermes_tenuo.cli:tenuo_cli"
         assert commands.main(["--home", str(workspace.path), "--json", "hermes", "session", "list"]) == 0
         assert "sessions" in json.loads(capsys.readouterr().out)
+
+
+def test_attach_template_issues_and_attaches_in_one_step(tmp_path, capsys):
+    import json
+
+    from tenuo.local import read_session
+    from tenuo.local_cli.workspace import Workspace
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    template = tmp_path / "job.yaml"
+    template.write_text("version: 2\nttl: 1h\ncapabilities:\n  web_search: {}\n")
+    code = cli.run(["session", "--home", str(workspace.path), "--json", "attach", "--session", "cron_briefing",
+                    "--template", str(template)])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and read_session(workspace, "cron_briefing")["warrants"] == [out["issued"]]
+    assert (workspace.path / "warrants" / f"{out['issued']}.warrant").exists()
+    # --set belongs with --template.
+    assert cli.run(["session", "--home", str(workspace.path), "attach", "--session", "x",
+                    "--file", str(template), "--set", "a=b"]) == 1
+
+
+def test_a_warrant_held_by_another_key_is_refused_with_both_keys_named(tmp_path):
+    from tenuo import WarrantTemplate
+    from tenuo.local import attach
+    from tenuo.local_cli.workspace import Workspace
+
+    from hermes_tenuo.local_guard import SharedLocalGuard
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    workspace.set_mode("enforce")
+    from tenuo.local_cli.files import keygen
+
+    keygen(workspace.path / "keys" / "reviewer")
+    warrant = WarrantTemplate({"version": 2, "ttl": "1h", "capabilities": {"web_search": {}}}).mint(
+        workspace.signing_key("issuer"), workspace.public_key("reviewer"))
+    attach(workspace, "20261022_120000_5555ffff", [warrant], holder="reviewer")
+    guard = SharedLocalGuard(workspace.path)
+    blocked = guard.pre_tool_call("web_search", {"query": "x"}, session_id="20261022_120000_5555ffff",
+                                  tool_call_id="t1")
+    assert "is held by key" in blocked["message"] and "signs with 'agent'" in blocked["message"]
+    assert "--holder agent" in blocked["message"]
