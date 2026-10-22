@@ -13,8 +13,8 @@ vars:
                  description: "entities they may switch on and off, as a list"}
   domains: {default: [light, scene], description: "the domains of those entities"}
 capabilities:
-  ha_list_entities:
-    domain: [light, scene, climate]       # required: without it Hermes lists every domain
+  # No ha_list_entities: even filtered by domain it returns every room's
+  # entities and states. The sitter reads only the entities listed here.
   ha_get_state:
     entity_id: ${readable}
   ha_call_service:

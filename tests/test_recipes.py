@@ -20,6 +20,7 @@ from hermes_tenuo import local_guard
 from hermes_tenuo.local_guard import SharedLocalGuard
 
 RECIPES = Path(__file__).resolve().parent.parent / "hermes_tenuo" / "recipes"
+PARENT_SESSION = local_guard.parent_session  # the real lookup; the workspace fixture stubs it
 
 
 @pytest.fixture(autouse=True)
@@ -127,19 +128,19 @@ def test_house_sitter_by_person_not_session(workspace, monkeypatch):
     guard = SharedLocalGuard(workspace.path)
     for session in ("20261021_090000_aaaa1111", "20261023_120000_bbbb2222"):
         assert check(guard, session, [
-            ("ha_list_entities", {"domain": "light"}),
             ("ha_get_state", {"entity_id": "climate.guest_room"}),
             ("ha_call_service", {"domain": "scene", "service": "turn_on", "entity_id": "scene.guest_room_comfort"}),
             ("ha_call_service", {"domain": "light", "service": "turn_off", "entity_id": "light.guest_room"}),
-        ]) == [True] * 4
+        ]) == [True] * 3
     assert check(guard, "20261021_090000_aaaa1111", [
         ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}),
         ("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.bedroom"}),
         ("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.guest_room",
                              "data": '{"area_id": "upstairs"}'}),
         ("ha_get_state", {"entity_id": "alarm_control_panel.home"}),
-        ("ha_list_entities", {"domain": "lock"}),
-        ("ha_list_entities", {}),  # no domain lists everything, locks and alarms included
+        # Listing, even by domain, returns every room's entities and states.
+        ("ha_list_entities", {"domain": "climate"}),
+        ("ha_list_entities", {}),
     ]) == [False] * 6
     # The owner's own conversation runs on the owner's warrant; someone else gets nothing.
     assert check(guard, "20261021_100000_cccc3333", [
@@ -188,16 +189,18 @@ def test_work_on_issues(workspace):
         (P + "create_pull_request", {**GH, "title": "Fix #412", "head": "agent/issue-412", "base": "main",
                                      "body": "Fixes #412", "draft": True}),
         (P + "add_issue_comment", {**GH, "issue_number": 412, "body": "Opened a PR."}),
-    ]) == [True] * 9
+        (P + "list_issues", {**GH, "state": "OPEN", "labels": ["agent"]}),  # a cron job finding its queue
+    ]) == [True] * 10
     assert check(guard, "chat", [
         (P + "push_files", {**GH, "branch": "main", "message": "m", "files": []}),
         (P + "create_branch", {**GH, "branch": "release-1", "from_branch": "main"}),
         (P + "create_pull_request", {**GH, "title": "t", "head": "agent/x", "base": "release"}),
         (P + "merge_pull_request", {**GH, "pullNumber": 57}),
         (P + "get_file_contents", {"owner": "your-org", "repo": "private-payroll", "path": "salaries.csv"}),
+        (P + "list_issues", {"owner": "your-org", "repo": "private-payroll"}),
         (P + "issue_write", {"method": "update", **GH, "issue_number": 412, "state": "closed"}),
         (P + "pull_request_review_write", {"method": "create", "event": "COMMENT", **GH, "pullNumber": 1, "body": "x"}),
-    ]) == [False] * 7
+    ]) == [False] * 8
 
 
 def test_one_issue(workspace):
@@ -265,9 +268,10 @@ def test_project_task(workspace):
         ("read_file", {"path": f"{project}/billing/invoice.py", "offset": 1, "limit": 200}),
         ("search_files", {"pattern": "round(", "path": project, "target": "content", "file_glob": "*.py"}),
         ("patch", {"mode": "replace", "path": f"{project}/billing/invoice.py", "old_string": "a", "new_string": "b"}),
+        ("patch", {"path": f"{project}/billing/invoice.py", "old_string": "a", "new_string": "b"}),  # Hermes' usual call
         ("terminal", {"command": "pytest -q", "workdir": project, "timeout": 300}),
         ("terminal", {"command": "git diff", "workdir": f"{project}/"}),
-    ]) == [True] * 5
+    ]) == [True] * 6
     assert check(guard, "chat", [
         ("read_file", {"path": "/home/you/.ssh/id_rsa"}),
         ("read_file", {"path": f"{project}/../../.hermes/.env"}),
@@ -278,3 +282,40 @@ def test_project_task(workspace):
         ("terminal", {"command": "pytest -q", "workdir": project, "background": True}),
         ("write_file", {"path": "/home/you/.bashrc", "content": "x"}),
     ]) == [False] * 8
+
+
+def test_a_reset_starts_a_new_lineage_and_an_unreadable_store_refuses(workspace, monkeypatch):
+    """A reset links to the old conversation but must not inherit its task warrant;
+    a session store that can't be read must refuse rather than fall back to the sender."""
+    import json as _json
+
+    from hermes_tenuo import local_guard as lg
+
+    owner = "telegram:5550002"
+    attach(workspace, owner, issue(workspace, "house-sitter", "owner.yaml"))
+    attach(workspace, "old-chat", issue(workspace, "house-sitter"))
+    rows = {"new-chat": {"parent_session_id": "old-chat", "model_config": _json.dumps({"_reset_from": "old-chat"})},
+            "compressed": {"parent_session_id": "old-chat", "model_config": None}}
+
+    class Store:
+        def __init__(self, path=None, read_only=False):
+            pass
+
+        def get_session(self, sid):
+            if sid == "broken":
+                raise RuntimeError("database is locked")
+            return rows.get(sid)
+
+    import types
+    home = workspace.path.parent / "hermes-home"
+    home.mkdir()
+    (home / "state.db").write_bytes(b"")
+    monkeypatch.setitem(__import__("sys").modules, "hermes_state", types.SimpleNamespace(SessionDB=Store))
+    monkeypatch.setitem(__import__("sys").modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: home))
+    monkeypatch.setattr(lg, "parent_session", PARENT_SESSION)
+    monkeypatch.setattr(lg, "sender_keys", lambda session_id: [owner])
+    guard = SharedLocalGuard(workspace.path)
+    unlock = ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})
+    assert check(guard, "compressed", [unlock]) == [False]  # continues old-chat: the sitter's warrant
+    assert check(guard, "new-chat", [unlock]) == [True]     # a reset: the person's own warrant
+    assert check(guard, "broken", [unlock]) == [False]      # unreadable store: refused, not the owner's

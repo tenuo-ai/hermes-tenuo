@@ -18,6 +18,16 @@ capabilities:
     issue_number: any
     page: {optional: any}
     perPage: {optional: any}
+  mcp__github__list_issues:               # for a cron job that picks up labelled issues
+    owner: ${owner}
+    repo: ${repo}
+    state: {optional: any}
+    labels: {optional: any}
+    orderBy: {optional: any}
+    direction: {optional: any}
+    since: {optional: any}
+    perPage: {optional: any}
+    after: {optional: any}
   mcp__github__get_file_contents:
     owner: ${owner}
     repo: ${repo}

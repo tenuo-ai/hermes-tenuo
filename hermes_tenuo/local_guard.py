@@ -1,6 +1,7 @@
 """Hermes session routing over the shared Python SDK's local artifacts."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shlex
@@ -58,13 +59,35 @@ def sender_keys(session_id):
 
 
 def parent_session(session_id):
-    """The session this one continues (compression) or was delegated from, per Hermes' session store."""
-    try:
-        from hermes_state import SessionDB
+    """The session this one continues (compression) or was delegated from, per Hermes' session store.
 
-        return (SessionDB(read_only=True).get_session(session_id) or {}).get("parent_session_id") or None
-    except Exception:
+    A reset also links to the old conversation, but starts a new one, so the
+    lineage ends there. A store that can't be read raises: treating it as "no
+    parent" could skip a narrow parent warrant and fall back to a broader one.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+    except ImportError:  # no session store in this Hermes: nothing to inherit from
         return None
+    database = get_hermes_home() / "state.db"
+    if not database.exists():  # no sessions recorded yet: nothing to inherit from
+        return None
+    try:
+        row = SessionDB(database, read_only=True).get_session(session_id) or {}
+    except Exception as exc:
+        if "no such table" in str(exc):  # created but nothing recorded yet
+            return None
+        raise
+    config = row.get("model_config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except ValueError:
+            config = {}
+    if isinstance(config, dict) and "_reset_from" in config:
+        return None
+    return row.get("parent_session_id") or None
 
 
 def _with_next_step(reason, error_type):

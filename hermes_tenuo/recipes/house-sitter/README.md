@@ -39,7 +39,6 @@ on their next message.
 
 | Their call | Result |
 |------------|--------|
-| `ha_list_entities` for lights, scenes or climate | allowed |
 | `ha_get_state climate.guest_room` | allowed |
 | `ha_call_service scene.turn_on scene.guest_room_comfort` | allowed |
 | `ha_call_service light.turn_off light.guest_room` | allowed |
@@ -47,7 +46,7 @@ on their next message.
 | `ha_call_service light.turn_on light.bedroom` | refused: Constraint 'entity_id' not satisfied |
 | `ha_call_service` with `data: {"area_id": …}` | refused: 'data' unknown field not allowed |
 | `ha_get_state alarm_control_panel.home` | refused: Constraint 'entity_id' not satisfied |
-| `ha_list_entities` with no domain (every entity, locks included) | refused: Constraint 'domain' not satisfied: missing required argument |
+| `ha_list_entities`, for any domain | refused: not authorized (it lists every room's entities and states) |
 | anything after day 7 | refused: the warrant has expired |
 
 `/new` or a reset gives them a new session; their warrant follows their user ID.

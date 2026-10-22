@@ -61,7 +61,11 @@ or `cron_<job_id>` for a job that picks up labelled issues.
 
 - `files` is pushed as written. A push that adds `.github/workflows/…` runs that
   workflow on the agent's branch with the repository's secrets, which is why the
-  token above has no Workflows permission.
+  token above has no Workflows permission. Workflows that already exist still
+  run on the agent's pushes and pull requests, and they run the code it wrote
+  (a changed test, a build script): keep secrets out of `push` and same-repo
+  `pull_request` jobs that agent branches trigger, or put them behind an
+  environment that needs approval.
 - A PR body with "Closes #2" closes that issue when someone merges the PR.
 - `get_file_contents` takes any `path`, because reading the code is the job.
   It's a path inside the one repository the warrant names, not on your machine,

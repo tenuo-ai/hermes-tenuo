@@ -27,7 +27,7 @@ capabilities:
     path: {subpath: "${project}"}
     content: any
   patch:
-    mode: replace
+    mode: {optional: replace}             # Hermes leaves it out; if sent, only replace
     path: {subpath: "${project}"}
     old_string: any
     new_string: any
