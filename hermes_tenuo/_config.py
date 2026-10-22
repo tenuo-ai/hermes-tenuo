@@ -209,6 +209,15 @@ def get_on_denial(ctx: Any) -> str:
     return entry.get("on_denial", "block")
 
 
+def get_require_warrant(ctx: Any) -> bool:
+    """Opt-in fail-closed installation; invalid values cannot turn protection off."""
+    raw = _get_plugin_entry(ctx).get("require_warrant", False)
+    if type(raw) is bool:
+        return raw
+    logger.warning("hermes-tenuo: require_warrant must be a boolean; treating invalid value as true")
+    return True
+
+
 def get_require_session_warrant(ctx: Any) -> Optional[bool]:
     """Return the session-warrant gate, or None for the auto default.
 
