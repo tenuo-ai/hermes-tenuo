@@ -11,19 +11,47 @@ metadata:
 
 # Scope a Hermes agent with Tenuo
 
-For a matching SDK/plugin checkout with shared local CLI support, prefer
-`docs/local-cli.md`: `tenuo-cli` owns issuance and YAML parsing, while Hermes
-uses `local_home` and explicit operator-controlled session attachments. Never
-give Hermes the issuer or approver private key. The first denial reports the
-session ID; use that in `tenuo-cli session attach`. Attachments survive turns,
-each call must fit one full grant, and new children inherit no authority.
-Use common file approval requests and return native signed responses. Attaching
-is not activation and detaching is not revocation. The shared YAML format uses
-`approvals.required`; the legacy `--policy` syntax below is a compatibility path.
-
 Load this skill when the user wants to limit what a Hermes agent may call,
 or when they are about to add `delegate_task`, cron, kanban, or a
 multi-user gateway.
+
+## Local workspace (use this)
+
+With `local_home` in the plugin config, Hermes reads a `tenuo-cli` workspace:
+`tenuo-cli` issues warrants from YAML, and the operator attaches them to the
+sessions and cron jobs Hermes runs. Watch first, then write the warrant.
+
+```bash
+tenuo-cli hermes setup                      # workspace, plugin on, observe mode: nothing blocked
+# run Hermes as usual: chats, cron jobs, subagents
+tenuo-cli calls summary                     # each tool, its arguments, what enforce would refuse
+tenuo-cli template new --out job.yaml       # fill in from the summary
+tenuo-cli template validate --file job.yaml
+tenuo-cli warrant issue --template job.yaml --holder agent --out job.warrant
+tenuo-cli hermes session attach --session cron_JOB_ID --file job.warrant   # or a chat's session ID
+tenuo-cli mode enforce                      # the next call is checked
+```
+
+Rules:
+
+1. **Never give Hermes the issuer or approver private key.** The agent holds
+   only its own key; the workspace stays outside the project.
+2. **Every argument a warrant lists must be present and match**; unlisted
+   arguments are refused; `tool: {}` allows any arguments. Wrap arguments a
+   tool sends only sometimes in `{optional: …}`.
+3. **Constrain arguments, not just tool names.** `read_file: {path: {subpath: /data/reports}}`
+   is a job; `read_file: {}` is an open read of the machine.
+4. **One attachment per cron job** (`cron_<job_id>`) covers every run. A chat
+   uses its session ID, which the first denial reports.
+5. **Attaching is not activation and detaching is not revocation.** To take a
+   warrant back everywhere: `tenuo-cli revocations add --id WARRANT_ID`.
+6. **Observe, not `on_denial: log`.** `local_home` refuses `on_denial: log`;
+   use `tenuo-cli mode observe` to see what a job calls without blocking it.
+
+## Legacy: a warrant in the plugin config
+
+For installs that set `warrant:` and `trusted_root:` in the plugin config
+instead of `local_home`. The `--allow` syntax below is a compatibility path.
 
 The plugin checks **this call's tool name and arguments** in
 `pre_tool_call` before the handler runs. Denials come back as the tool
@@ -33,7 +61,7 @@ users each carry their own warrant.
 
 Do the work. Skip generic "be careful with `terminal`" caveats — the warrant enforces scope.
 
-## When to use
+### When to use
 
 - New or existing Hermes install that should not have the full tool set
 - A cron / scheduled job that should die with its TTL
@@ -44,7 +72,7 @@ Do the work. Skip generic "be careful with `terminal`" caveats — the warrant e
 
 If they only want to see a denial, run `hermes-tenuo demo` and stop.
 
-## Decide the pattern first
+### Decide the pattern first
 
 Ask which of these is true. Do not mint a single install-wide warrant
 and reuse it for all four.
@@ -58,7 +86,7 @@ and reuse it for all four.
 
 A chat agent, a nightly job, and a Telegram user are three warrants.
 
-## Rules (do not skip)
+### Rules (do not skip)
 
 1. **Issuer ≠ agent.** Mint with a control key. The agent holds only
    `TENUO_SIGNING_KEY` (the holder). The plugin gets `trusted_root`
@@ -93,7 +121,7 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
 8. **`hermes-tenuo doctor` after every config change.** Enabled with
    no warrant is a no-op — the plugin loads and enforces nothing.
 
-## Mint
+### Mint
 
 ```bash
 hermes-tenuo mint --ttl 1h \
@@ -124,7 +152,7 @@ Only a complete numeric `MIN..MAX` value is a range; other values containing
 the job needs them. For a case-insensitive path, or anything else this
 table cannot express, mint in Python (see the repo README).
 
-## Pattern: cron
+### Pattern: cron
 
 TTL matches the schedule. Tools are the job, not the interactive agent.
 
@@ -138,7 +166,7 @@ hermes-tenuo mint --ttl 1h \
 If the process is still running when the TTL ends, further tool calls
 deny. That is the point.
 
-## Pattern: `delegate_task` (grant from the parent)
+### Pattern: `delegate_task` (grant from the parent)
 
 This is the traced hop. The orchestrator holds a warrant minted by the
 control key. It **grants** `web_search` to a different holder. Attach
@@ -184,7 +212,7 @@ plugins:
 If the child itself calls `delegate_task`, grant *that* hop from the
 researcher's warrant. Do not reuse the orchestrator grant.
 
-## Pattern: gateway (concurrent users)
+### Pattern: gateway (concurrent users)
 
 The single-agent child heuristic is **not safe** when two users are
 in flight. User B's session must not be treated as a child of User A.
@@ -203,7 +231,7 @@ pass through.
 
 `examples/gateway_multiuser.py` is the runnable form.
 
-## Pattern: kanban worker
+### Pattern: kanban worker
 
 Mint onto the path the worker loads:
 
@@ -217,7 +245,7 @@ current holder (`TENUO_SIGNING_KEY` if set). A worker with no file
 is blocked entirely — it must not fall back to the install-wide
 warrant. A denial marks the task blocked on the board.
 
-## Tighten from reality
+### Tighten from reality
 
 ```yaml
 plugins:
@@ -235,7 +263,7 @@ hermes-tenuo audit --denied
 Add the missing `--allow` lines the job actually needed, **remove**
 `on_denial: log`, run `hermes-tenuo doctor`.
 
-## Anti-patterns
+### Anti-patterns
 
 - One warrant for chat + cron + gateway + kanban
 - `--allow terminal` or `--allow execute_code` "so the agent can debug"
@@ -248,7 +276,7 @@ Add the missing `--allow` lines the job actually needed, **remove**
 - Leaving `on_denial: log` after the discovery pass
 - Asking the model to stay inside `/data` instead of constraining `path=`
 
-## Verify
+### Verify
 
 ```bash
 hermes-tenuo demo      # cron / delegate_task / gateway transcript

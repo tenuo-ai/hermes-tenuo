@@ -37,6 +37,9 @@ dev = [
 [project.scripts]
 hermes-tenuo = "hermes_tenuo.cli:main"
 
+[project.entry-points."tenuo.cli"]
+hermes = "hermes_tenuo.cli:tenuo_cli"
+
 [project.entry-points."hermes_agent.plugins"]
 hermes-tenuo = "hermes_tenuo"
 
