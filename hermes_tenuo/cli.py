@@ -704,23 +704,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
-def _issue_template(workspace, path, values, holder):
-    """Issue a template (a recipe, say) to the holder key and store it, for attach --template."""
-    from tenuo.local_cli.warrants import issue, save
-    from tenuo.warrant_template import WarrantTemplate
-
-    try:
-        from tenuo.warrant_template import parse_set
-    except ImportError:  # an SDK without template vars
-        if values:
-            raise ValueError("--set needs a Tenuo SDK with template vars (tenuo-ai/tenuo#986)")
-        parse_set = None
-    template = WarrantTemplate.load(path, parse_set(values)) if parse_set else WarrantTemplate.load(path)
-    chain = issue(workspace, template, workspace.public_key(holder))
-    save(workspace, chain)
-    return chain
-
-
 def cmd_session(args: argparse.Namespace) -> int:
     """Route warrants to Hermes sessions: the attachments local_home mode reads."""
     import yaml
@@ -733,15 +716,7 @@ def cmd_session(args: argparse.Namespace) -> int:
         if args.action == "list":
             result = {"sessions": list_sessions(workspace)}
         elif args.action == "attach":
-            if args.template:
-                chain = _issue_template(workspace, args.template, args.set, args.holder)
-            elif args.set:
-                raise ValueError("--set goes with --template")
-            else:
-                chain = load_warrant_chain(args.file)
-            result = {"session": attach(workspace, args.session, chain, holder=args.holder)}
-            if args.template:
-                result["issued"] = str(chain[-1].id)
+            result = {"session": attach(workspace, args.session, load_warrant_chain(args.file), holder=args.holder)}
         elif args.action == "detach":
             result = {"session": detach(workspace, args.session, args.id)}
         else:
@@ -810,11 +785,8 @@ def build_parser(prog: str = "tenuo-cli hermes") -> argparse.ArgumentParser:
         sub = session_actions.add_parser(action)
         sub.add_argument("--session", required=True, help="Hermes session ID, or cron_<job_id>")
         if action == "attach":
-            source = sub.add_mutually_exclusive_group(required=True)
-            source.add_argument("--file", help="the warrant file from tenuo-cli warrant issue")
-            source.add_argument("--template", help="a YAML template (a recipe) to issue and attach in one step")
-            sub.add_argument("--set", action="append", metavar="NAME=VALUE", help="a value for one of the template's vars")
-            sub.add_argument("--holder", default="agent", help="the agent key the warrant is issued to")
+            sub.add_argument("--file", required=True, help="the warrant file from tenuo-cli warrant issue")
+            sub.add_argument("--holder", default="agent", help="the agent key the warrant was issued to")
         if action == "detach":
             sub.add_argument("--id", required=True, help="the warrant ID to detach")
 
