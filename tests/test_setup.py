@@ -133,3 +133,25 @@ def test_a_warrant_held_by_another_key_is_refused_with_both_keys_named(tmp_path)
                                   tool_call_id="t1")
     assert "is held by key" in blocked["message"] and "signs with 'agent'" in blocked["message"]
     assert "--holder agent" in blocked["message"]
+
+
+def test_observe_records_with_an_sdk_that_does_not_tag_integrations(tmp_path, monkeypatch):
+    """An SDK whose record() has no via= must still get every observation."""
+    from tenuo.local_cli.runtime import LocalAuthority
+    from tenuo.local_cli.workspace import Workspace
+
+    from hermes_tenuo.local_guard import SharedLocalGuard
+
+    workspace = Workspace(tmp_path / ".tenuo")
+    workspace.initialize(dev=True)
+    workspace.set_mode("observe")
+    seen = []
+
+    def old_record(self, tool, arguments, *, decision=None, reason=None, warrant_id=None, argument=None,
+                   run=None, step=None):
+        seen.append(tool)
+
+    monkeypatch.setattr(LocalAuthority, "record", old_record)
+    guard = SharedLocalGuard(workspace.path)
+    assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="s1", tool_call_id="t1") is None
+    assert seen == ["web_search"]

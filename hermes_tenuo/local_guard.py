@@ -56,6 +56,11 @@ class SharedLocalGuard(HermesGuard):
             raise ValueError("local_step must be a nonempty name")
         super().__init__(require_session_warrant=True, audit_callback=audit_callback)
         self.authority = LocalAuthority(path=home, key=key)
+        # Tag observations with this integration where the SDK records it, so
+        # calls summary can name the attach command; older SDKs don't take it.
+        import inspect
+
+        self._via = {"via": "hermes"} if "via" in inspect.signature(self.authority.record).parameters else {}
         self.step = step
 
     @property
@@ -171,7 +176,7 @@ class SharedLocalGuard(HermesGuard):
                 self.authority.record(tool_name, args, decision=decision, reason=None if allowed else kind,
                                       warrant_id=selected or None, argument=argument,
                                       run=session_id or None,
-                                      step=self.step or cron_job(session_id) or "hermes", via="hermes")
+                                      step=self.step or cron_job(session_id) or "hermes", **self._via)
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
         if observing:
