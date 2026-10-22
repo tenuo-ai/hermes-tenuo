@@ -26,8 +26,9 @@ mcp_servers:
     args: [workspace-mcp, --tools, gmail]
 ```
 
-Per thread, edit your address, the thread ID (from the Gmail URL or
-`search_gmail_messages`) and the recipient, then:
+Per thread, set your address, the thread ID and the recipient. The thread ID
+is the one `search_gmail_messages` returns, not the token in a Gmail web URL.
+This warrant doesn't allow search, so look it up first (in observe mode, say):
 
 ```bash
 tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/reply-to-thread.yaml --holder agent \

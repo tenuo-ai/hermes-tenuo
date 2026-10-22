@@ -4,9 +4,14 @@ Calls use Hermes' tool names and argument shapes: built-in tools as Hermes
 registers them, MCP tools as mcp__<server>__<tool> with the server's own schema,
 including the optional arguments models send.
 """
+import os
+
 import pytest
 
-pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
+# CI's local-sdk job sets this so the suite can't pass by skipping every recipe.
+REQUIRED = os.environ.get("HERMES_TENUO_REQUIRE_RECIPES") == "1"
+if not REQUIRED:
+    pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
 
 import itertools
 from pathlib import Path
@@ -29,7 +34,10 @@ def _needs_optional_arguments_and_vars():
     from tenuo import warrant_template
 
     if not hasattr(tenuo, "OptionalArg") or not hasattr(warrant_template, "parse_set"):
-        pytest.skip("recipes use optional arguments and template vars (tenuo-ai/tenuo#923, #986)")
+        reason = "recipes use optional arguments and template vars (tenuo-ai/tenuo#923, #986)"
+        if REQUIRED:
+            pytest.fail(reason, pytrace=False)
+        pytest.skip(reason)
 _ids = itertools.count()
 
 
@@ -203,6 +211,20 @@ def test_work_on_issues(workspace):
     ]) == [False] * 8
 
 
+@pytest.mark.parametrize("recipe, file", [("work-on-issues", "warrant.yaml"), ("work-on-issues", "one-issue.yaml"),
+                                          ("review-prs", "warrant.yaml")])
+def test_a_repository_named_any_is_still_one_repository(workspace, monkeypatch, recipe, file):
+    """--set values are literal: repo=any pins a repository called "any", not every repository."""
+    monkeypatch.setitem(VALUES, recipe, [v.replace("your-repo", "any").replace("your-org", "any")
+                                         for v in VALUES[recipe]])
+    attach(workspace, "chat", issue(workspace, recipe, file))
+    guard = SharedLocalGuard(workspace.path)
+    assert check(guard, "chat", [
+        (P + "get_file_contents", {"owner": "your-org", "repo": "private-payroll", "path": "salaries.csv"}),
+        (P + "issue_read", {"method": "get", "owner": "other", "repo": "other", "issue_number": 412}),
+    ]) == [False, False]
+
+
 def test_one_issue(workspace):
     attach(workspace, "chat", issue(workspace, "work-on-issues", "one-issue.yaml"))
     guard = SharedLocalGuard(workspace.path)
@@ -294,8 +316,14 @@ def test_a_reset_starts_a_new_lineage_and_an_unreadable_store_refuses(workspace,
     owner = "telegram:5550002"
     attach(workspace, owner, issue(workspace, "house-sitter", "owner.yaml"))
     attach(workspace, "old-chat", issue(workspace, "house-sitter"))
+    attach(workspace, "task-after-reset", issue(workspace, "house-sitter"))
     rows = {"new-chat": {"parent_session_id": "old-chat", "model_config": _json.dumps({"_reset_from": "old-chat"})},
-            "compressed": {"parent_session_id": "old-chat", "model_config": None}}
+            "compressed": {"parent_session_id": "old-chat", "model_config": None},
+            "task-after-reset": {"parent_session_id": "old-chat",
+                                 "model_config": _json.dumps({"_reset_from": "old-chat"})},
+            # Compression copied the reset marker, but this row continues its own parent.
+            "compressed-task": {"parent_session_id": "task-after-reset",
+                                "model_config": _json.dumps({"_reset_from": "old-chat"})}}
 
     class Store:
         def __init__(self, path=None, read_only=False):
@@ -319,3 +347,19 @@ def test_a_reset_starts_a_new_lineage_and_an_unreadable_store_refuses(workspace,
     assert check(guard, "compressed", [unlock]) == [False]  # continues old-chat: the sitter's warrant
     assert check(guard, "new-chat", [unlock]) == [True]     # a reset: the person's own warrant
     assert check(guard, "broken", [unlock]) == [False]      # unreadable store: refused, not the owner's
+    assert check(guard, "compressed-task", [unlock]) == [False]  # inherited marker: still the task's warrant
+
+
+def test_a_parent_sessions_sender_is_not_the_childs(workspace, monkeypatch):
+    """A child session started by one person never uses the authority attached to
+    the person behind its parent session."""
+    from hermes_tenuo import local_guard as lg
+
+    attach(workspace, "telegram:owner", issue(workspace, "house-sitter", "owner.yaml"))
+    monkeypatch.setattr(lg, "parent_session", lambda sid: {"child": "parent"}.get(sid))
+    monkeypatch.setattr(lg, "sender_keys", lambda sid: {"child": ["telegram:sitter"],
+                                                        "parent": ["telegram:owner"]}[sid])
+    guard = SharedLocalGuard(workspace.path)
+    unlock = ("ha_call_service", {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})
+    assert check(guard, "parent", [unlock]) == [True]
+    assert check(guard, "child", [unlock]) == [False]

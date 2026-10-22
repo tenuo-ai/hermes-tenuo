@@ -62,7 +62,9 @@ def parent_session(session_id):
     """The session this one continues (compression) or was delegated from, per Hermes' session store.
 
     A reset also links to the old conversation, but starts a new one, so the
-    lineage ends there. A store that can't be read raises: treating it as "no
+    lineage ends there. A reset is a row whose ``_reset_from`` names its own
+    parent: a compressed child can inherit an older ancestor's marker and still
+    continue its parent. A store that can't be read raises: treating it as "no
     parent" could skip a narrow parent warrant and fall back to a broader one.
     """
     try:
@@ -85,9 +87,10 @@ def parent_session(session_id):
             config = json.loads(config)
         except ValueError:
             config = {}
-    if isinstance(config, dict) and "_reset_from" in config:
+    parent = row.get("parent_session_id") or None
+    if parent and isinstance(config, dict) and config.get("_reset_from") == parent:
         return None
-    return row.get("parent_session_id") or None
+    return parent
 
 
 def _with_next_step(reason, error_type):
@@ -234,7 +237,8 @@ class SharedLocalGuard(HermesGuard):
             lineage.append(current)
             current = parent_session(current)
         task_keys = [key for s in lineage for key in (s, cron_job(s)) if key]
-        sender = [key for s in lineage for key in sender_keys(s)]
+        # Only the nearest sender: a parent session's sender is another person's authority.
+        sender = next((keys for keys in map(sender_keys, lineage) if keys), [])
         for key in dict.fromkeys(task_keys + sender):
             try:
                 return key, read_session(self.authority.workspace, key)
