@@ -21,8 +21,9 @@ tenuo-cli key new reviewer                           # the reviewer profile's ke
 hermes profile create reviewer                       # in its config: hermes-tenuo with
                                                      # local_home: ~/.tenuo and local_key: reviewer,
                                                      # and the same github MCP server
-tenuo-cli hermes session attach --session <reviewer's user ID or job> --holder reviewer \
-  --template ~/.tenuo/recipes/hermes/review-prs.yaml --set owner=your-org --set repo=your-repo --set "prs=[57, 58]"
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/review-prs.yaml --holder reviewer \
+  --set owner=your-org --set repo=your-repo --set "prs=[57, 58]" --out review.warrant
+tenuo-cli hermes session attach --session <reviewer's user ID or job> --file review.warrant --holder reviewer
 ```
 
 New PRs to review: issue a warrant naming them and attach it alongside.

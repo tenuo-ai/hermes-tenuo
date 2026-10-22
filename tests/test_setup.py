@@ -92,26 +92,6 @@ def test_session_attach_list_show_detach(tmp_path, monkeypatch, capsys):
         assert "sessions" in json.loads(capsys.readouterr().out)
 
 
-def test_attach_template_issues_and_attaches_in_one_step(tmp_path, capsys):
-    import json
-
-    from tenuo.local import read_session
-    from tenuo.local_cli.workspace import Workspace
-
-    workspace = Workspace(tmp_path / ".tenuo")
-    workspace.initialize(dev=True)
-    template = tmp_path / "job.yaml"
-    template.write_text("version: 2\nttl: 1h\ncapabilities:\n  web_search: {}\n")
-    code = cli.run(["session", "--home", str(workspace.path), "--json", "attach", "--session", "cron_briefing",
-                    "--template", str(template)])
-    out = json.loads(capsys.readouterr().out)
-    assert code == 0 and read_session(workspace, "cron_briefing")["warrants"] == [out["issued"]]
-    assert (workspace.path / "warrants" / f"{out['issued']}.warrant").exists()
-    # --set belongs with --template.
-    assert cli.run(["session", "--home", str(workspace.path), "attach", "--session", "x",
-                    "--file", str(template), "--set", "a=b"]) == 1
-
-
 def test_a_warrant_held_by_another_key_is_refused_with_both_keys_named(tmp_path):
     from tenuo import WarrantTemplate
     from tenuo.local import attach
@@ -143,7 +123,7 @@ def test_setup_installs_the_recipes_without_overwriting_edits(profile, tmp_path,
     assert {"briefing", "house-sitter", "house-sitter-owner", "project-task", "reply-to-thread", "review-prs",
             "work-on-issues", "work-on-issues-one-issue"} <= set(names)
     out = capsys.readouterr().out
-    assert "--template" in out and "project-task.yaml --set project=$PWD" in out
+    assert "warrant issue --template" in out and "attach --session telegram:YOUR_ID --file project.warrant" in out
     (recipes / "project-task.yaml").write_text("# mine\n")
     assert run(monkeypatch, "--home", str(home)) == 0
     assert (recipes / "project-task.yaml").read_text() == "# mine\n"

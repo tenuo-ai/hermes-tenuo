@@ -1,7 +1,8 @@
 # A reviewer agent (its own Hermes profile and key) for the pull requests you
 # name: read them and leave review comments. Never approve, never push.
-#   tenuo-cli hermes session attach --session SESSION --holder reviewer --template warrant.yaml \
-#     --set owner=ORG --set repo=REPO --set "prs=[57, 58]"
+#   tenuo-cli warrant issue --template review-prs.yaml --holder reviewer \
+#     --set owner=ORG --set repo=REPO --set "prs=[57, 58]" --out review.warrant
+#   tenuo-cli hermes session attach --session SESSION --file review.warrant --holder reviewer
 version: 2
 name: review-prs
 ttl: 1d

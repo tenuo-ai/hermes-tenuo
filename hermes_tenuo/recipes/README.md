@@ -35,12 +35,13 @@ attach a warrant for yourself first (see [house-sitter/owner.yaml](house-sitter/
 tenuo-cli hermes setup                   # workspace, plugin on, observe mode, recipes in ~/.tenuo/recipes/hermes
 # use Hermes as usual for a day or two
 tenuo-cli calls summary                  # what it called, per job, person or session, and the attach command
-tenuo-cli hermes session attach --session <who> --template ~/.tenuo/recipes/hermes/<recipe>.yaml --set NAME=VALUE
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/<recipe>.yaml --holder agent --set NAME=VALUE --out job.warrant
+tenuo-cli hermes session attach --session <who> --file job.warrant
 tenuo-cli mode enforce                   # the next call is checked
 ```
 
-`attach --template` issues the recipe to Hermes' key and attaches it in one step.
-Each recipe's first lines say which values it needs; leave one out and the
+Issuing signs the warrant with your issuer key; attaching points a job, person or
+session at it. Each recipe's first lines say which values it needs; leave one out and the
 error names the `--set` to add. Copy a recipe and edit it to make your own; setup
 never overwrites the ones in the workspace.
 

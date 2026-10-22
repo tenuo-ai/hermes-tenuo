@@ -1,7 +1,8 @@
 # Work on issues in one repository through the GitHub MCP server, configured in
 # Hermes as `github`: read issues and code, push to agent/* branches, open pull
 # requests into main, comment. Never a merge, never another repository.
-#   tenuo-cli hermes session attach --session telegram:YOUR_ID --template warrant.yaml --set owner=ORG --set repo=REPO
+#   tenuo-cli warrant issue --template work-on-issues.yaml --holder agent --set owner=ORG --set repo=REPO --out issues.warrant
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --file issues.warrant
 version: 2
 name: work-on-issues
 ttl: 7d

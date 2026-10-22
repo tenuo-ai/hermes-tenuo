@@ -1,7 +1,8 @@
 # Answer one email thread through Google Workspace MCP, configured in Hermes as
 # `google_workspace`. Only that thread, only to that address, for an hour.
-#   tenuo-cli hermes session attach --session telegram:YOUR_ID --template warrant.yaml \
-#     --set me=you@yourco.com --set thread=18f2a9c0d1e2b3a4 --set to=bob@vendor.com
+#   tenuo-cli warrant issue --template reply-to-thread.yaml --holder agent \
+#     --set me=you@yourco.com --set thread=18f2a9c0d1e2b3a4 --set to=bob@vendor.com --out reply.warrant
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --file reply.warrant
 version: 2
 name: reply-to-thread
 ttl: 1h

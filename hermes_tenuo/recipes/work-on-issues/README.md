@@ -35,8 +35,9 @@ Give it a fine-grained token for this repository only, without the Workflows
 permission, and protect `main` with required reviews.
 
 ```bash
-tenuo-cli hermes session attach --session telegram:<your user ID> \
-  --template ~/.tenuo/recipes/hermes/work-on-issues.yaml --set owner=your-org --set repo=your-repo
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/work-on-issues.yaml --holder agent \
+  --set owner=your-org --set repo=your-repo --out issues.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --file issues.warrant
 ```
 
 Attach it to whoever hands out the work: your user ID for issues sent from chat,

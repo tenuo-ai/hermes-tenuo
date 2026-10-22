@@ -16,8 +16,9 @@ naming the tools it may call and the argument values it may use, for a set time.
 tenuo-cli hermes setup          # observe: nothing blocked; recipes in ~/.tenuo/recipes/hermes
 # use Hermes as usual
 tenuo-cli calls summary         # what each person, job and session called
-tenuo-cli hermes session attach --session telegram:YOUR_ID \
-  --template ~/.tenuo/recipes/hermes/project-task.yaml --set project=$PWD
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/project-task.yaml --holder agent \
+  --set project=$PWD --out project.warrant
+tenuo-cli hermes session attach --session telegram:YOUR_ID --file project.warrant
 tenuo-cli mode enforce          # the next call is checked
 ```
 

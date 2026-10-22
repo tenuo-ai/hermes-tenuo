@@ -1,6 +1,7 @@
 # A coding task in one project with Hermes' own tools: files under the project,
 # and exactly the commands listed, run in the project directory.
-#   tenuo-cli hermes session attach --session telegram:YOUR_ID --template warrant.yaml --set project=$PWD
+#   tenuo-cli warrant issue --template project-task.yaml --holder agent --set project=$PWD --out project.warrant
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --file project.warrant
 version: 2
 name: project-task
 ttl: 4h

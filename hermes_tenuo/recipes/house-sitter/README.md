@@ -23,9 +23,11 @@ message, so nothing they send runs unchecked.
 
 ```bash
 tenuo-cli hermes setup                 # if you haven't
-tenuo-cli hermes session attach --session telegram:<your user ID> --template ~/.tenuo/recipes/hermes/house-sitter-owner.yaml
-tenuo-cli hermes session attach --session telegram:<their user ID> --template ~/.tenuo/recipes/hermes/house-sitter.yaml \
-  --set stay=10d --set "controllable=[light.guest_room, scene.guest_room_comfort]"
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/house-sitter-owner.yaml --holder agent --out owner.warrant
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/house-sitter.yaml --holder agent \
+  --set stay=10d --set "controllable=[light.guest_room, scene.guest_room_comfort]" --out sitter.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --file owner.warrant
+tenuo-cli hermes session attach --session telegram:<their user ID> --file sitter.warrant
 tenuo-cli mode enforce
 ```
 

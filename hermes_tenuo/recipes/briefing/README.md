@@ -19,8 +19,9 @@ arguments; `read_file` and `write_file` under the notes folder.
 ```bash
 hermes cron list                       # the job's ID, e.g. 1a2b3c
 tenuo-cli hermes setup                 # if you haven't: observe mode
-tenuo-cli hermes session attach --session cron_1a2b3c \
-  --template ~/.tenuo/recipes/hermes/briefing.yaml --set folder=$HOME/briefings
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/briefing.yaml --holder agent \
+  --set folder=$HOME/briefings --out briefing.warrant
+tenuo-cli hermes session attach --session cron_1a2b3c --file briefing.warrant
 tenuo-cli mode enforce                 # see "Before you switch to enforce" in the index
 ```
 

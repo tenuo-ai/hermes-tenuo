@@ -1,5 +1,7 @@
 # One issue, its own branch, two hours:
-#   tenuo-cli hermes session attach --session SESSION --template one-issue.yaml --set owner=ORG --set repo=REPO --set issue=412
+#   tenuo-cli warrant issue --template work-on-issues-one-issue.yaml --holder agent \
+#     --set owner=ORG --set repo=REPO --set issue=412 --out issue-412.warrant
+#   tenuo-cli hermes session attach --session SESSION --file issue-412.warrant
 version: 2
 name: issue
 ttl: 2h

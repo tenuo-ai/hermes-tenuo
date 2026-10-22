@@ -20,8 +20,9 @@ project path and, optionally, the commands.
 From the project directory:
 
 ```bash
-tenuo-cli hermes session attach --session telegram:<your user ID> \
-  --template ~/.tenuo/recipes/hermes/project-task.yaml --set project=$PWD
+tenuo-cli warrant issue --template ~/.tenuo/recipes/hermes/project-task.yaml --holder agent \
+  --set project=$PWD --out project.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --file project.warrant
 # other commands: --set "commands=[pytest -q, npm test, git status]"
 ```
 

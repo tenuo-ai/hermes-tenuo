@@ -1,6 +1,7 @@
 # What your house-sitter may ask Hermes to do, for their stay. Attach it to their
 # messaging ID, not a session:
-#   tenuo-cli hermes session attach --session telegram:THEIR_ID --template warrant.yaml --set stay=7d
+#   tenuo-cli warrant issue --template house-sitter.yaml --holder agent --set stay=7d --out sitter.warrant
+#   tenuo-cli hermes session attach --session telegram:THEIR_ID --file sitter.warrant
 version: 2
 name: house-sitter
 ttl: ${stay}
