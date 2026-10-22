@@ -12,13 +12,20 @@ directory. Hermes' own docs call these defense in depth, not a boundary. What
 the warrant adds: an allowlist, so only the exact commands listed run, in the
 project directory, with reads and writes under the project, for this task.
 
-[`warrant.yaml`](warrant.yaml): the five tools for four hours. Edit the project
-path and the commands.
+[`warrant.yaml`](warrant.yaml): the five tools for four hours. It takes the
+project path and, optionally, the commands.
 
 ## Set it up
 
-Issue and attach as in the other recipes. List each command exactly as it should
-run: the warrant compares the whole string, so `pytest -q` doesn't allow
+From the project directory:
+
+```bash
+tenuo-cli hermes session attach --session telegram:<your user ID> \
+  --template ~/.tenuo/recipes/hermes/project-task.yaml --set project=$PWD
+# other commands: --set "commands=[pytest -q, npm test, git status]"
+```
+
+List each command exactly as it should run: the warrant compares the whole string, so `pytest -q` doesn't allow
 `pytest -q -p plugin` or `pytest; id`. Tell the task to use absolute paths under
 the project: `billing/invoice.py` and `~/code/…` are checked as written and
 refused.

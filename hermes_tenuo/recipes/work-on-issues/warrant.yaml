@@ -1,44 +1,49 @@
 # Work on issues in one repository through the GitHub MCP server, configured in
-# Hermes as `github` (tools appear as mcp__github__*). Branches under agent/,
-# pull requests into main, never a merge, never another repository.
+# Hermes as `github`: read issues and code, push to agent/* branches, open pull
+# requests into main, comment. Never a merge, never another repository.
+#   tenuo-cli hermes session attach --session telegram:YOUR_ID --template warrant.yaml --set owner=ORG --set repo=REPO
 version: 2
 name: work-on-issues
 ttl: 7d
+vars:
+  owner: {description: "the repository owner (user or org)"}
+  repo: {description: "the repository name"}
+  base: {default: main}
 capabilities:
   mcp__github__issue_read:
     method: [get, get_comments]
-    owner: your-org                       # EDIT
-    repo: your-repo                       # EDIT
+    owner: ${owner}
+    repo: ${repo}
     issue_number: any
     page: {optional: any}
     perPage: {optional: any}
   mcp__github__get_file_contents:
-    owner: your-org
-    repo: your-repo
+    owner: ${owner}
+    repo: ${repo}
     path: any                             # any file in this repository; see Limits
     ref: {optional: any}
     sha: {optional: any}
   mcp__github__create_branch:
-    owner: your-org
-    repo: your-repo
+    owner: ${owner}
+    repo: ${repo}
     branch: {pattern: "agent/*"}
-    from_branch: {optional: main}
+    from_branch: {optional: "${base}"}
   mcp__github__push_files:
-    owner: your-org
-    repo: your-repo
+    owner: ${owner}
+    repo: ${repo}
     branch: {pattern: "agent/*"}
     files: any
     message: any
   mcp__github__create_pull_request:
-    owner: your-org
-    repo: your-repo
+    owner: ${owner}
+    repo: ${repo}
     head: {pattern: "agent/*"}
-    base: main
+    base: ${base}
     title: any
     body: {optional: any}
     draft: {optional: any}
   mcp__github__add_issue_comment:
-    owner: your-org
-    repo: your-repo
+    owner: ${owner}
+    repo: ${repo}
     issue_number: any
     body: any

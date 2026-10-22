@@ -19,15 +19,16 @@ from tenuo.local_cli.workspace import Workspace
 from hermes_tenuo import local_guard
 from hermes_tenuo.local_guard import SharedLocalGuard
 
-RECIPES = Path(__file__).resolve().parent.parent / "recipes"
+RECIPES = Path(__file__).resolve().parent.parent / "hermes_tenuo" / "recipes"
 
 
 @pytest.fixture(autouse=True)
-def _needs_optional_arguments():
+def _needs_optional_arguments_and_vars():
     import tenuo
+    from tenuo import warrant_template
 
-    if not hasattr(tenuo, "OptionalArg"):
-        pytest.skip("recipes use optional arguments (tenuo-ai/tenuo#923)")
+    if not hasattr(tenuo, "OptionalArg") or not hasattr(warrant_template, "parse_set"):
+        pytest.skip("recipes use optional arguments and template vars (tenuo-ai/tenuo#923, #986)")
 _ids = itertools.count()
 
 
@@ -41,10 +42,24 @@ def workspace(tmp_path, monkeypatch):
     return workspace
 
 
+# The values a user passes with --set, as each recipe's header shows.
+VALUES = {
+    "briefing": ["folder=/home/you/briefings"],
+    "house-sitter": [],
+    "work-on-issues": ["owner=your-org", "repo=your-repo"],
+    "review-prs": ["owner=your-org", "repo=your-repo", "prs=[57, 58]"],
+    "reply-to-thread": ["me=you@yourco.com", "thread=18f2a9c0d1e2b3a4", "to=bob@vendor.com"],
+    "project-task": ["project=/home/you/code/billing"],
+}
+EXTRA = {"one-issue.yaml": ["issue=412"], "owner.yaml": None}
+
+
 def issue(workspace, recipe, file="warrant.yaml", *, holder="agent"):
     out = workspace.path.parent / f"{recipe}-{file}.warrant"
+    values = [] if EXTRA.get(file, ()) is None else VALUES[recipe] + EXTRA.get(file, [])
+    sets = [arg for value in values for arg in ("--set", value)]
     assert tenuo_cli(["--home", str(workspace.path), "--json", "warrant", "issue", "--template",
-                      str(RECIPES / recipe / file), "--holder", holder, "--out", str(out), "--replace"]) == 0
+                      str(RECIPES / recipe / file), "--holder", holder, "--out", str(out), "--replace", *sets]) == 0
     return load_chain(out)
 
 
@@ -57,7 +72,18 @@ def test_every_recipe_file_validates(workspace):
     files = sorted(RECIPES.glob("*/*.yaml"))
     assert len(files) >= 8
     for path in files:
-        assert tenuo_cli(["--home", str(workspace.path), "--json", "template", "validate", "--file", str(path)]) == 0, path
+        values = [] if EXTRA.get(path.name, ()) is None else VALUES[path.parent.name] + EXTRA.get(path.name, [])
+        sets = [arg for value in values for arg in ("--set", value)]
+        assert tenuo_cli(["--home", str(workspace.path), "--json", "template", "validate", "--file", str(path),
+                          *sets]) == 0, path
+
+
+def test_a_recipe_says_which_values_it_needs(workspace, capsys):
+    import json
+
+    assert tenuo_cli(["--home", str(workspace.path), "--json", "template", "validate", "--file",
+                      str(RECIPES / "project-task/warrant.yaml")]) == 1
+    assert "--set project=..." in json.loads(capsys.readouterr().out)["error"]
 
 
 def test_briefing(workspace):

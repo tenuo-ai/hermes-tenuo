@@ -140,6 +140,16 @@ class SharedLocalGuard(HermesGuard):
                         raise ValueError("warrant ID does not match its stored filename")
                     if chain[-1].session_id is not None and chain[-1].session_id not in (session_id, key):
                         raise ValueError("warrant is bound to a different session")
+                    holder = bytes(chain[-1].holder_key.to_bytes())
+                    if snapshot.key is not None and holder != bytes(snapshot.key.public_key.to_bytes()):
+                        from tenuo.local_cli.files import fingerprint
+
+                        kind = "holder_mismatch"
+                        reason = (f"Warrant {wid} is held by key {fingerprint(chain[-1].holder_key)}, but this "
+                                  f"Hermes profile signs with '{self.authority.key_name}' "
+                                  f"({fingerprint(snapshot.key.public_key)}). Attach it in the profile whose "
+                                  f"local_key holds it, or reissue it with --holder {self.authority.key_name}")
+                        continue
                     selected = wid
                     # Expiry, revocation and trust are judged by the runtime's authorizer,
                     # which signs a receipt for the refusal; checking here first would skip it.
@@ -217,7 +227,7 @@ class SharedLocalGuard(HermesGuard):
                                       warrant_id=selected or None, argument=argument,
                                       run=session_id or None,
                                       step=self.step or cron_job(session_id)
-                                      or next(iter(sender_keys(session_id)), "hermes"))
+                                      or next(iter(sender_keys(session_id)), "hermes"), via="hermes")
             except Exception:
                 logging.getLogger(__name__).warning("Tenuo observe: could not record %s", tool_name, exc_info=True)
         if observing:

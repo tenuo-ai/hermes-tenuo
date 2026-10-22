@@ -32,15 +32,17 @@ attach a warrant for yourself first (see [house-sitter/owner.yaml](house-sitter/
 ## The steps
 
 ```bash
-tenuo-cli hermes setup                       # workspace, plugin on, observe mode: nothing blocked
+tenuo-cli hermes setup                   # workspace, plugin on, observe mode, recipes in ~/.tenuo/recipes/hermes
 # use Hermes as usual for a day or two
-tenuo-cli calls summary                  # what it called, with which arguments, grouped by job or person
-curl -O https://raw.githubusercontent.com/tenuo-ai/hermes-tenuo/main/recipes/<recipe>/warrant.yaml
-# change the lines marked EDIT
-tenuo-cli warrant issue --template warrant.yaml --holder agent --out job.warrant
-tenuo-cli hermes session attach --session <who> --file job.warrant
+tenuo-cli calls summary                  # what it called, per job, person or session, and the attach command
+tenuo-cli hermes session attach --session <who> --template ~/.tenuo/recipes/hermes/<recipe>.yaml --set NAME=VALUE
 tenuo-cli mode enforce                   # the next call is checked
 ```
+
+`attach --template` issues the recipe to Hermes' key and attaches it in one step.
+Each recipe's first lines say which values it needs; leave one out and the
+error names the `--set` to add. Copy a recipe and edit it to make your own; setup
+never overwrites the ones in the workspace.
 
 `<who>` is one of:
 

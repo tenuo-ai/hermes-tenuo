@@ -687,21 +687,61 @@ def cmd_setup(args: argparse.Namespace) -> int:
     print(f"✓  {'created' if created else 'using'} the Tenuo workspace at {home}"
           + (" with development identities" if created else ""))
     print(f"✓  hermes-tenuo enabled in {path}, reading that workspace")
+    recipes = _install_recipes(home)
+    print(f"✓  recipes in {recipes}: {', '.join(sorted(p.stem for p in recipes.glob('*.yaml')))}")
     print(f"✓  mode: {mode}")
     print()
+    example = shlex.quote(str(recipes / "project-task.yaml"))
     if mode == "observe":
         print("Nothing is blocked yet. Run Hermes as usual: chats, cron jobs, subagents.")
         print("Every tool call is recorded with its arguments. Then:")
         print(f"  1. {tenuo_cli} calls summary")
-        print("     what it called, and the commands to draft and issue a warrant")
-        print(f"  2. {hermes_session} attach --session cron_JOB_ID --file JOB.warrant")
-        print("     one attach covers every run of a cron job; use the session ID for a chat")
+        print("     what each person, job and session called, and the attach command for each")
+        print("  2. attach a recipe (or your own template) to who it's for, in one step, e.g.")
+        print(f"     {hermes_session} attach --session telegram:YOUR_ID --template {example} --set project=$PWD")
+        print("     --session takes cron_JOB_ID for every run of a job, <platform>:<user id> for a person,")
+        print("     or a session ID; a recipe's first lines say which values it needs")
         print(f"  3. {tenuo_cli} mode enforce")
         print("     the next call is checked; no gateway restart")
     else:
-        print("Calls are enforced. A session needs an attached warrant:")
-        print(f"  {hermes_session} attach --session SESSION_ID --file WARRANT")
+        print("Calls are enforced. Attach a warrant to who it's for:")
+        print(f"  {hermes_session} attach --session telegram:YOUR_ID --template {example} --set project=$PWD")
     return 0
+
+
+def _install_recipes(home):
+    """Copy the bundled recipes into the workspace; never overwrite one already there."""
+    from importlib.resources import files
+
+    target = Path(home) / "recipes" / "hermes"
+    target.mkdir(parents=True, exist_ok=True)
+    for folder in files("hermes_tenuo").joinpath("recipes").iterdir():
+        if not folder.is_dir():
+            continue
+        for item in folder.iterdir():
+            if item.name.endswith(".yaml"):
+                name = folder.name if item.name == "warrant.yaml" else f"{folder.name}-{item.name[:-5]}"
+                destination = target / f"{name}.yaml"
+                if not destination.exists():
+                    destination.write_text(item.read_text())
+    return target
+
+
+def _issue_template(workspace, path, values, holder):
+    """Issue a template (a recipe, say) to the holder key and store it, for attach --template."""
+    from tenuo.local_cli.warrants import issue, save
+    from tenuo.warrant_template import WarrantTemplate
+
+    try:
+        from tenuo.warrant_template import parse_set
+    except ImportError:  # an SDK without template vars
+        if values:
+            raise ValueError("--set needs a Tenuo SDK with template vars (tenuo-ai/tenuo#986)")
+        parse_set = None
+    template = WarrantTemplate.load(path, parse_set(values)) if parse_set else WarrantTemplate.load(path)
+    chain = issue(workspace, template, workspace.public_key(holder))
+    save(workspace, chain)
+    return chain
 
 
 def cmd_session(args: argparse.Namespace) -> int:
@@ -716,7 +756,15 @@ def cmd_session(args: argparse.Namespace) -> int:
         if args.action == "list":
             result = {"sessions": list_sessions(workspace)}
         elif args.action == "attach":
-            result = {"session": attach(workspace, args.session, load_warrant_chain(args.file), holder=args.holder)}
+            if args.template:
+                chain = _issue_template(workspace, args.template, args.set, args.holder)
+            elif args.set:
+                raise ValueError("--set goes with --template")
+            else:
+                chain = load_warrant_chain(args.file)
+            result = {"session": attach(workspace, args.session, chain, holder=args.holder)}
+            if args.template:
+                result["issued"] = str(chain[-1].id)
         elif args.action == "detach":
             result = {"session": detach(workspace, args.session, args.id)}
         else:
@@ -785,8 +833,11 @@ def build_parser(prog: str = "tenuo-cli hermes") -> argparse.ArgumentParser:
         sub = session_actions.add_parser(action)
         sub.add_argument("--session", required=True, help="Hermes session ID, or cron_<job_id>")
         if action == "attach":
-            sub.add_argument("--file", required=True, help="the warrant file from tenuo-cli warrant issue")
-            sub.add_argument("--holder", default="agent", help="the agent key the warrant was issued to")
+            source = sub.add_mutually_exclusive_group(required=True)
+            source.add_argument("--file", help="the warrant file from tenuo-cli warrant issue")
+            source.add_argument("--template", help="a YAML template (a recipe) to issue and attach in one step")
+            sub.add_argument("--set", action="append", metavar="NAME=VALUE", help="a value for one of the template's vars")
+            sub.add_argument("--holder", default="agent", help="the agent key the warrant is issued to")
         if action == "detach":
             sub.add_argument("--id", required=True, help="the warrant ID to detach")
 

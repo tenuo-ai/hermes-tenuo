@@ -22,13 +22,10 @@ You need both Telegram user IDs; the sitter's is the one you add to
 message, so nothing they send runs unchecked.
 
 ```bash
-tenuo-cli hermes setup                                   # if you haven't
-curl -O …/recipes/house-sitter/warrant.yaml          # their entity IDs and the stay
-curl -O …/recipes/house-sitter/owner.yaml            # the tools you use
-tenuo-cli warrant issue --template owner.yaml --holder agent --out owner.warrant
-tenuo-cli warrant issue --template warrant.yaml --holder agent --out sitter.warrant
-tenuo-cli hermes session attach --session telegram:<your user ID> --file owner.warrant
-tenuo-cli hermes session attach --session telegram:<their user ID> --file sitter.warrant
+tenuo-cli hermes setup                 # if you haven't
+tenuo-cli hermes session attach --session telegram:<your user ID> --template ~/.tenuo/recipes/hermes/house-sitter-owner.yaml
+tenuo-cli hermes session attach --session telegram:<their user ID> --template ~/.tenuo/recipes/hermes/house-sitter.yaml \
+  --set stay=10d --set "controllable=[light.guest_room, scene.guest_room_comfort]"
 tenuo-cli mode enforce
 ```
 

@@ -28,8 +28,8 @@ Per thread, edit your address, the thread ID (from the Gmail URL or
 `search_gmail_messages`) and the recipient, then:
 
 ```bash
-tenuo-cli warrant issue --template warrant.yaml --holder agent --out reply.warrant
-tenuo-cli hermes session attach --session telegram:<your user ID> --file reply.warrant
+tenuo-cli hermes session attach --session telegram:<your user ID> --template ~/.tenuo/recipes/hermes/reply-to-thread.yaml \
+  --set me=you@yourco.com --set thread=18f2a9c0d1e2b3a4 --set to=bob@vendor.com
 ```
 
 ## What it allows and refuses

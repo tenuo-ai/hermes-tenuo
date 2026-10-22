@@ -54,7 +54,7 @@ where = ["."]
 include = ["hermes_tenuo*"]
 
 [tool.setuptools.package-data]
-hermes_tenuo = ["skills/*/SKILL.md"]
+hermes_tenuo = ["skills/*/SKILL.md", "recipes/*.md", "recipes/*/*.md", "recipes/*/*.yaml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

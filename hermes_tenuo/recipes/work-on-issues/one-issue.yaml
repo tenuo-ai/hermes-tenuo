@@ -1,0 +1,16 @@
+# One issue, its own branch, two hours:
+#   tenuo-cli hermes session attach --session SESSION --template one-issue.yaml --set owner=ORG --set repo=REPO --set issue=412
+version: 2
+name: issue
+ttl: 2h
+vars:
+  owner: {description: "the repository owner"}
+  repo: {description: "the repository name"}
+  issue: {description: "the issue number"}
+capabilities:
+  mcp__github__issue_read: {method: [get, get_comments], owner: "${owner}", repo: "${repo}", issue_number: ["${issue}"], page: {optional: any}, perPage: {optional: any}}
+  mcp__github__get_file_contents: {owner: "${owner}", repo: "${repo}", path: any, ref: {optional: any}, sha: {optional: any}}
+  mcp__github__create_branch: {owner: "${owner}", repo: "${repo}", branch: "agent/issue-${issue}", from_branch: {optional: main}}
+  mcp__github__push_files: {owner: "${owner}", repo: "${repo}", branch: "agent/issue-${issue}", files: any, message: any}
+  mcp__github__create_pull_request: {owner: "${owner}", repo: "${repo}", head: "agent/issue-${issue}", base: main, title: any, body: {optional: any}, draft: {optional: any}}
+  mcp__github__add_issue_comment: {owner: "${owner}", repo: "${repo}", issue_number: ["${issue}"], body: any}
