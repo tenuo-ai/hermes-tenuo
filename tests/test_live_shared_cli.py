@@ -7,6 +7,7 @@ import textwrap
 import pytest
 
 pytest.importorskip("hermes_cli.plugins")
+pytest.importorskip("tenuo.local_cli.observations", reason="needs the Tenuo SDK with the local CLI (tenuo-ai/tenuo#970)")
 
 DRIVER = textwrap.dedent(r'''
 import json, os, shutil, subprocess, sys
