@@ -23,19 +23,19 @@ permissions:
 jobs:
   load:
     name: ${{ matrix.route }} route
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         route: [entrypoint, directory]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: NousResearch/hermes-agent
           ref: main
           path: hermes-agent
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # Hermes installs its runtime dependencies only on Python 3.14.
           python-version: "3.14"
