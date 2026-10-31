@@ -1,5 +1,10 @@
 # hermes-tenuo
 
+For the unreleased common Python CLI, see [shared local CLI setup](docs/local-cli.md).
+It uses `tenuo-cli` YAML templates and explicit session attachments through
+`local_home`, with no issuer key in Hermes. Install the matching SDK checkout
+before trying this mode; the commands below retain the legacy setup path.
+
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
 [![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)
 

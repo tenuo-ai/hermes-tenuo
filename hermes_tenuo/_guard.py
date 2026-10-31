@@ -35,6 +35,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         resolve_warrant_text,
     )
 
+    from hermes_tenuo._config import _get_plugin_entry
+    entry = _get_plugin_entry(ctx)
+    if "local_home" in entry:
+        return _build_shared_local_guard(ctx, entry)
+
     try:
         warrant_raw, source = resolve_warrant_text(ctx)
     except FileNotFoundError as exc:
@@ -103,6 +108,41 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     )
 
     return PluginGuard(guard)
+
+
+def _build_shared_local_guard(ctx: Any, entry: dict) -> "PluginGuard":
+    """Authority from a tenuo-cli workspace. Observe or enforce follows its config.yaml."""
+    from pathlib import Path
+
+    from hermes_tenuo._config import get_audit_log_path, get_on_denial
+    from hermes_tenuo._home import hermes_home
+    from hermes_tenuo.audit import LocalAuditLog
+
+    try:
+        from hermes_tenuo.local_guard import SharedLocalGuard
+
+        raw = entry["local_home"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("local_home must be a nonempty path")
+        conflicts = {"warrant", "child_warrant", "signing_key_file", "signing_key_env",
+                     "trusted_root", "trusted_root_file", "session_warrants_dir",
+                     "operation_requests_dir", "operation_approvals_dir", "revocations_dir"}
+        if conflicts.intersection(entry) or get_on_denial(ctx) != "block":
+            raise ValueError("local_home cannot be combined with legacy authority settings or on_denial: log; "
+                             "use tenuo-cli mode observe instead")
+        home = Path(raw).expanduser()
+        if not home.is_absolute():
+            home = hermes_home() / home
+        audit = get_audit_log_path(ctx)
+        return PluginGuard(SharedLocalGuard(home, key=entry.get("local_key", "agent"),
+                                            step=entry.get("local_step"),
+                                            audit_callback=LocalAuditLog(audit) if audit else None))
+    except ImportError as exc:
+        raise WarrantLoadError(
+            "local authority setup failed: install the Tenuo SDK that provides tenuo.local, then run tenuo-cli doctor"
+        ) from exc
+    except Exception as exc:
+        raise WarrantLoadError(f"local authority setup failed: {exc}; run tenuo-cli doctor") from exc
 
 
 class PluginGuard:
