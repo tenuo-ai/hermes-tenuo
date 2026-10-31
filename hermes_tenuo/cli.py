@@ -43,7 +43,69 @@ from typing import Any
 
 def cmd_mint(args: argparse.Namespace) -> int:
     """Mint a warrant and print config to stdout."""
+    if any(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out", "session_id")):
+        return _mint_separate(args)
     return _mint_local(args)
+
+
+def cmd_keygen(args: argparse.Namespace) -> int:
+    """Create an identity without printing private signing material."""
+    from pathlib import Path
+    from tenuo import SigningKey
+    from hermes_tenuo.issuance import write_private_file
+    private_path, public_path = Path(args.private_key).expanduser(), Path(args.public_key).expanduser()
+    try:
+        if private_path.resolve() == public_path.resolve():
+            raise ValueError("private and public paths must differ")
+        if private_path.exists() or public_path.exists():
+            raise ValueError("identity output already exists; choose new paths")
+        key = SigningKey.generate()
+        write_private_file(private_path, base64.b64encode(key.secret_key_bytes()).decode())
+        try:
+            write_private_file(public_path, base64.b64encode(key.public_key.to_bytes()).decode())
+        except (OSError, ValueError):
+            # Do not strand a private identity without its corresponding public
+            # key. Both paths were verified absent above and writes never
+            # overwrite, so this removes only the private file created here.
+            try:
+                private_path.unlink()
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Private key saved: {private_path}")
+    print(f"Public key saved: {public_path}")
+    return 0
+
+
+def _mint_separate(args: argparse.Namespace) -> int:
+    from hermes_tenuo.issuance import mint_for_holder, read_public_key, read_signing_key, write_private_file
+    if not all(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out")):
+        print("error: separate issuance requires --issuer-key, --holder-public-key and --out", file=sys.stderr)
+        return 1
+    if getattr(args, "task", None):
+        print("error: --task cannot be combined with separate issuance", file=sys.stderr)
+        return 1
+    try:
+        capabilities = {}
+        for spec in args.allow or []:
+            tool, constraints, _ = parse_allow(spec)
+            if tool in capabilities:
+                raise ValueError(f"duplicate tool: {tool}")
+            capabilities[tool] = constraints
+        issuer = read_signing_key(args.issuer_key)
+        holder = read_public_key(args.holder_public_key)
+        warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(args.ttl),
+                                  getattr(args, "session_id", None))
+        write_private_file(args.out, warrant.to_base64())
+    except Exception as exc:
+        print(f"error: issuance failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Warrant saved: {args.out}")
+    print(f"Issuer public key: {base64.b64encode(issuer.public_key.to_bytes()).decode()}")
+    return 0
 
 
 _NUMBER = r"-?\d+(?:\.\d+)?"
@@ -606,7 +668,7 @@ def _parse_ttl(ttl: str) -> int:
             seconds = int(float(raw[:-1]) * 86400)
         else:
             seconds = int(float(raw))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(
             f"--ttl '{ttl}': expected a duration like 30m, 1h, 7d, or a positive number of seconds"
         ) from exc
@@ -626,6 +688,10 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    keygen_p = subparsers.add_parser("keygen", help="Create private/public identity files")
+    keygen_p.add_argument("--private-key", required=True, metavar="PATH")
+    keygen_p.add_argument("--public-key", required=True, metavar="PATH")
+
     # mint
     mint_p = subparsers.add_parser("mint", help="Mint a warrant and print config")
     mint_p.add_argument("--ttl", default="24h", metavar="DURATION",
@@ -640,6 +706,11 @@ def main() -> None:
                              "(kanban worker path). Reuses TENUO_SIGNING_KEY as the holder when set.")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
+
+    mint_p.add_argument("--issuer-key", metavar="PATH", help="Operator issuer private key file (base64)")
+    mint_p.add_argument("--holder-public-key", metavar="PATH", help="Recipient public key file (base64)")
+    mint_p.add_argument("--out", metavar="PATH", help="Write warrant to a new 0600 file")
+    mint_p.add_argument("--session-id", metavar="ID", help="Bind separate issuance to a session")
 
     # status
     subparsers.add_parser("status", help="Show current configuration status")
@@ -661,7 +732,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "mint":
+    if args.command == "keygen":
+        sys.exit(cmd_keygen(args))
+    elif args.command == "mint":
         sys.exit(cmd_mint(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))

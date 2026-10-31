@@ -414,3 +414,39 @@ own.
 ## License
 
 Apache-2.0
+
+### Separate holder identity and warrant issuance
+
+The operator does not need the holder's private key. Create the holder identity
+in the agent environment, keeping its private file there:
+
+```sh
+hermes-tenuo keygen --private-key holder.key --public-key holder.pub
+```
+
+Give only `holder.pub` to the operator. In the operator environment, create a
+separate issuer identity once and issue a scoped warrant:
+
+```sh
+hermes-tenuo keygen --private-key issuer.key --public-key issuer.pub
+hermes-tenuo mint --issuer-key issuer.key --holder-public-key holder.pub \
+  --ttl 20m --allow 'read_file:path=/data/reports' --out reports.warrant
+```
+
+Key and warrant files use base64 text. Outputs are created atomically with
+permissions `0600`; existing files are never overwritten. Store issuer private
+keys outside the agent's accessible environment. No private key is printed by
+these commands. Explicit issuance completely ignores `TENUO_SIGNING_KEY`.
+
+Give the agent `reports.warrant` and the trusted `issuer.pub`. Configure
+`warrant: /absolute/path/reports.warrant` and
+`trusted_root` to the base64 contents of `issuer.pub` in the plugin entry
+(the trusted-root setting does not read a file path). Load the holder
+private file into the agent's `TENUO_SIGNING_KEY` environment variable using your
+secret manager. Do not give the agent `issuer.key`.
+
+Optional `--session-id ID` embeds a session binding in the signed warrant. It
+neither discovers a running session nor attaches the warrant to one. Ordinary
+static configuration still needs a restart after replacement. The original
+`mint --allow ...` quickstart remains available; it combines provisioning and
+issuance and prints a holder private key, so use it only in a trusted terminal.
