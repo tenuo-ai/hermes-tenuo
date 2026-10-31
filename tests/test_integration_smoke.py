@@ -740,3 +740,63 @@ class TestUnconfiguredInstall:
         # and they enforce nothing
         (fn,) = ctx.hooks["pre_tool_call"]
         assert fn("terminal", {"command": "ls"}, session_id="s1") is None
+
+
+@pytest.mark.parametrize("entry,blocked", [
+    ({}, False),
+    ({"require_warrant": False}, False),
+    ({"require_warrant": True}, True),
+    ({"require_warrant": True, "on_denial": "log"}, True),
+    ({"require_warrant": "false"}, True),
+    ({"require_warrant": None}, True),
+])
+@pytest.mark.parametrize("has_registry_enforcement_fn", [False, True])
+def test_require_warrant_controls_unconfigured_registration(
+    monkeypatch, entry, blocked, has_registry_enforcement_fn
+):
+    """Missing authority blocks only when required; malformed opt-ins fail closed."""
+    import hermes_tenuo
+
+    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: entry)
+    # Exercise the real configuration -> guard construction -> registration path
+    # with both upstream hook-only and registry-enabled Hermes.
+    registry_mod = _make_mock_registry_module(has_registry_enforcement_fn)
+    monkeypatch.setitem(sys.modules, "tools", ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    ctx = MockCtx()
+    hermes_tenuo.register(ctx)
+
+    if blocked and has_registry_enforcement_fn:
+        (block_registry,) = registry_mod.registry._enforcement_fn_store
+        with pytest.raises(_EnforcementDenied):
+            block_registry("terminal", {})
+
+    for tool in ("terminal", "memory", "todo", "session_search"):
+        result = ctx.call_hook("pre_tool_call", tool_name=tool, args={})
+        if blocked:
+            assert result["action"] == "block"
+            assert "require_warrant" in result["message"]
+        else:
+            assert result is None
+
+
+@pytest.mark.parametrize("missing_task_warrant", [False, True])
+def test_block_all_covers_registry_and_inline_tools(
+    parent_warrant, agent_key, root_key, missing_task_warrant
+):
+    """Failure handling must block both dispatch paths when registry support exists."""
+    env = {"HERMES_KANBAN_TASK": "task-without-warrant"} if missing_task_warrant else None
+    warrant = _warrant_b64(parent_warrant) if missing_task_warrant else "not-a-warrant!!"
+    expected_message = "has no warrant" if missing_task_warrant else "could not be loaded"
+    with _plugin_ctx(
+        warrant, agent_key, root_key,
+        has_registry_enforcement_fn=True, env_overrides=env,
+    ) as (ctx, reg_mod):
+        (block_registry,) = reg_mod.registry._enforcement_fn_store
+        with pytest.raises(_EnforcementDenied):
+            block_registry("web_search", {})
+        for tool in ("memory", "todo", "session_search"):
+            result = ctx.call_hook("pre_tool_call", tool_name=tool, args={})
+            assert result is not None, f"inline tool {tool} must be blocked"
+            assert result["action"] == "block"
+            assert expected_message in result["message"]

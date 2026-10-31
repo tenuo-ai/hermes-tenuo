@@ -68,28 +68,42 @@ see [docs/walkthrough.md](docs/walkthrough.md).
 
 ## Install into Hermes
 
-**1. Install.**
+**1. Install.** hermes-tenuo is in the
+[Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/hermes-tenuo).
+On Hermes Agent 0.21.2 or newer, install it by catalog name to get the
+reviewed, pinned commit:
 
 ```bash
-# into the venv Hermes uses (pulls in tenuo):
-pip install hermes-tenuo
-
-# or as a directory plugin under ~/.hermes/plugins:
-hermes plugins install tenuo-ai/hermes-tenuo
-pip install "tenuo>=0.3.2"   # Hermes does not install plugin dependencies
+hermes plugins install hermes-tenuo
+hermes plugins enable hermes-tenuo
 ```
 
-To run the latest unreleased code instead: `pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
+Hermes 0.20 to 0.21.1 can't install by catalog name. Install from GitHub
+instead, which tracks the default branch rather than the reviewed pin:
 
-Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through the plugin loader of upstream Hermes `main`, both install routes; the badge above is its latest result.
-The pip route installs `tenuo>=0.3.2` for you; the directory route needs the
-extra `pip install` line above.
+```bash
+hermes plugins install tenuo-ai/hermes-tenuo
+hermes plugins enable hermes-tenuo
+```
+
+`install` asks for `TENUO_WARRANT` and `TENUO_SIGNING_KEY`. You mint those
+in the next step, so leave both empty for now. `enable` installs the `tenuo`
+dependency into the Hermes runtime.
+
+If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
+instead. That also puts the `hermes-tenuo` command on your path, so you can
+drop the `uvx` prefix below. To run the latest unreleased code:
+`pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
+
+Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
+the plugin loader of upstream Hermes `main` using both install routes; the
+badge above is its latest result.
 
 **2. Mint a warrant.** This generates a key pair and a warrant, and prints
 the exact config block to paste.
 
 ```bash
-hermes-tenuo mint --ttl 1h \
+uvx hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data \
   --allow web_search
 ```
@@ -106,16 +120,34 @@ plugins:
       signing_key_env: TENUO_SIGNING_KEY
 ```
 
+Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env`. Hermes reads that
+file when it starts. The `uvx` command below does not, so export the same
+value in this shell before the check:
+
 ```bash
 export TENUO_SIGNING_KEY=<printed by mint>
 ```
 
-**3. Check the wiring, then run Hermes.**
+**3. Check it, then start Hermes.** Run these in order:
 
 ```bash
-hermes-tenuo doctor
+hermes plugins doctor hermes-tenuo
+uvx hermes-tenuo doctor
 hermes
 ```
+
+- `hermes plugins doctor hermes-tenuo` — Hermes loads the plugin and registers
+  its hooks. This does not look at your warrant. If it cannot find the plugin,
+  go back to step 1.
+- `uvx hermes-tenuo doctor` — checks the config you pasted, the warrant, its
+  expiry, and that the signing key matches the warrant holder. Fix anything it
+  marks with `✗` before you start Hermes. This command runs outside Hermes, so
+  it does not report the enforcement path.
+- `hermes` — start the agent.
+
+If you installed with `pip install hermes-tenuo` into the same environment
+Hermes uses, drop the `uvx` prefix. `hermes-tenuo doctor` then also prints
+which enforcement path is active.
 
 Ask the agent to read `/opt/private/payroll.csv`. It gets the same denial as the tool
 result. Load `skill_view("hermes-tenuo:tenuo-scope")` to mint a warrant
@@ -132,19 +164,29 @@ A tool with no constraints is allowed with any arguments.
 | `tool:arg=/path` | argument must be that path or under it (traversal-safe) | `--allow read_file:path=/data` |
 | `tool:arg=glob*` | argument must match the glob | `--allow web_search:query=acme*` |
 | `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow git:action=status\|diff\|log` |
+| `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
 | `tool:arg=value` | argument must match exactly | `--allow write_file:mode=w` |
 | `tool:arg=*` | that argument may be anything | `--allow memory:action=*` |
 | `tool:a=..,b=..` | several constraints on one tool | `--allow write_file:path=/tmp/out,mode=w` |
 
+A range only matches numbers: an amount sent as the string `"40.00"` is
+denied, so declare such arguments as numbers in the tool schema. Give both
+ends; `0..4000` also rules out negative amounts. Only a complete numeric
+`MIN..MAX` value is treated as a range, so values such as
+`release..candidate` continue to be exact strings. Tenuo ranges use
+IEEE-754 numbers; the CLI rejects non-finite bounds and values outside the
+safe integer range (`-9007199254740991` to `9007199254740991`).
+
 Any argument the warrant does not name is unconstrained for that tool. The
 `--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).
 
-For anything the flag syntax cannot express, mint in Python with the full
-constraint set (numeric ranges, case-insensitive paths, and more):
+A number range is `--allow checkout:amount=0..4000` (both ends, inclusive).
+For a case-insensitive path, or anything else the flag cannot express, mint
+in Python:
 
 ```python
 import base64, os
-from tenuo import SigningKey, Warrant, Subpath, Pattern, Range
+from tenuo import SigningKey, Warrant, Subpath, Pattern
 
 control_key = SigningKey.generate()   # keep private; its public key is trusted_root
 agent_key = SigningKey.generate()     # export its secret as TENUO_SIGNING_KEY
@@ -152,9 +194,8 @@ agent_key = SigningKey.generate()     # export its secret as TENUO_SIGNING_KEY
 warrant = (
     Warrant.mint_builder()
     .holder(agent_key.public_key)
-    .capability("read_file", path=Subpath("/data"))
+    .capability("read_file", path=Subpath("/data", case_sensitive=False))
     .capability("web_search", query=Pattern("acme*"))
-    .capability("scale_cluster", replicas=Range.max_value(10))
     .ttl(3600)
     .mint(control_key)
 )
@@ -175,7 +216,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | Per-user permissions, isolated per session, cleared on session end |
+| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Tool calls from inside `execute_code` still follow the config warrant |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
@@ -231,23 +272,38 @@ to see the same lines as an operator.
 
 ## Coverage
 
-On upstream Hermes, enforcement runs at `pre_tool_call`. That covers every
-tool call made through the agent loop, including the tools `run_agent.py`
-handles before the registry (`todo`, `memory`, `session_search`,
-`delegate_task`). It does not cover:
+Hermes asks hermes-tenuo before each agent-loop tool handler runs
+(`pre_tool_call`). The coverage below describes current upstream Hermes
+`main`, exercised by the **Upstream Hermes** badge. Hermes 0.20 and later can
+load the plugin, but older releases may not route tool calls made inside
+`execute_code` through this hook. On an older or unverified build, do not
+grant `execute_code` to an agent or session whose isolation depends on
+hermes-tenuo.
 
-- callers that pass `skip_pre_tool_call_hook=True`;
-- plugins that call `registry.dispatch()` directly;
-- the `execute_code` sandbox's internal tool dispatch.
+On current Hermes `main`, that includes every tool call in the agent loop,
+the tools Hermes handles before its registry (`todo`, `memory`,
+`session_search`, `delegate_task`), and tool calls an `execute_code` script
+makes through Hermes, such as `read_file` or `web_search`. A caller that passes
+`skip_pre_tool_call_hook=True` has already been through this check.
 
-A registry-level hook that closes all three is proposed upstream in
-[hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
-The plugin detects it at load time and uses it automatically, and
-`hermes-tenuo doctor` reports which path is active.
+Those `execute_code` calls are checked against the warrant in your config
+(`TENUO_WARRANT`, or `plugins.entries.hermes-tenuo.warrant`). Hermes does
+not send the gateway session id with them, so a warrant you attached with
+`set_session_warrant` is not the one applied. On a gateway, leave
+`execute_code` off a session warrant when that session must stay narrower
+than the config warrant.
 
-Neither path inspects what an `execute_code` script does on its own, such as
-`subprocess.run(...)`. Use a container backend (Docker, Modal, Daytona) for
-that threat model.
+Two things stay outside this check:
+
+- Another plugin calling `ctx.dispatch_tool()`. That goes straight to
+  `registry.dispatch()` and skips the hook. Only install plugins you trust
+  alongside hermes-tenuo. A registry-level hook that closes this gap is
+  proposed upstream in
+  [hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
+  When Hermes provides it, hermes-tenuo uses it automatically.
+- What an `execute_code` script runs on its own, such as
+  `subprocess.run(...)`. Use a container backend (Docker, Modal, Daytona)
+  for that.
 
 ## CLI
 
@@ -260,9 +316,15 @@ hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
 ```
 
-Run `doctor` from the same venv Hermes uses. It checks plugin discovery,
-config wiring, warrant validity, that the signing key matches the warrant
-holder, and which enforcement path is active. Run it after every install.
+After a catalog install these commands are not on your path. Prefix each
+one with `uvx `.
+
+`uvx hermes-tenuo doctor` checks the config, warrant validity and expiry, and
+that the signing key matches the warrant holder. Export
+`TENUO_SIGNING_KEY` in that shell first, because `uvx` does not load
+`~/.hermes/.env`. It does not report the enforcement path. Confirm Hermes
+loaded the plugin with `hermes plugins doctor hermes-tenuo`. Run both after
+every install.
 
 ## Configuration reference
 
@@ -272,8 +334,9 @@ variable equivalent.
 | Key | Env | Meaning |
 |---|---|---|
 | `warrant` | `TENUO_WARRANT` | Base64 warrant, or a path to a file containing one. Required for enforcement. |
-| `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Warrants signed by anything else are rejected. |
+| `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Required for enforcement: without it every call is blocked (logged instead under `on_denial: log`). Warrants and delegation chains signed by anything else are rejected. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
+| `require_warrant` | | If `true`, a loaded plugin blocks calls when no warrant is configured, including under `on_denial: log`. Default `false` preserves unconfigured passthrough. |
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
@@ -284,8 +347,12 @@ Keep secret key material in env vars or a secrets manager, never in
 
 ## Things to know
 
-- **Enabled but unconfigured is a no-op.** Without a `warrant`, the plugin
-  loads, logs a warning, and enforces nothing. `doctor` fails that check.
+- **Enabled but unconfigured is a no-op by default.** Without a `warrant`, the
+  plugin loads, logs a warning, and enforces nothing. `doctor` fails that check.
+  Set `require_warrant: true` under `plugins.entries.hermes-tenuo` to block
+  calls instead. This requires the plugin to load successfully; it cannot
+  detect its own absence. With a warrant configured, `on_denial` continues to
+  select observation (`log`) or enforcement (`block`).
 - **Multiplexed profiles.** Under `gateway.multiplex_profiles`, `TENUO_*`
   values are read through Hermes `get_secret`, so put each profile's keys in
   that profile's `.env`. A secondary profile does not inherit the launch

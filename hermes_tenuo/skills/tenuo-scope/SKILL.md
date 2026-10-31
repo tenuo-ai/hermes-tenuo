@@ -68,8 +68,11 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
    chain.
 5. **No `terminal` / `execute_code` on a child or cron warrant**
    unless the user explicitly asked and the command/path is
-   constrained. The plugin does not see inside an `execute_code`
-   script (`subprocess.run` still runs).
+   constrained. On current Hermes `main`, tool calls the script makes
+   through Hermes are checked against the config warrant, not the child
+   or session warrant. Older releases may not route those calls through
+   the hook at all. The plugin still does not see what the script runs
+   itself (`subprocess.run`).
 6. **Signing keys stay in env or a secret source**, never in
    `config.yaml`. Under `gateway.multiplex_profiles`, put `TENUO_*`
    in that profile's `.env`.
@@ -98,13 +101,18 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=/path` | that path or under it (traversal-safe) |
 | `tool:arg=glob*` | glob |
 | `tool:arg=a\|b\|c` | one of the choices |
+| `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
 | `tool:arg=*` | that argument may be anything |
 | `tool:a=..,b=..` | several constraints on one tool |
 
+Only a complete numeric `MIN..MAX` value is a range; other values containing
+`..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
+`-9007199254740991..9007199254740991`.
+
 `--allow memory` and `--allow todo` are still tools. Add them only if
-the job needs them. For numeric ranges or case-insensitive paths, mint
-in Python with `Range`, `Subpath`, `Pattern` (see the repo README).
+the job needs them. For a case-insensitive path, or anything else this
+table cannot express, mint in Python (see the repo README).
 
 ## Pattern: cron
 

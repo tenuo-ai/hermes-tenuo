@@ -88,10 +88,11 @@ def _register_block_all(ctx: Any, deny_msg: str) -> None:
 
             _tr.set_enforcement_fn(_block_all_fn)
             logger.info("hermes-tenuo: block-all registered via ToolRegistry (%s)", deny_msg)
-            return
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry unavailable for block-all (%s), falling back to hook", exc)
 
+    # Inline tools (memory, todo, session_search) run before registry dispatch,
+    # so they need this hook even when registry enforcement is available.
     def _block_all_hook(tool_name: str = "", **kwargs: Any) -> dict:
         return {"action": "block", "message": deny_msg}
 
@@ -112,6 +113,10 @@ def register(ctx: Any) -> None:
         _register_block_all(ctx, f"hermes-tenuo: {exc}")
         return
     if guard is None:
+        from hermes_tenuo._config import get_require_warrant
+        if get_require_warrant(ctx):
+            _register_block_all(ctx, "hermes-tenuo: require_warrant is enabled but no warrant is configured")
+            return
         from hermes_tenuo.kanban import current_task_id
         kanban_task = current_task_id()
         if kanban_task:

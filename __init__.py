@@ -1,6 +1,6 @@
 """Hermes directory-plugin entry point.
 
-``hermes plugins install tenuo-ai/hermes-tenuo`` clones this repository into
+``hermes plugins install hermes-tenuo`` (the catalog entry) clones this repository into
 ``~/.hermes/plugins/hermes-tenuo/`` and imports this file as the plugin
 module. ``pip install`` users never touch it: Hermes finds the
 ``hermes_agent.plugins`` entry point and imports ``hermes_tenuo`` directly.
@@ -49,7 +49,7 @@ except ModuleNotFoundError as exc:
     if exc.name in ("tenuo", "tenuo_core"):
         raise ModuleNotFoundError(
             "hermes-tenuo needs the 'tenuo' package, which Hermes does not install for "
-            "plugins. Run: pip install 'tenuo>=0.3.2' in the environment Hermes uses."
+            "plugins. Run: pip install 'tenuo>=0.3.5,<0.4' in the environment Hermes uses."
         ) from exc
     raise
 

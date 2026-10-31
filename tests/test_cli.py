@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import sys
+import types
 
 import pytest
 
@@ -158,6 +160,34 @@ class TestDoctorConfigured:
         assert "plugin configured" in out
         assert "✗" in out
 
+    def test_pre_tool_call_coverage_includes_execute_code(self, capsys, monkeypatch):
+        """Doctor tells the operator which warrant execute_code calls use."""
+        from hermes_tenuo.cli import cmd_doctor
+
+        registry_module = types.ModuleType("tools.registry")
+        registry_module.registry = object()
+        monkeypatch.setitem(sys.modules, "tools.registry", registry_module)
+
+        cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "Current Hermes main also covers tools called from inside" in out
+        assert "older releases may not route them here" in out
+        assert "execute_code calls inside a script use" in out
+        assert "set_session_warrant does not apply" in out
+        assert "execute_code sandbox dispatch path not intercepted" not in out
+        assert "plugin ctx.dispatch_tool()" in out
+
+    def test_outside_hermes_points_at_plugins_doctor(self, capsys, monkeypatch):
+        """A standalone doctor cannot import Hermes, so it names the other check."""
+        from hermes_tenuo.cli import cmd_doctor
+
+        monkeypatch.setitem(sys.modules, "tools.registry", None)
+        cmd_doctor(argparse.Namespace())
+        out = capsys.readouterr().out
+        assert "hermes plugins doctor hermes-tenuo" in out
+        assert "Hermes-enabled venv" not in out
+        assert "enforcement-path report" in out
+
 
 class TestDoctorBrokenWarrant:
     """A configured warrant the plugin cannot use blocks every call; doctor must say so."""
@@ -228,6 +258,92 @@ class TestMintConstraints:
         assert isinstance(c["path"], Subpath) and isinstance(c["mode"], Exact)
         tool, c, _ = parse_allow("web_search")
         assert tool == "web_search" and c == {}
+
+    def test_parse_allow_range(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Range
+
+        _, c, shown = parse_allow("checkout:amount=0..4000")
+        assert isinstance(c["amount"], Range) and shown == {"amount": "0..4000"}
+        _, c, _ = parse_allow("checkout:amount=0.5..40.25,currency=usd")
+        assert isinstance(c["amount"], Range)
+        _, c, _ = parse_allow("scale:delta=-5..5")
+        assert isinstance(c["delta"], Range)
+
+    def test_parse_allow_range_rejects_reversed_bounds(self):
+        from hermes_tenuo.cli import parse_allow
+
+        with pytest.raises(ValueError, match="minimum 4000 is above maximum 0"):
+            parse_allow("checkout:amount=4000..0")
+
+    def test_non_range_double_dots_remain_exact(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Exact
+
+        for value in (
+            "release..candidate",
+            "https://example.com/a..b",
+            "../data",
+            "..4000",
+            "0..",
+            "0..40..50",
+        ):
+            _, constraints, shown = parse_allow(f"deploy:target={value}")
+            assert isinstance(constraints["target"], Exact)
+            assert shown == {"target": value}
+
+    def test_parse_allow_range_rejects_unsafe_bounds(self):
+        from hermes_tenuo.cli import parse_allow
+
+        for value in (
+            "9007199254740992..9007199254740992",
+            "-9007199254740992..0",
+            f"{'1' * 400}.0..{'1' * 400}.0",
+        ):
+            with pytest.raises(ValueError, match="safe numeric limit|not finite"):
+                parse_allow(f"checkout:amount={value}")
+
+    def test_parse_allow_range_accepts_safe_integer_boundary(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Range
+
+        _, constraints, _ = parse_allow(
+            "checkout:amount=-9007199254740991..9007199254740991"
+        )
+        assert isinstance(constraints["amount"], Range)
+
+    def test_parse_allow_path_with_dots_stays_a_path(self):
+        from hermes_tenuo.cli import parse_allow
+        from tenuo import Subpath
+
+        _, c, _ = parse_allow("read_file:path=/data/../data")
+        assert isinstance(c["path"], Subpath)
+
+    def test_minted_range_is_enforced_by_guard(self, capsys):
+        """Inclusive bounds; negatives, overages and numeric strings are denied."""
+        from hermes_tenuo.cli import cmd_mint
+        from hermes_tenuo.hermes_guard import HermesGuard
+        from tenuo import PublicKey, SigningKey, Warrant
+
+        args = argparse.Namespace(ttl="1h", allow=["checkout:amount=0..4000"], output="env")
+        assert cmd_mint(args) == 0
+        env = {}
+        for line in capsys.readouterr().out.splitlines():
+            if line.startswith("export "):
+                k, v = line[len("export "):].split("=", 1)
+                env[k] = v
+        guard = HermesGuard(
+            warrant=Warrant.from_bytes(base64.b64decode(env["TENUO_WARRANT"])),
+            signing_key=SigningKey.from_bytes(base64.b64decode(env["TENUO_SIGNING_KEY"])),
+            trusted_roots=[PublicKey.from_bytes(base64.b64decode(env["TENUO_TRUSTED_ROOT"]))],
+        )
+        def call(amount):
+            return guard.pre_tool_call("checkout", {"amount": amount}, session_id="s1")
+        for ok in (0, 2000, 4000, 39.99):
+            assert call(ok) is None, ok
+        for bad in (-50, 4000.01, 18900, "2000"):
+            denied = call(bad)
+            assert denied and denied["action"] == "block", bad
 
     def test_parse_allow_rejects_malformed(self):
         from hermes_tenuo.cli import parse_allow

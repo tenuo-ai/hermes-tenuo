@@ -193,7 +193,8 @@ class HermesGuard:
         self._session_lock = threading.Lock()
 
         # Session warrant chains: session_id → parent_warrant for chain verification
-        self._session_warrant_chains: Dict[str, Any] = {}
+        # session_id → ancestor warrants, root first (the holder presents them all)
+        self._session_warrant_chains: Dict[str, List[Any]] = {}
         self._primary_session_id: Optional[str] = None
         self._primary_lock = threading.Lock()
 
@@ -248,13 +249,23 @@ class HermesGuard:
             self._session_warrants[session_id] = (warrant, signing_key)
             self._uses_session_warrants = True
             if parent_warrant is not None:
-                self._session_warrant_chains[session_id] = parent_warrant
+                self._session_warrant_chains[session_id] = (
+                    list(parent_warrant) if isinstance(parent_warrant, (list, tuple)) else [parent_warrant]
+                )
         logger.debug("hermes-tenuo: registered warrant for session %s", session_id)
 
     def clear_session_warrant(self, session_id: str) -> None:
         with self._session_lock:
             self._session_warrants.pop(session_id, None)
             self._session_warrant_chains.pop(session_id, None)
+
+    def _chain_for(self, session_id: str) -> List[Any]:
+        """Ancestor warrants for *session_id*, root first; empty for a root session."""
+        with self._session_lock:
+            chain = self._session_warrant_chains.get(session_id)
+        if chain is None:
+            return []
+        return list(chain) if isinstance(chain, (list, tuple)) else [chain]
 
     def set_trusted_roots(self, roots: Optional[List[Any]]) -> None:
         """Thread-safe replacement of the trusted root set.
@@ -408,9 +419,10 @@ class HermesGuard:
             b = parent_warrant.attenuate_builder()
             b.inherit_all()
             b.retain_tools(sorted(keep))
-            # TTL is capped at parent's remaining lifetime by the Rust core
-            # (I3: child.exp <= parent.exp) — passing 3600 is a requested maximum.
-            b.with_ttl(3600)
+            # Tenuo 0.3.5 rejects (rather than silently caps) a requested TTL
+            # that would outlive the parent. Let the core atomically cap this
+            # request at build time, avoiding a wall-clock race (I3).
+            b.with_ttl_capped_to_parent(3600)
             child = b.delegate(signing_key)
 
             # Log scope reduction clearly — important for demo and audit
@@ -451,6 +463,9 @@ class HermesGuard:
 
         if child is None:
             return
+        if parent_warrant is not None:
+            # The child presents every ancestor, so it verifies at any depth.
+            parent_warrant = self._chain_for(parent_session_id) + [parent_warrant]
 
         with self._pending_lock:
             for i in range(task_count):
@@ -569,8 +584,9 @@ class HermesGuard:
         child_w = self._attenuate_for_toolsets(parent_warrant, [], signing_key)
         if child_w is None:
             return
+        chain = self._chain_for(parent_session_id) + [parent_warrant]
         with self._session_lock:
-            self._session_warrant_chains[child_session_id] = parent_warrant
+            self._session_warrant_chains[child_session_id] = chain
         self.set_session_warrant(child_session_id, child_w, signing_key)
         logger.debug(
             "hermes-tenuo: subagent_start — child %s attenuated from parent %s",
@@ -662,28 +678,20 @@ class HermesGuard:
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # For chain verification: use configured trusted_roots.
-            # If not configured, extract the root from the parent warrant's issuer.
-            with self._session_lock:
-                parent_warrant = self._session_warrant_chains.get(session_id)
+            # Ancestors root first; core verifies the whole chain against trusted_roots.
+            chain = self._chain_for(session_id)
             with self._trusted_roots_lock:
                 trusted = resolve_trusted_roots(self._trusted_roots)
-            if trusted is None and parent_warrant is not None:
-                # Derive trusted root from the parent's issuer.
-                try:
-                    if parent_warrant.issuer is not None:
-                        trusted = [parent_warrant.issuer]
-                except Exception:
-                    pass
-            # No signing_key.public_key fallback here: without an explicit trusted
-            # root anchor we must fail closed and let enforce_tool_call reject the
-            # warrant rather than silently accepting a self-issued one.
+            # No fallback anchor: not the signing key, and not the issuer of a
+            # warrant in the chain being verified. Deriving trust from the
+            # credential under test accepts any chain an attacker signs. Without
+            # a configured trusted_root, enforce_tool_call fails closed.
             result = enforce_tool_call(
                 tool_name=tool_name,
                 tool_args=args,
                 bound_warrant=bound,
                 trusted_roots=trusted,
-                warrant_chain=[parent_warrant] if parent_warrant is not None else None,
+                warrant_chain=chain or None,
                 approval_handler=self._approval_handler,
             )
         except Exception as exc:

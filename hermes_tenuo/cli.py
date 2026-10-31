@@ -15,10 +15,15 @@ Each --allow takes a tool name with optional argument constraints:
     --allow write_file:path=/tmp/out,mode=w exact mode, path under /tmp/out
     --allow web_search:query=acme*          glob pattern
     --allow git:action=status|diff|log      one of several values
+    --allow checkout:amount=0..4000         number from 0 to 4000, inclusive
 
-Value rules: ``*`` allows anything; ``a|b`` is a choice; a value containing
-``*`` or ``?`` is a glob; a value starting with ``/`` or ``~`` is a path
-prefix (Subpath, traversal-safe); anything else must match exactly.
+Value rules: ``*`` allows anything; ``a|b`` is a choice; ``MIN..MAX`` is a
+numeric range (both ends required, inclusive); a value containing ``*`` or
+``?`` is a glob; a value starting with ``/`` or ``~`` is a path prefix
+(Subpath, traversal-safe); anything else must match exactly.
+
+A range only matches numbers. A tool that sends the amount as a string
+(``"40.00"``) is denied, so declare that argument as a number.
 """
 
 from __future__ import annotations
@@ -26,7 +31,9 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
+import re
 import sys
 from typing import Any
 
@@ -39,12 +46,37 @@ def cmd_mint(args: argparse.Namespace) -> int:
     return _mint_local(args)
 
 
+_NUMBER = r"-?\d+(?:\.\d+)?"
+_RANGE = re.compile(rf"^({_NUMBER})\.\.({_NUMBER})$")
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+
+
+def _parse_number(text: str) -> float | int:
+    value = float(text) if "." in text else int(text)
+    # Tenuo Range uses f64 bounds. Reject CLI literals that would become
+    # non-finite or cross the range where adjacent integers remain distinct.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"range bound '{text}' is not finite")
+    if abs(value) > _MAX_SAFE_INTEGER:
+        raise ValueError(
+            f"range bound '{text}' exceeds the safe numeric limit "
+            f"{_MAX_SAFE_INTEGER}"
+        )
+    return value
+
+
 def _parse_constraint_value(value: str) -> Any:
     """Map one ``arg=value`` string to a tenuo constraint (see module docstring)."""
-    from tenuo import Exact, OneOf, Pattern, Subpath, Wildcard
+    from tenuo import Exact, OneOf, Pattern, Range, Subpath, Wildcard
     v = value.strip()
     if v == "*":
         return Wildcard()
+    m = _RANGE.fullmatch(v)
+    if m:
+        lo, hi = _parse_number(m.group(1)), _parse_number(m.group(2))
+        if lo > hi:
+            raise ValueError(f"range minimum {m.group(1)} is above maximum {m.group(2)}")
+        return Range(lo, hi)
     if "|" in v:
         choices = [c.strip() for c in v.split("|") if c.strip()]
         if not choices:
@@ -119,12 +151,12 @@ def _mint_local(args: argparse.Namespace) -> int:
     # Generate keys. Reuse TENUO_SIGNING_KEY as the holder when set so a
     # kanban worker inherits a key that matches the file mint --task writes.
     control_key = SigningKey.generate()
-    from hermes_tenuo._config import _env_secret
+    from hermes_tenuo._config import _b64_to_bytes, _env_secret
 
     existing_key = _env_secret("TENUO_SIGNING_KEY")
     if existing_key:
         try:
-            agent_key = SigningKey.from_bytes(base64.b64decode(existing_key))
+            agent_key = SigningKey.from_bytes(_b64_to_bytes(existing_key))
         except Exception as exc:
             print(f"error: TENUO_SIGNING_KEY is set but could not be loaded: {exc}", file=sys.stderr)
             return 1
@@ -315,6 +347,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 4. Configured? Same resolution the plugin uses (kanban task first).
     from hermes_tenuo._config import (
+        _b64_to_bytes,
         _env_secret,
         get_child_warrant_raw,
         load_warrant,
@@ -395,7 +428,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if signing_raw:
             try:
                 from tenuo_core import SigningKey
-                key = SigningKey.from_bytes(base64.b64decode(signing_raw))
+                key = SigningKey.from_bytes(_b64_to_bytes(signing_raw))
                 holder = _warrant_holder(warrant)
                 if holder is None:
                     note("could not read the warrant holder from this tenuo build — holder match not checked")
@@ -434,18 +467,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("      (run_agent.py intercepts these before the registry)")
         else:
             print("  Enforcement path: pre_tool_call hook only")
-            print("    Covered: all agent-loop tool calls including delegate_task")
-            print("    Gaps:")
-            print("      - skip_pre_tool_call_hook=True callers bypass enforcement")
+            print("    Covered: all agent-loop tool calls, including delegate_task")
+            print("    Current Hermes main also covers tools called from inside")
+            print("    execute_code scripts; older releases may not route them here.")
+            print("    Gap:")
             print("      - direct registry.dispatch(...) callers bypass enforcement")
-            print("      - execute_code sandbox dispatch path not intercepted")
+            print("        (including plugin ctx.dispatch_tool())")
             print("    Fix pending: https://github.com/NousResearch/hermes-agent/pull/32719")
+        print("  On current Hermes main, execute_code calls inside a script use")
+        print("  the warrant in your config; set_session_warrant does not apply.")
         print()
         print("  Lifecycle hooks registered:")
         print("    on_session_start, on_session_end, subagent_start")
         print("    (subagent_start: pre-injects child warrants before first tool call)")
     except ImportError:
-        note("tools.registry not importable here — run `hermes-tenuo doctor` from a Hermes-enabled venv")
+        note("skipped the enforcement-path report — this command is not running inside Hermes")
+        note("the checks above still cover config, warrant, expiry, and the signing key")
+        note("confirm Hermes loaded the plugin: hermes plugins doctor hermes-tenuo")
 
     print()
     if ok:
@@ -481,7 +519,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify the current warrant against trusted_root and show its capabilities."""
-    from hermes_tenuo._config import get_trusted_roots, resolve_warrant_text
+    from hermes_tenuo._config import _b64_to_bytes, get_trusted_roots, resolve_warrant_text
     from hermes_tenuo._home import hermes_home
 
     try:
@@ -507,7 +545,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     try:
         from tenuo_core import Warrant
-        warrant = Warrant.from_bytes(base64.b64decode(warrant_raw))
+        warrant = Warrant.from_bytes(_b64_to_bytes(warrant_raw))
     except Exception as e:
         print(f"error: could not load warrant: {e}", file=sys.stderr)
         return 1

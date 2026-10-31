@@ -1,5 +1,5 @@
 name: hermes-tenuo
-version: 0.1.3
+version: 0.1.4
 description: >
   Per-call authorization for Hermes Agent tool calls.
   Each call is checked against a signed, expiring warrant before the
@@ -8,9 +8,9 @@ author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
 kind: standalone
-# Hermes never installs plugin pip dependencies; `hermes plugins install` prints this list.
+# `hermes plugins enable` installs these into the Hermes runtime, after consent.
 python_dependencies:
-  - "tenuo>=0.3.2"
+  - "tenuo>=0.3.5,<0.4"
 requires_hermes: ">=0.20"
 tags: [security, authorization, warrants, tenuo]
 provides_hooks:
@@ -25,4 +25,7 @@ requires_env:
     required: false
   - name: TENUO_SIGNING_KEY
     description: "Base64-encoded Ed25519 signing key matching the warrant holder (proof-of-possession)."
+    required: false
+  - name: TENUO_TRUSTED_ROOT
+    description: "Base64-encoded public key of the warrant issuer. Required to enforce; without it every tool call is blocked (or set plugins.entries.hermes-tenuo.trusted_root)."
     required: false
