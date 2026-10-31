@@ -52,6 +52,6 @@ jobs:
         run: uv pip install --python hermes-agent/.venv/bin/python . pytest
       - name: Install only tenuo (directory route)
         if: matrix.route == 'directory'
-        run: uv pip install --python hermes-agent/.venv/bin/python "tenuo>=0.3.3,<0.4" pytest
+        run: uv pip install --python hermes-agent/.venv/bin/python "tenuo>=0.3.5,<0.4" pytest
       - name: Load through Hermes's plugin loader
         run: hermes-agent/.venv/bin/python -m pytest tests/test_upstream_hermes.py -q -rs --tb=short

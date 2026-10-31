@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Require Tenuo 0.3.5, including the coordinated verifier and filesystem-jail
+  security fixes from Tenuo 0.3.4 and 0.3.5.
+
 ## 0.1.4 - 2026-10-23
 
 This release requires Tenuo 0.3.3, a security and correctness release, and

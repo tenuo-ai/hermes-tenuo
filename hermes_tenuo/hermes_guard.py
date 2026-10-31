@@ -361,9 +361,18 @@ class HermesGuard:
             b = parent_warrant.attenuate_builder()
             b.inherit_all()
             b.retain_tools(sorted(keep))
-            # TTL is capped at parent's remaining lifetime by the Rust core
-            # (I3: child.exp <= parent.exp) — passing 3600 is a requested maximum.
-            b.with_ttl(3600)
+            # Tenuo 0.3.5 rejects (rather than silently caps) a requested TTL
+            # that would outlive the parent. Bound the request to the parent's
+            # whole remaining seconds so child.exp <= parent.exp (I3).
+            parent_expiry = datetime.fromisoformat(parent_warrant.expires_at())
+            if parent_expiry.tzinfo is None:
+                parent_expiry = parent_expiry.replace(tzinfo=timezone.utc)
+            remaining_seconds = int(
+                (parent_expiry - datetime.now(timezone.utc)).total_seconds()
+            )
+            if remaining_seconds <= 0:
+                raise ValueError("parent warrant has expired")
+            b.with_ttl(min(3600, remaining_seconds))
             child = b.delegate(signing_key)
 
             # Log scope reduction clearly — important for demo and audit

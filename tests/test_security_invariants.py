@@ -314,9 +314,9 @@ class TestMonotonicity:
 
 class TestExpiryCap:
 
-    def test_child_ttl_capped_at_parent_remaining(self, agent_key, cloud_key):
-        """Child warrant TTL is capped at parent's remaining lifetime by Rust core."""
-        from tenuo import Warrant, Wildcard
+    def test_child_ttl_never_outlives_parent(self, agent_key, cloud_key):
+        """Oversized TTLs are rejected; Hermes requests a bounded child TTL."""
+        from tenuo import MonotonicityError, Warrant, Wildcard
         parent = (
             Warrant.mint_builder()
             .holder(agent_key.public_key)
@@ -327,9 +327,16 @@ class TestExpiryCap:
         b = parent.attenuate_builder()
         b.inherit_all()
         b.with_ttl(86400)  # request 24h — parent only has 60s
-        b.with_ttl(86400)
-        child = b.delegate(agent_key)
-        # Child expires at same time as parent, not 24h from now
+        with pytest.raises(MonotonicityError):
+            b.delegate(agent_key)
+
+        guard = HermesGuard(
+            warrant=parent,
+            signing_key=agent_key,
+            trusted_roots=[cloud_key.public_key],
+        )
+        child = guard._attenuate_for_toolsets(parent, [], agent_key)
+        assert child is not None
         assert child.expires_at() <= parent.expires_at()
 
 
