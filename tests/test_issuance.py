@@ -38,6 +38,30 @@ def test_keygen_writes_safe_files(tmp_path, capsys):
     assert cmd_keygen(args) == 1  # never accidentally rotate an existing identity
 
 
+def test_keygen_does_not_strand_private_key_when_public_write_fails(tmp_path, monkeypatch):
+    from hermes_tenuo import issuance
+    from hermes_tenuo.cli import cmd_keygen
+
+    private_path = tmp_path / 'identity.key'
+    public_path = tmp_path / 'identity.pub'
+    original_write = issuance.write_private_file
+    writes = 0
+
+    def fail_public_write(path, text, **kwargs):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("public destination unavailable")
+        return original_write(path, text, **kwargs)
+
+    monkeypatch.setattr(issuance, 'write_private_file', fail_public_write)
+    args = argparse.Namespace(private_key=str(private_path), public_key=str(public_path))
+
+    assert cmd_keygen(args) == 1
+    assert not private_path.exists()
+    assert not public_path.exists()
+
+
 def test_explicit_issuance_requires_both_keys_and_output(tmp_path):
     for fields in ({'issuer_key': 'issuer.key'}, {'holder_public_key': 'holder.pub'},
                    {'issuer_key': 'issuer.key', 'holder_public_key': 'holder.pub'}):

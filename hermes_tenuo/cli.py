@@ -61,7 +61,17 @@ def cmd_keygen(args: argparse.Namespace) -> int:
             raise ValueError("identity output already exists; choose new paths")
         key = SigningKey.generate()
         write_private_file(private_path, base64.b64encode(key.secret_key_bytes()).decode())
-        write_private_file(public_path, base64.b64encode(key.public_key.to_bytes()).decode())
+        try:
+            write_private_file(public_path, base64.b64encode(key.public_key.to_bytes()).decode())
+        except (OSError, ValueError):
+            # Do not strand a private identity without its corresponding public
+            # key. Both paths were verified absent above and writes never
+            # overwrite, so this removes only the private file created here.
+            try:
+                private_path.unlink()
+            except OSError:
+                pass
+            raise
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
