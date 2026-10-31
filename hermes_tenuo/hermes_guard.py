@@ -34,8 +34,17 @@ _SESSION_END_FLUSH_SECS = 2.0
 _EXIT_FLUSH_SECS = 5.0
 
 
+def _safe_error_message(exc: BaseException) -> str:
+    """Render an SDK error without echoing the Cloud credential."""
+    message = str(exc)
+    token = os.environ.get("TENUO_CONNECT_TOKEN")
+    if token:
+        message = message.replace(token, "[REDACTED]")
+    return message
+
+
 def _log_receipt_error(exc: BaseException) -> None:
-    logger.warning("hermes-tenuo: receipt delivery failed: %s", exc)
+    logger.warning("hermes-tenuo: receipt delivery failed: %s", _safe_error_message(exc))
 
 
 def _connect_control_plane() -> Any:
@@ -69,7 +78,10 @@ def _connect_control_plane() -> Any:
             on_receipt_error=_log_receipt_error,
         )
     except Exception as exc:  # noqa: BLE001 - receipts must not block startup
-        logger.warning("hermes-tenuo: Cloud receipts unavailable (%s); continuing without them", exc)
+        logger.warning(
+            "hermes-tenuo: Cloud receipts unavailable (%s); continuing without them",
+            _safe_error_message(exc),
+        )
         return get_or_create()
     atexit.register(_flush_receipts, client, _EXIT_FLUSH_SECS)
     return client
@@ -83,7 +95,7 @@ def _flush_receipts(client: Any, timeout: float) -> None:
         if not flush(timeout=timeout):
             logger.warning("hermes-tenuo: receipts still pending after %.0fs", timeout)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("hermes-tenuo: receipt flush failed: %s", exc)
+        logger.warning("hermes-tenuo: receipt flush failed: %s", _safe_error_message(exc))
 
 
 # ---------------------------------------------------------------------------

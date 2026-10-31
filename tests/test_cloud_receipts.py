@@ -68,16 +68,19 @@ def test_token_without_cloud_sdk_warns_and_falls_back(monkeypatch, no_global_cli
 
 
 def test_cloud_setup_failure_falls_back(monkeypatch, no_global_client, fake_cloud, caplog):
-    monkeypatch.setenv("TENUO_CONNECT_TOKEN", "tenuo_ct_x")
-    fake_cloud.connect.side_effect = RuntimeError("bad token")
+    token = "tenuo_ct_secret"
+    monkeypatch.setenv("TENUO_CONNECT_TOKEN", token)
+    fake_cloud.connect.side_effect = RuntimeError(f"bad token: {token}")
     plain = object()
     with patch("tenuo.control_plane.get_or_create", return_value=plain), \
          caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
         assert hg._connect_control_plane() is plain
     assert "Cloud receipts unavailable" in caplog.text
+    assert token not in caplog.text
+    assert "[REDACTED]" in caplog.text
 
 
-def test_flush_is_bounded_and_never_raises(caplog):
+def test_flush_is_bounded_never_raises_and_redacts_token(monkeypatch, caplog):
     client = MagicMock()
     client.flush_receipts.return_value = False
     with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
@@ -85,8 +88,13 @@ def test_flush_is_bounded_and_never_raises(caplog):
     client.flush_receipts.assert_called_once_with(timeout=2.0)
     assert "still pending" in caplog.text
 
-    client.flush_receipts.side_effect = RuntimeError("boom")
-    hg._flush_receipts(client, 2.0)  # logged, not raised
+    token = "tenuo_ct_secret"
+    monkeypatch.setenv("TENUO_CONNECT_TOKEN", token)
+    client.flush_receipts.side_effect = RuntimeError(f"boom: {token}")
+    with caplog.at_level(logging.WARNING, logger="hermes_tenuo"):
+        hg._flush_receipts(client, 2.0)  # logged, not raised
+    assert token not in caplog.text
+    assert "[REDACTED]" in caplog.text
     hg._flush_receipts(object(), 2.0)  # no flush_receipts: no-op
 
 
