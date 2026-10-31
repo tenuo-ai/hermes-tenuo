@@ -361,9 +361,10 @@ class HermesGuard:
             b = parent_warrant.attenuate_builder()
             b.inherit_all()
             b.retain_tools(sorted(keep))
-            # TTL is capped at parent's remaining lifetime by the Rust core
-            # (I3: child.exp <= parent.exp) — passing 3600 is a requested maximum.
-            b.with_ttl(3600)
+            # Tenuo 0.3.5 rejects (rather than silently caps) a requested TTL
+            # that would outlive the parent. Let the core atomically cap this
+            # request at build time, avoiding a wall-clock race (I3).
+            b.with_ttl_capped_to_parent(3600)
             child = b.delegate(signing_key)
 
             # Log scope reduction clearly — important for demo and audit
