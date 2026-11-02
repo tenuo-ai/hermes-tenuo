@@ -1,0 +1,423 @@
+"""Delegation plans: per-depth argument grants across a delegate_task tree."""
+
+import copy
+
+import pytest
+from tenuo import AnyOf, All, Regex, SigningKey, Warrant
+import tenuo_core
+
+from hermes_tenuo.delegation import DelegationPlanError, load_plan, parse_plan
+from hermes_tenuo.hermes_guard import HermesGuard
+
+ROOT_CMD = {
+    "binaries": ["kubectl", "proddb"],
+    "patterns": [
+        r"^kubectl get pods -n shop$",
+        r"^kubectl logs deploy/(checkout|payments) -n shop$",
+        r"^kubectl rollout restart deploy/checkout -n shop$",
+        r"^proddb select [a-z_]+ --schema checkout$",
+    ],
+}
+LEVEL1_CMD = {
+    "binaries": ["kubectl", "proddb"],
+    "patterns": [
+        r"^kubectl get pods -n shop$",
+        r"^kubectl logs deploy/(checkout|payments) -n shop$",
+        r"^proddb select [a-z_]+ --schema checkout$",
+    ],
+}
+LEVEL2_CMD = {"binaries": ["kubectl"], "patterns": [r"^kubectl logs deploy/payments -n shop$"]}
+
+PLAN = {
+    "version": 1,
+    "root": {"tools": {"terminal": {"command": ROOT_CMD}, "delegate_task": {}}},
+    "levels": [
+        {
+            "role": "investigator",
+            "ttl_seconds": 1800,
+            "tools": {"terminal": {"command": LEVEL1_CMD}, "delegate_task": {}},
+        },
+        {"role": "inspector", "ttl_seconds": 600, "tools": {"terminal": {"command": LEVEL2_CMD}}},
+    ],
+}
+
+
+def _root_constraint():
+    return All([tenuo_core.Shlex(allow=ROOT_CMD["binaries"]), AnyOf([Regex(p) for p in ROOT_CMD["patterns"]])])
+
+
+@pytest.fixture
+def tree():
+    root_key, agent_key = SigningKey.generate(), SigningKey.generate()
+    warrant = (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("terminal", command=_root_constraint())
+        .capability("delegate_task")
+        .ttl(3600)
+        .mint(root_key)
+    )
+    guard = HermesGuard(
+        warrant=warrant,
+        signing_key=agent_key,
+        trusted_roots=[root_key.public_key],
+        delegation_plan=parse_plan(PLAN),
+    )
+    return guard
+
+
+def _run(guard, session, command):
+    return guard.pre_tool_call("terminal", {"command": command}, session_id=session)
+
+
+def _delegate(guard, parent, child, tasks=1):
+    blocked = guard.pre_tool_call(
+        "delegate_task", {"goal": "investigate", "tasks": [{"goal": "x"}] * tasks}, session_id=parent
+    )
+    if blocked is None:
+        guard.on_subagent_start(parent_session_id=parent, child_session_id=child)
+    return blocked
+
+
+def test_three_level_tree_narrows_at_each_level(tree):
+    g = tree
+    assert _run(g, "s0", "kubectl rollout restart deploy/checkout -n shop") is None
+
+    assert _delegate(g, "s0", "s1") is None
+    assert _run(g, "s1", "kubectl logs deploy/checkout -n shop") is None
+    assert _run(g, "s1", "proddb select orders --schema checkout") is None
+    assert _run(g, "s1", "kubectl rollout restart deploy/checkout -n shop") is not None  # commander only
+
+    assert _delegate(g, "s1", "s2") is None
+    assert _run(g, "s2", "kubectl logs deploy/payments -n shop") is None
+    for cmd in (
+        "kubectl logs deploy/checkout -n shop",
+        "proddb select orders --schema checkout",
+        "kubectl get pods -n shop",
+        "kubectl rollout restart deploy/checkout -n shop",
+    ):
+        assert _run(g, "s2", cmd) is not None, cmd
+
+
+def test_children_carry_full_chains_and_nested_expiry(tree):
+    g = tree
+    _delegate(g, "s0", "s1")
+    _delegate(g, "s1", "s2")
+    root_w, _ = g._resolve_warrant("s0")
+    w1, _ = g._resolve_warrant("s1")
+    w2, _ = g._resolve_warrant("s2")
+    assert g._chain_for("s1") == [root_w]
+    assert g._chain_for("s2") == [root_w, w1]
+    assert w2.expires_at() <= w1.expires_at() <= root_w.expires_at()
+
+
+def test_each_child_holds_its_own_key(tree):
+    g = tree
+    _delegate(g, "s0", "s1")
+    _delegate(g, "s1", "s2")
+    keys = [g._resolve_warrant(s)[1] for s in ("s0", "s1", "s2")]
+    assert len({bytes(k.public_key.to_bytes()) for k in keys}) == 3
+    w2, _ = g._resolve_warrant("s2")
+    # The parent's key cannot act as the child: proof-of-possession fails.
+    with g._session_lock:
+        g._session_warrants["s2"] = (w2, keys[1])
+    assert _run(g, "s2", "kubectl logs deploy/payments -n shop") is not None
+
+
+def test_depth_beyond_plan_blocks_the_delegation(tree):
+    g = tree
+    _delegate(g, "s0", "s1")
+    _delegate(g, "s1", "s2")
+    # The inspector holds no delegate_task, so the warrant itself refuses.
+    assert g.pre_tool_call("delegate_task", {"goal": "x"}, session_id="s2") is not None
+
+
+def test_plan_depth_limit_blocks_even_when_warrant_allows_delegation():
+    root_key, agent_key = SigningKey.generate(), SigningKey.generate()
+    warrant = (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("terminal", command=_root_constraint())
+        .capability("delegate_task")
+        .ttl(600)
+        .mint(root_key)
+    )
+    plan = copy.deepcopy(PLAN)
+    plan["levels"] = plan["levels"][:1]
+    g = HermesGuard(
+        warrant=warrant, signing_key=agent_key, trusted_roots=[root_key.public_key], delegation_plan=parse_plan(plan)
+    )
+    assert _delegate(g, "s0", "s1") is None
+    parent, _ = g._resolve_warrant("s0")
+    child, _ = g._resolve_warrant("s1")
+    assert child.expires_at() <= parent.expires_at()
+    blocked = g.pre_tool_call("delegate_task", {"goal": "x"}, session_id="s1")
+    assert blocked and "beyond the delegation plan" in blocked["message"]
+
+
+def test_unplanned_child_holds_no_authority(tree):
+    g = tree
+    g.on_subagent_start(parent_session_id="s0", child_session_id="stray")
+    blocked = _run(g, "stray", "kubectl get pods -n shop")
+    assert blocked and "holds no authority" in blocked["message"]
+
+
+def _guard_with_plan(plan):
+    root_key, agent_key = SigningKey.generate(), SigningKey.generate()
+    warrant = (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("terminal", command=_root_constraint())
+        .capability("delegate_task")
+        .ttl(600)
+        .mint(root_key)
+    )
+    return HermesGuard(
+        warrant=warrant, signing_key=agent_key, trusted_roots=[root_key.public_key], delegation_plan=parse_plan(plan)
+    )
+
+
+def test_tampered_plan_cannot_widen_a_child():
+    """Extra patterns in the plan never let anyone run them: the grant is refused or narrowed."""
+    plan = copy.deepcopy(PLAN)
+    plan["root"]["tools"]["terminal"]["command"]["patterns"].append(r"^kubectl delete ns shop$")
+    plan["levels"][0]["tools"]["terminal"]["command"]["patterns"].append(r"^kubectl delete ns shop$")
+    g = _guard_with_plan(plan)
+    blocked = _delegate(g, "s0", "s1")
+    if blocked is None:
+        assert _run(g, "s1", "kubectl delete ns shop") is not None
+    else:
+        assert "rejected" in blocked["message"]
+    assert _run(g, "s0", "kubectl delete ns shop") is not None
+
+
+def test_plan_with_a_substituted_root_is_refused():
+    """A plan whose root does not match the signed warrant cannot produce a valid grant."""
+    plan = copy.deepcopy(PLAN)
+    plan["root"]["tools"]["terminal"]["command"] = {"binaries": ["bash"], "patterns": [r"^.*$"]}
+    plan["levels"][0]["tools"]["terminal"]["command"] = {"binaries": ["bash"], "patterns": [r"^.*$"]}
+    plan["levels"][1]["tools"]["terminal"]["command"] = {"binaries": ["bash"], "patterns": [r"^.*$"]}
+    g = _guard_with_plan(plan)
+    blocked = _delegate(g, "s0", "s1")
+    assert blocked and "rejected" in blocked["message"]
+    assert _run(g, "s1", "bash -c id") is not None
+
+
+def test_multiple_children_from_one_call_each_get_a_grant(tree):
+    g = tree
+    assert (
+        g.pre_tool_call("delegate_task", {"goal": "x", "tasks": [{"goal": "a"}, {"goal": "b"}]}, session_id="s0")
+        is None
+    )
+    g.on_subagent_start(parent_session_id="s0", child_session_id="c1")
+    g.on_subagent_start(parent_session_id="s0", child_session_id="c2")
+    for child in ("c1", "c2"):
+        assert _run(g, child, "kubectl get pods -n shop") is None
+    g.on_subagent_start(parent_session_id="s0", child_session_id="c3")
+    assert _run(g, "c3", "kubectl get pods -n shop") is not None
+
+
+def test_session_end_clears_depth_and_pending(tree):
+    g = tree
+    g.pre_tool_call("delegate_task", {"goal": "x"}, session_id="s0")
+    g.on_session_end("s0")
+    assert "s0" not in g._planned_children
+    g.on_subagent_start(parent_session_id="s0", child_session_id="late")
+    assert _run(g, "late", "kubectl get pods -n shop") is not None
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda p: p.update(version=2), "unsupported plan version"),
+        (lambda p: p.update(levels=[]), "at least one level"),
+        (lambda p: p["levels"][0].pop("ttl_seconds"), "ttl_seconds"),
+        (lambda p: p["levels"][1]["tools"]["terminal"]["command"]["patterns"].append("kubectl.*"), "anchored"),
+        (lambda p: p["root"]["tools"].pop("terminal"), "not held by every ancestor"),
+    ],
+)
+def test_malformed_plans_are_rejected(mutate, message):
+    plan = copy.deepcopy(PLAN)
+    mutate(plan)
+    with pytest.raises(DelegationPlanError, match=message):
+        parse_plan(plan)
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda p: p.update(typo=True), "unknown fields"),
+        (lambda p: p["levels"][0].update(ttl_seconds=True), "positive integer"),
+        (lambda p: p["levels"][0]["tools"]["terminal"]["command"].update(patternz=[]), "unknown fields"),
+        (lambda p: p["levels"][0]["tools"].update(terminal=[]), "constraints must be an object"),
+        (lambda p: p["levels"][0]["tools"]["terminal"]["command"].update(range=[False, 1]), "range"),
+    ],
+)
+def test_plan_schema_rejects_typos_and_ambiguous_types(mutate, message):
+    plan = copy.deepcopy(PLAN)
+    mutate(plan)
+    with pytest.raises(DelegationPlanError, match=message):
+        parse_plan(plan)
+
+
+def test_load_plan_rejects_group_writable_file(tmp_path):
+    path = tmp_path / "plan.json"
+    path.write_text(__import__("json").dumps(PLAN))
+    path.chmod(0o664)
+    with pytest.raises(DelegationPlanError, match="writable by group"):
+        load_plan(path)
+
+
+def test_load_plan_rejects_symlink(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text(__import__("json").dumps(PLAN))
+    link = tmp_path / "plan.json"
+    link.symlink_to(target)
+    with pytest.raises(DelegationPlanError, match="must not be a symlink"):
+        load_plan(link)
+
+
+def test_plan_toolsets_can_only_narrow_a_child(tree):
+    g = tree
+    blocked = g.pre_tool_call(
+        "delegate_task",
+        {"tasks": [{"goal": "terminal-only", "toolsets": ["terminal"]}]},
+        session_id="s0",
+    )
+    assert blocked is None
+    g.on_subagent_start("s0", "s1", child_goal="terminal-only")
+    child, _ = g._resolve_warrant("s1")
+    assert child.tools == ["terminal"]
+    assert child.is_terminal()
+
+
+def test_range_argument_is_bounded_and_fails_closed():
+    """A numeric range argument (e.g. the terminal timeout) is bounded, not wildcarded."""
+    import tenuo_core
+    from tenuo import All, AnyOf, Range, Regex, SigningKey, Warrant, enforce_tool_call
+
+    from hermes_tenuo.delegation import parse_plan
+
+    def term(ttl=None):
+        d = {
+            "tools": {
+                "terminal": {
+                    "command": {"binaries": ["kubectl"], "patterns": [r"^kubectl get pods -n shop$"]},
+                    "timeout": {"range": [1, 600]},
+                },
+                "delegate_task": {},
+            }
+        }
+        if ttl:
+            d["ttl_seconds"] = ttl
+        return d
+
+    plan = parse_plan({"version": 1, "root": term(), "levels": [term(600)]})
+    cons = plan.constraints_for(1)["terminal"]
+    assert "timeout" in cons and "command" in cons
+
+    root, agent = SigningKey.generate(), SigningKey.generate()
+    cmd = All([tenuo_core.Shlex(allow=["kubectl"]), AnyOf([Regex(r"^kubectl get pods -n shop$")])])
+    w = (
+        Warrant.mint_builder()
+        .holder(agent.public_key)
+        .capability("terminal", command=cmd, timeout=Range(1, 600))
+        .capability("delegate_task")
+        .ttl(600)
+        .mint(root)
+    )
+    bw = w.bind(agent)
+    base = {"command": "kubectl get pods -n shop"}
+    assert enforce_tool_call("terminal", {**base, "timeout": 180}, bw, trusted_roots=[root.public_key]).allowed
+    assert not enforce_tool_call("terminal", {**base, "timeout": 600000}, bw, trusted_roots=[root.public_key]).allowed
+    assert not enforce_tool_call("terminal", base, bw, trusted_roots=[root.public_key]).allowed
+
+
+def test_range_must_be_min_max():
+    import pytest as _pt
+
+    from hermes_tenuo.delegation import DelegationPlanError, parse_plan
+
+    bad = {
+        "version": 1,
+        "root": {"tools": {"terminal": {"timeout": {"range": [600, 1]}}, "delegate_task": {}}},
+        "levels": [{"ttl_seconds": 60, "tools": {"terminal": {"timeout": {"range": [600, 1]}}}}],
+    }
+    with _pt.raises(DelegationPlanError, match="min <= max"):
+        parse_plan(bad)
+
+
+# --- _allow_unknown in plan levels -------------------------------------------
+
+_SPEC = {"binaries": ["kubectl"], "patterns": ["^kubectl get pods -n shop$"]}
+
+
+def _open_plan_grant(root_open: bool, level_open: bool):
+    from tenuo import All, SigningKey, Warrant
+
+    from hermes_tenuo.delegation import capability_members, parse_plan
+
+    def entry(open_world):
+        return {"command": _SPEC, **({"_allow_unknown": True} if open_world else {})}
+
+    plan = parse_plan(
+        {
+            "version": 1,
+            "root": {"tools": {"terminal": entry(root_open)}},
+            "levels": [{"ttl_seconds": 300, "tools": {"terminal": entry(level_open)}}],
+        }
+    )
+    caps = plan.constraints_for(1)["terminal"]
+    issuer, parent, child = SigningKey.generate(), SigningKey.generate(), SigningKey.generate()
+    extra = {"_allow_unknown": True} if root_open else {}
+    warrant = (
+        Warrant.mint_builder()
+        .holder(parent.public_key)
+        .capability("terminal", command=All(capability_members(_SPEC)), **extra)
+        .ttl(600)
+        .mint(issuer)
+    )
+    return warrant.grant_builder().holder(child.public_key).capability("terminal", **caps).ttl(300).grant(parent)
+
+
+@pytest.mark.parametrize(
+    "root_open,level_open,extra_allowed",
+    [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+    ],
+)
+def test_plan_allow_unknown_needs_every_level(root_open, level_open, extra_allowed):
+    grant = _open_plan_grant(root_open, level_open)
+
+    def allowed(args):
+        return not grant.check_constraints("terminal", args)
+
+    assert allowed({"command": "kubectl get pods -n shop"})
+    assert allowed({"command": "kubectl get pods -n shop", "workdir": "/x", "timeout": 9}) is extra_allowed
+    # Named arguments are always checked, open or not.
+    assert not allowed({"command": "kubectl delete pod x -n shop", "workdir": "/x"})
+
+
+def test_plan_allow_unknown_must_be_true():
+    from hermes_tenuo.delegation import DelegationPlanError, parse_plan
+
+    with pytest.raises(DelegationPlanError, match="must be true"):
+        parse_plan(
+            {
+                "version": 1,
+                "root": {"tools": {"terminal": {"command": _SPEC, "_allow_unknown": "yes"}}},
+                "levels": [{"ttl_seconds": 60, "tools": {"terminal": {"command": _SPEC}}}],
+            }
+        )
+
+
+def test_child_without_delegate_task_gets_a_terminal_grant(tree):
+    g = tree
+    assert _delegate(g, "s0", "s1") is None
+    investigator, _ = g._resolve_warrant("s1")
+    assert not investigator.is_terminal()  # it may still delegate
+    assert _delegate(g, "s1", "s2") is None
+    inspector, _ = g._resolve_warrant("s2")
+    assert inspector.is_terminal()  # no delegate_task, so its grant can't be delegated
