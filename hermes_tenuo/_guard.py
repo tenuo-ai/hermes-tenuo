@@ -124,16 +124,51 @@ class PluginGuard:
         tool_call_id: str = "",
         **kwargs: Any,
     ) -> Optional[dict]:
-        result = self._guard.pre_tool_call(
-            tool_name=tool_name,
-            args=args or {},
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-        )
+        try:
+            result = self._guard.pre_tool_call(
+                tool_name=tool_name,
+                args=args or {},
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
+            return self._internal_error_block(tool_name, "authorization check", exc)
+
+        if result is not None and not isinstance(result, dict):
+            return self._internal_error_block(
+                tool_name,
+                "authorization check",
+                TypeError(f"unexpected result type {type(result).__name__}"),
+            )
+
         if result and result.get("action") == "block":
-            self._auto_block_kanban_task(tool_name, result.get("message", ""))
+            try:
+                self._auto_block_kanban_task(tool_name, result.get("message", ""))
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a denial
+                # Preserve the original block. Kanban state is secondary to the
+                # authorization decision and can be repaired independently.
+                logger.error(
+                    "hermes-tenuo: denial bookkeeping failed for %s (%s); call remains blocked",
+                    tool_name,
+                    type(exc).__name__,
+                )
         return result  # None = allow, {"action": "block", "message": "..."} = block
+
+    @staticmethod
+    def _internal_error_block(tool_name: str, stage: str, exc: Exception) -> dict:
+        """Turn an internal enforcement failure into a non-sensitive denial."""
+        error_type = type(exc).__name__
+        logger.error(
+            "hermes-tenuo: %s failed for %s (%s); blocking",
+            stage,
+            tool_name,
+            error_type,
+        )
+        return {
+            "action": "block",
+            "message": f"tenuo: {stage} failed ({error_type}); call blocked",
+        }
 
     @staticmethod
     def _auto_block_kanban_task(tool_name: str, deny_message: str) -> None:
