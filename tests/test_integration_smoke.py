@@ -455,27 +455,32 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """on_subagent_start claims a pending child warrant and registers it."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        assert guard_with_child.pre_tool_call(
+            "delegate_task", {"tasks": ["research"]}, session_id="parent"
+        ) is None
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
             child_session_id="child-1",
+            child_goal="research",
         )
 
         warrant, _ = guard_with_child._resolve_warrant("child-1")
-        assert warrant is child_warrant
+        assert warrant is not child_warrant
+        assert warrant.tools == ["tool:web_search"]
 
     def test_child_blocked_for_parent_only_tool_after_injection(
         self, guard_with_child, child_warrant, agent_key
     ):
         """After subagent_start injects a child warrant, read_file is blocked for child."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        assert guard_with_child.pre_tool_call(
+            "delegate_task", {"tasks": ["research"]}, session_id="parent"
+        ) is None
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
             child_session_id="child-1",
+            child_goal="research",
         )
 
         result = guard_with_child.pre_tool_call(
@@ -488,12 +493,14 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """After subagent_start injects a child warrant, web_search is allowed."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
+        assert guard_with_child.pre_tool_call(
+            "delegate_task", {"tasks": ["research"]}, session_id="parent"
+        ) is None
 
         guard_with_child.on_subagent_start(
             parent_session_id="parent",
             child_session_id="child-1",
+            child_goal="research",
         )
 
         result = guard_with_child.pre_tool_call(
@@ -516,12 +523,14 @@ class TestSubagentStartWarrantInjection:
         self, guard_with_child, child_warrant
     ):
         """A second on_subagent_start for the same child is idempotent — no crash."""
-        with guard_with_child._pending_lock:
-            guard_with_child._pending_child_warrants[("parent", 0)] = (child_warrant, None)
-            guard_with_child._pending_child_warrants[("parent", 1)] = (child_warrant, None)
-
-        guard_with_child.on_subagent_start("parent", "child-1")
-        guard_with_child.on_subagent_start("parent", "child-1")  # second call — no crash
+        assert guard_with_child.pre_tool_call(
+            "delegate_task", {"tasks": ["research"]}, session_id="parent"
+        ) is None
+        guard_with_child.on_subagent_start("parent", "child-1", child_goal="research")
+        first, _ = guard_with_child._resolve_warrant("child-1")
+        guard_with_child.on_subagent_start("parent", "child-1", child_goal="research")
+        second, _ = guard_with_child._resolve_warrant("child-1")
+        assert second is first
 
 
 # ---------------------------------------------------------------------------

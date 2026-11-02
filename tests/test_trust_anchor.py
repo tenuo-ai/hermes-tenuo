@@ -15,6 +15,7 @@ def _guard(trusted, on_denial="block", issuer=None):
     )
     roots = [root.public_key] if trusted == "own" else trusted
     guard = HermesGuard(warrant=warrant, signing_key=agent, trusted_roots=roots, on_denial=on_denial)
+    guard.pre_tool_call("delegate_task", {}, session_id="s0")
     guard.on_subagent_start(parent_session_id="s0", child_session_id="s1")
     return guard
 
