@@ -168,6 +168,8 @@ class Hub:
         if not session.online:
             raise HandsUnavailable(f"hands: device '{session.name}' is not up any more. "
                                    "Run `hermes-tenuo hands up` on it again.")
+        if wire.sent_size(cmd) + wire.sent_size(stdin or "") > wire.MAX_TEXT:
+            return "hands: this command and its input are too large to send to the device in one piece\n", 126
         job_id = uuid.uuid4().hex
         pending = {"id": job_id, "cmd": cmd, "login": bool(login), "stdin": stdin, "shown": shown,
                    "deadline": time.monotonic() + int(timeout)}

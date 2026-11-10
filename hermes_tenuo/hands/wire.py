@@ -24,6 +24,25 @@ POLL_SECONDS = 25
 MAX_BODY = 32 * 1024 * 1024
 
 
+MAX_TEXT = 24 * 1024 * 1024  # room for one piece of text inside a message, as it is sent
+
+
+def sent_size(text: str) -> int:
+    """How many bytes `text` takes inside a message. Some characters take six."""
+    return len(json.dumps(text))
+
+
+def fit(text: str) -> str:
+    """`text`, cut if needed so that the message carrying it is never too big to deliver."""
+    size = sent_size(text)
+    if size <= MAX_TEXT:
+        return text
+    while size > MAX_TEXT:
+        text = text[: max(0, int(len(text) * MAX_TEXT / size * 0.95))]
+        size = sent_size(text)
+    return text + "\nhands: output cut to fit one message\n"
+
+
 def b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 

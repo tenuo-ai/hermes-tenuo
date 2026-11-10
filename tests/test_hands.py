@@ -685,3 +685,37 @@ def test_protected_path_that_is_a_link_is_hidden_at_its_real_place(tmp_path, mon
     else:
         argv = sandbox._bwrap(str(tmp_path / "p"), str(tmp_path / "t"), ["true"])
         assert os.path.realpath(elsewhere) in argv and os.path.join(str(home), ".ssh") not in argv
+
+
+def test_folder_named_through_a_link_is_refused(hub, paired, tmp_path):
+    """A narrower warrant is checked against the folder as written; a link must not widen it."""
+    from tenuo import Subpath, Wildcard
+    session = hub.pick(paired.name)
+    src, other = os.path.join(session.folder, "src"), os.path.join(session.folder, "other")
+    os.makedirs(other)
+    os.symlink(other, os.path.join(src, "escape"))
+    builder = session.grant.attenuate_builder()
+    builder.with_capability(wire.TOOL, {"dir": Subpath(src), "cmd": Wildcard()})
+    child = builder.delegate(hub.key)
+    where = os.path.join(src, "escape")
+    args = {"dir": where, "cmd": wire.digest("job-link", "echo x", False, None, 30, "", 0, "")}
+    job = {"id": "job-link", "cmd": "echo x", "login": False, "timeout": 30, "stdin": None, "shown": "", "dir": where,
+           "chain": [session.grant.to_base64(), child.to_base64()], "pop": wire.sign(child, hub.key, wire.TOOL, args)}
+    with pytest.raises(HandsError, match="through a link"):
+        paired.verify(job)
+
+
+def test_output_that_grows_when_sent_still_arrives(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    monkeypatch.setattr(wire, "MAX_TEXT", 60_000)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(
+        r=hub.run(hub.pick(paired.name), "echo x", login=False, timeout=30, stdin=None)))
+    waiter.start()
+    job = paired.poll()
+    paired.report(job["id"], "\x00" * 50_000, 0)  # six bytes each once sent
+    waiter.join(5)
+    out, code = result["r"]
+    assert code == 0 and "cut to fit" in out and wire.sent_size(out) < 70_000
+    big, code = hub.run(hub.pick(paired.name), "cat", login=False, timeout=5, stdin="\x00" * 50_000)
+    assert code == 126 and "too large" in big

@@ -299,6 +299,7 @@ class Device:
             pass
 
     def report(self, job_id: str, output: str, returncode: int) -> None:
+        output = wire.fit(output)
         args = {"job": job_id, "digest": wire.digest(output, returncode)}
         _post(self.url + wire.API + "/result", {
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
@@ -324,7 +325,11 @@ class Device:
         if chain[0].to_base64() != self.grant.to_base64():
             raise HandsError("this command belongs to an old Hands session")
         wire.check(chain, self.key.public_key, wire.TOOL, args, job["pop"])
+        # The warrants were checked against the folder as written, so it must be the real
+        # path: a link inside an allowed folder must not lead the command somewhere else.
         real = os.path.realpath(where)
+        if real != where:
+            raise HandsError("the command names its folder through a link; it must use the real path")
         if not (real == self.folder or real.startswith(self.folder + os.sep)) or not os.path.isdir(real):
             raise HandsError("the command is for a folder this device isn't serving")
         self._seen.add(job_id)
