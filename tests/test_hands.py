@@ -834,7 +834,8 @@ def test_read_only_needs_a_sandbox(hub, folder, monkeypatch):
 def test_hands_up_says_what_commands_can_do(hub, folder):
     device = up(hub, folder)
     said = " ".join(device.lines)
-    assert "change files only in this folder" in said and "network" in said and "keys, credentials" in said
+    assert "change files only in this folder" in said and "network" in said
+    assert "cannot read the rest of your home folder" in said
     device.stop()
 
 
@@ -992,6 +993,138 @@ def test_check_does_not_take_another_service_for_a_hands_server(hub, folder, mon
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- before strangers use it -------------------------------------------------------------------
+
+def test_private_and_public_addresses():
+    for host in ("127.0.0.1", "localhost", "10.1.2.3", "192.168.1.9", "172.20.0.4", "100.101.102.103",
+                 "169.254.1.1", "::1", "[::1]", "fd7a:115c:a1e0::1"):
+        assert wire.private_host(host), host
+    for host in ("8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"):
+        assert not wire.private_host(host), host
+    assert wire.plain_and_public("http://8.8.8.8:8765")
+    assert not wire.plain_and_public("https://8.8.8.8") and not wire.plain_and_public("http://10.0.0.2:8765")
+
+
+def test_device_refuses_an_unencrypted_public_server(hub, folder):
+    key = wire.key_text(hub.key.public_key)
+    public = wire.Invite("http://8.8.8.8:8765", "secret", key).render()
+    with pytest.raises(HandsError, match="not encrypted"):
+        Device(public, str(folder), 60, allow_unsandboxed=True)
+    Device(public, str(folder), 60, allow_unsandboxed=True, plain_http=True)   # the person said so
+    Device(wire.Invite("https://8.8.8.8", "secret", key).render(), str(folder), 60, allow_unsandboxed=True)
+    Device(wire.Invite("http://192.168.1.20:8765", "secret", key).render(), str(folder), 60, allow_unsandboxed=True)
+    from hermes_tenuo.hands.device import check
+    assert any(ok is False and "not encrypted" in text for ok, text in check(public, str(folder)))
+
+
+def test_invite_says_when_its_address_is_public_and_plain(hub, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert "not encrypted" not in chat.command("invite")   # the test hub listens on this machine
+    hub.public_url = "http://8.8.8.8:8765"
+    assert "not encrypted" in chat.command("invite")
+
+
+def test_a_machine_belongs_to_whoever_invited_it(hub, folder, monkeypatch):
+    switched = []
+    hub.joined = lambda conversation, name: switched.append((conversation, name))
+    device = Device(hub.invite("telegram:alice", "chat-a"), str(folder), 60, allow_unsandboxed=True)
+    device.pair()
+    assert switched == [("chat-a", device.name)]          # the conversation that asked starts using it
+    assert hub.pick(device.name).owner == "telegram:alice"
+    assert [s.name for s in hub.sessions("telegram:alice")] == [device.name]
+    assert hub.sessions("telegram:bob") == [] and hub.sessions("") == []
+    with pytest.raises(HandsUnavailable):
+        hub.pick(device.name, "telegram:bob")
+    assert not hub.revoke(device.name, "telegram:bob") and hub.sessions("telegram:alice")
+    # Coming up again with no invite, it is still hers, and nobody is switched again.
+    Device(None, str(folder), 60, allow_unsandboxed=True).pair()
+    assert hub.pick(device.name, "telegram:alice").owner == "telegram:alice" and len(switched) == 1
+    assert hub.revoke(device.name, "telegram:alice") and not hub.sessions()
+
+
+def test_a_machine_paired_with_no_one_asking_is_for_anyone(hub, folder):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)   # a single-user Hermes
+    device.pair()
+    assert hub.pick(device.name, "telegram:bob").owner == "" and hub.sessions("")
+    assert hub.revoke(device.name, "telegram:bob")
+
+
+def test_chat_commands_only_see_your_own_machines(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "chat-a")
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:alice")
+    hub.joined = chat.joined
+    line = chat.command("invite")
+    assert "starts using the machine as soon as it is up" in line
+    Device(line.split("'")[1], str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert chat._wanted.get("chat-a") == "laptop"          # no /hands on needed
+    assert "laptop: up" in chat.command("status")
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:bob")
+    monkeypatch.setattr(chat, "_conversation", lambda: "chat-b")
+    assert "laptop" not in chat.command("status")
+    assert "no device named 'laptop'" in chat.command("on laptop") and "chat-b" not in chat._wanted
+    assert "No machine of yours" in chat.command("revoke laptop")
+    chat._wanted.pop("chat-a", None)
+
+
+@sandboxed
+def test_commands_cannot_read_the_rest_of_the_home_folder(hub, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project, shown = home / "work" / "app", home / "notes"
+    for path in (project, shown, home / "Documents", home / "work" / "other"):
+        path.mkdir(parents=True)
+    (home / "Documents" / "taxes.txt").write_text("papers")
+    (home / "work" / "other" / ".env").write_text("TOKEN=abc")
+    (shown / "ok.txt").write_text("fine")
+    (project / "README.md").write_text("project")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TENUO_HANDS_HOME", raising=False)   # the default place, inside the home folder
+    device = up(hub, project)
+    out, code = run(hub, "cat README.md && echo t > \"$TMPDIR/x\" && cat \"$TMPDIR/x\"")
+    assert code == 0 and "project" in out
+    out, _ = run(hub, f"(cat {home}/Documents/taxes.txt {home}/work/other/.env {shown}/ok.txt; ls {home} {home}/work"
+                      ") 2>/dev/null")
+    assert not any(word in out for word in ("papers", "TOKEN", "fine", "Documents", "other")), out
+    assert any("cannot read the rest of your home folder" in line for line in device.lines)
+    device.stop()
+    device.thread.join(30)
+    # A folder the person names is readable (and still not writable); the rest stays hidden.
+    device = up(hub, project, invite=False, read=[str(shown)])
+    out, _ = run(hub, f"(cat {shown}/ok.txt; echo x > {shown}/new.txt; cat {home}/Documents/taxes.txt) 2>/dev/null")
+    assert "fine" in out and "papers" not in out and not (shown / "new.txt").exists()
+    device.stop()
+    device.thread.join(30)
+    # --read-home shows the home folder again, except the protected paths.
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id").write_text("KEYMATERIAL")
+    device = up(hub, project, invite=False, read_home=True)
+    out, _ = run(hub, f"(cat {home}/Documents/taxes.txt; cat {home}/.ssh/id) 2>/dev/null")
+    assert "papers" in out and "KEYMATERIAL" not in out
+    assert any("--read-home" in line for line in device.lines)
+    device.stop()
+
+
+def test_folders_shown_in_the_home_folder(tmp_path, monkeypatch):
+    from hermes_tenuo.hands.device import shown_in_home
+    home = tmp_path / "home"
+    for sub in (".rustup", ".cargo/bin", ".local/share/uv", "notes", "elsewhere"):
+        (home / sub).mkdir(parents=True)
+    outside = tmp_path / "opt-tools"
+    outside.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / ".cargo" / "bin"), str(outside), "/usr/bin"]))
+    for name in ("RUSTUP_HOME", "PYENV_ROOT", "NVM_DIR", "RBENV_ROOT", "ASDF_DATA_DIR", "VOLTA_HOME", "SDKMAN_DIR",
+                 "JAVA_HOME", "ANDROID_HOME", "GOROOT"):
+        monkeypatch.delenv(name, raising=False)
+    real = os.path.realpath
+    assert set(shown_in_home()) == {real(home / ".rustup"), real(home / ".cargo" / "bin"), real(home / ".local/share/uv")}
+    assert real(home / "notes") in shown_in_home([str(home / "notes")])
+    for bad in (str(home), "/", str(home / "missing")):
+        with pytest.raises(HandsError):
+            shown_in_home([bad])
 
 
 # --- the listener and protected paths ----------------------------------------------------------

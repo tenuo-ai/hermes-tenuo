@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -42,6 +44,38 @@ def fit(text: str) -> str:
         text = text[: max(0, int(len(text) * MAX_TEXT / size * 0.95))]
         size = sent_size(text)
     return text + "\nhands: output cut to fit one message\n"
+
+
+_SHARED = ipaddress.ip_network("100.64.0.0/10")  # carrier-grade NAT space, which Tailscale uses
+
+
+def private_host(host: str) -> bool:
+    """True if `host` is this machine or on a private network: every address it has is a
+    loopback, private, link-local or shared-space one. Commands and results are signed but
+    not encrypted, so a plain connection is only for such a network. A name that cannot be
+    looked up is not judged here; the connection itself will fail and say so."""
+    host = host.strip("[]")
+    try:
+        found = {info[4][0].split("%")[0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        return True
+    for text in found:
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        address = mapped or address
+        if not (address.is_loopback or address.is_private or address.is_link_local
+                or (address.version == 4 and address in _SHARED)):
+            return False
+    return bool(found)
+
+
+def plain_and_public(url: str) -> bool:
+    """True for an address that would carry commands unencrypted across the internet."""
+    parts = urlsplit(url)
+    return parts.scheme == "http" and not private_host(parts.hostname or "")
 
 
 def b64(data: bytes) -> str:

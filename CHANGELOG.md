@@ -23,6 +23,14 @@
   it, and `hands up` prints what commands can and cannot do. `--read-only`
   lets commands read the folder without changing it.
 - A machine that is up pairs again by itself when Hermes restarts.
+- Commands cannot read the home folder outside the shared folder, except
+  toolchains and folders on `PATH`. `--read FOLDER` shows one more folder and
+  `--read-home` shows the home folder except credentials and browser data.
+- The conversation that asked for an invite starts using the machine when it
+  comes up. Where the chat platform says who is writing, a machine belongs to
+  the person who invited it: others cannot see, use or forget it.
+- A machine refuses an unencrypted server that is not on a private network,
+  unless started with `--plain-http`.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 

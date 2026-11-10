@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from hermes_tenuo._home import hermes_home
 from hermes_tenuo.hands import wire
@@ -58,6 +58,7 @@ class Session:
     expires: float
     tmp: str = ""                # where the device keeps temp files for this session
     mode: str = ""               # what holds commands there: "sandboxed", "read-only", "none"; "" = not said
+    owner: str = ""              # who paired it, where the chat platform says who is asking; "" = anyone
     running_until: float = 0.0   # a command is with the device until about then
     gone: bool = False           # the device said it is going down
     last_seen: float = field(default_factory=time.time)
@@ -81,7 +82,9 @@ class Hub:
         self.dir = Path(state_dir) if state_dir else hermes_home() / "tenuo" / "hands"
         self.public_url = public_url.rstrip("/")
         self._lock = threading.RLock()
-        self._invites: Dict[str, float] = {}
+        self._invites: Dict[str, Tuple[float, str, str]] = {}  # secret -> (until, who asked, in which conversation)
+        # Called with (conversation, machine name) when a machine comes up on an invite.
+        self.joined: Optional[Callable[[str, str], None]] = None
         self._paired: Dict[str, float] = {}  # pairing requests already used -> when
         self._sessions: Dict[str, Session] = {}
         self._server: Optional[ThreadingHTTPServer] = None
@@ -122,24 +125,29 @@ class Hub:
 
     # -- what the chat command and the backend call ----------------------------------
 
-    def invite(self) -> str:
+    def invite(self, owner: str = "", conversation: str = "") -> str:
+        """A line that pairs one machine. `owner` is who asked for it: the machine is theirs,
+        and only they can use or forget it. `conversation` is where they asked."""
         if not self.public_url:
             raise HandsUnavailable("Hands has no address to give out. Set hands.url (or hands.listen) in the "
                                    "hermes-tenuo plugin config and restart Hermes.")
         secret = secrets.token_urlsafe(18)
         with self._lock:
             now = time.time()
-            self._invites = {s: t for s, t in self._invites.items() if t > now}
-            self._invites[secret] = now + INVITE_SECONDS
+            self._invites = {s: entry for s, entry in self._invites.items() if entry[0] > now}
+            self._invites[secret] = (now + INVITE_SECONDS, owner, conversation)
         return wire.Invite(self.public_url, secret, wire.key_text(self.key.public_key)).render()
 
-    def sessions(self) -> List[Session]:
+    def sessions(self, owner: Optional[str] = None) -> List[Session]:
+        """The machines that are paired and inside their time window. With `owner` (who is
+        asking), only theirs and those that belong to nobody in particular."""
         with self._lock:
-            return [s for s in self._sessions.values() if time.time() < s.expires]
+            return [s for s in self._sessions.values() if time.time() < s.expires
+                    and (owner is None or s.owner in ("", owner))]
 
-    def pick(self, name: str = "") -> Session:
+    def pick(self, name: str = "", owner: Optional[str] = None) -> Session:
         """The device to use: the named one, or the only one that is up."""
-        up = [s for s in self.sessions() if s.online]
+        up = [s for s in self.sessions(owner) if s.online]
         if name:
             match = [s for s in up if s.name == name]
             if not match:
@@ -153,10 +161,11 @@ class Hub:
             raise HandsUnavailable(f"hands: several devices are up ({names}). Pick one with `/hands on <name>`.")
         return up[0]
 
-    def revoke(self, name: str) -> bool:
+    def revoke(self, name: str, owner: Optional[str] = None) -> bool:
         with self._lock:
             known = self._known()
-            gone = [d for d, info in known.items() if info.get("name") == name]
+            gone = [d for d, info in known.items() if info.get("name") == name
+                    and (owner is None or info.get("owner", "") in ("", owner))]
             for device in gone:
                 known.pop(device)
                 self._sessions.pop(device, None)
@@ -293,16 +302,21 @@ class Hub:
                 raise Refused("this pairing request was already used: run `hermes-tenuo hands up` again")
             known = self._known()
             secret = str(body.get("invite") or "")
-            invited = bool(secret) and self._invites.pop(secret, 0) > time.time()
+            until, asked_by, asked_in = self._invites.pop(secret, (0.0, "", "")) if secret else (0.0, "", "")
+            invited = until > time.time()
             if not invited and device not in known:
                 raise Refused("this device isn't paired: run `/hands invite` in a Hermes chat and use the new line")
             others = {info.get("name") for d, info in known.items() if d != device}
             if name in others:
                 raise Refused(f"another device is already called '{name}': pass --name to choose a different one")
-            known[device] = {"name": name, "paired": known.get(device, {}).get("paired") or time.strftime("%Y-%m-%d")}
+            # A machine belongs to whoever's invite it last used; coming up again without
+            # one, it stays theirs.
+            owner = asked_by if invited else str(known.get(device, {}).get("owner") or "")
+            known[device] = {"name": name, "owner": owner,
+                             "paired": known.get(device, {}).get("paired") or time.strftime("%Y-%m-%d")}
             self._save_known(known)
             new = Session(device, name, folder, grant, identity, device_key,
-                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp, mode=mode)
+                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp, mode=mode, owner=owner)
             new.nonces = [nonce]
             self._paired[nonce] = now
             old = self._sessions.get(device)
@@ -330,6 +344,11 @@ class Hub:
             if old is not None:
                 old.jobs.put(None)  # wake a request the old session still has open
         logger.info("hermes-tenuo hands: device '%s' is up for %s", name, folder)
+        if invited and asked_in and self.joined is not None:
+            try:
+                self.joined(asked_in, name)  # the conversation that asked for it starts using it
+            except Exception as e:  # pairing has succeeded; the switch can still be made by hand
+                logger.warning("hermes-tenuo hands: could not switch the inviting conversation (%s)", e)
         return {"ok": True, "name": name}
 
     def _session(self, body: Dict[str, Any], grace: float = 0.0) -> Session:

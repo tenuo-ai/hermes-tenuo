@@ -40,6 +40,10 @@ class SandboxUnavailable(RuntimeError):
     pass
 
 
+def _home() -> str:
+    return os.path.realpath(os.path.expanduser("~"))
+
+
 def _private_paths() -> List[str]:
     """Each protected path as named and as resolved: one that is a link to somewhere else
     is hidden at its real place too."""
@@ -62,7 +66,7 @@ def _ancestors(path: str) -> List[str]:
 
 
 def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
-                 writable: bool = True) -> str:
+                 writable: bool = True, home_visible: bool = True, tools: Sequence[str] = ()) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -72,10 +76,17 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
     own = f"(subpath {q(folder)}) (subpath {q(tmp)})"
     may_change = own if writable else f"(subpath {q(tmp)})"  # look, don't touch: only its temp folder
     extra = " ".join(f"(subpath {q(p)})" for p in readable)
+    # With the home folder hidden, only `tools` (toolchains and folders the person named)
+    # stay readable in it. The protected paths are refused after that, so one inside a
+    # tool folder stays hidden.
+    home = _home()
+    closed = [] if home_visible else [home]
+    home_rule = [f"(deny file-read* (subpath {q(home)}))"] if closed else []
+    tool_rule = [f"(allow file-read* {' '.join(f'(subpath {q(p)})' for p in tools)})"] if tools else []
     # Folders on the way to an allowed one stay visible by name (not listable), so
     # `mkdir -p` and path lookups work when the allowed folder sits under a hidden one.
-    above = sorted({a for p in (folder, tmp, *readable) for a in _ancestors(p)
-                    if any(a == h or a.startswith(h + os.sep) for h in private)})
+    above = sorted({a for p in (folder, tmp, *readable, *tools) for a in _ancestors(p)
+                    if any(a == h or a.startswith(h + os.sep) for h in [*private, *closed])})
     on_the_way = " ".join(f"(literal {q(a)})" for a in above)
     services = " ".join(f'(global-name "{name}")' for name in _MAC_SERVICES)
     return "\n".join([
@@ -92,7 +103,8 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         "(allow system-socket)", "(allow network-bind (local ip))", "(allow network-inbound (local ip))",
         "(allow network-outbound (remote ip))",
         '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
-        "(allow file-read*)", f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
+        "(allow file-read*)", *home_rule, *tool_rule,
+        f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
         *([f"(allow file-read-metadata {on_the_way})"] if on_the_way else []),
         f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
@@ -102,11 +114,14 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
 
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
-           readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True) -> List[str]:
+           readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True,
+           home_visible: bool = True, tools: Sequence[str] = ()) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
             "--die-with-parent"]
+    if not home_visible:
+        argv += ["--tmpfs", _home()]  # an empty home folder; what commands need from it is put back below
     masked: List[str] = []
     for path in [*_private_paths(), *hidden]:
         path = os.path.realpath(path)  # bubblewrap cannot mount onto a path through a link
@@ -130,6 +145,17 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # Last, so the folder and the temp folder stay usable even under a hidden path.
     # /tmp is the device's own temp folder too.
     argv += ["--bind", tmp, "/tmp"]
+    if not home_visible:
+        # The toolchains and the folders the person named, read-only. A protected path
+        # inside one of them is masked again, since putting the folder back uncovered it.
+        for path in tools:
+            argv += ["--ro-bind", path, path]
+        for path in masked:
+            if any(path.startswith(tool.rstrip(os.sep) + os.sep) for tool in tools):
+                if os.path.isdir(path):
+                    argv += ["--tmpfs", path]
+                elif os.path.exists(path):
+                    argv += ["--ro-bind", "/dev/null", path]
     for path in readable:
         argv += ["--ro-bind", path, path]
     argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
@@ -159,17 +185,20 @@ def available() -> Optional[str]:
 
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
          shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
-         writable: bool = True) -> List[str]:
+         writable: bool = True, home_visible: bool = True, tools: Sequence[str] = ()) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
     `hidden` names more folders a command must not read (the device's own state). With
-    `writable` off the command can read `folder` and change only its temp folder."""
+    `writable` off the command can read `folder` and change only its temp folder. With
+    `home_visible` off the home folder cannot be read at all, except `tools`: real folders
+    in it that hold toolchains, or that the person chose to show."""
     kind = available()
     if kind == "sandbox-exec":
-        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable, hidden, writable), *command]
+        return ["/usr/bin/sandbox-exec", "-p",
+                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools), *command]
     if kind == "bwrap":
-        return _bwrap(folder, tmp, command, shared, readable, hidden, writable)
+        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools)
     if allow_unsandboxed:
         if not writable:
             raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")

@@ -48,6 +48,12 @@ TOOL_HOMES = {
 }
 TOOL_PATHS = ("JAVA_HOME", "ANDROID_HOME", "GOROOT")  # passed on only if set
 
+# Commands cannot read the home folder. These folders in it stay readable when they exist,
+# because programs and interpreters live there; so does every folder on PATH. Places that
+# hold programs, not secrets: the protected paths are still refused inside them.
+TOOL_FOLDERS = (".local/share/uv", ".local/share/mise", ".local/share/pnpm", "Library/pnpm", ".bun", ".deno",
+                "miniconda3", "anaconda3", "miniforge3", "mambaforge")
+
 PROFILE = ".hands_profile"  # in the stand-in home; keeps this device's settings in login shells too
 
 # Runs inside a sandbox and starts the commands, so they share it: a later command can stop
@@ -176,6 +182,12 @@ class HandsError(RuntimeError):
     pass
 
 
+UNENCRYPTED = ("{url} is not encrypted and is not on a private network: anyone between this machine and the "
+               "server could read the commands and their output. Put HTTPS in front of the server (its invite "
+               "then starts with hands+https://), or reach it over a private network such as Tailscale or "
+               "WireGuard. To connect anyway, pass --plain-http.")
+
+
 class _Stopped(Exception):
     """Raised by the stop signal while the device is only waiting for work."""
 
@@ -269,6 +281,30 @@ def _in_sandbox(tmp: str, state: str) -> list:
     return found
 
 
+def shown_in_home(extra: Any = ()) -> list:
+    """The real folders inside the home folder that commands may still read: toolchains,
+    folders on PATH, and `extra`, the ones the person named (those may be anywhere)."""
+    real_home = os.path.realpath(os.path.expanduser("~"))
+    wanted = [os.environ.get(name) or os.path.join(real_home, sub) for name, sub in TOOL_HOMES.items()]
+    wanted += [os.environ[name] for name in TOOL_PATHS if os.environ.get(name)]
+    wanted += [os.path.join(real_home, sub) for sub in TOOL_FOLDERS]
+    wanted += [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    found: list = []
+    for path in wanted:
+        real = os.path.realpath(os.path.expanduser(path))
+        if os.path.isdir(real) and _within(real, real_home) and real != real_home and real not in found:
+            found.append(real)
+    for path in extra:
+        real = os.path.realpath(os.path.expanduser(str(path)))
+        if not os.path.isdir(real):
+            raise HandsError(f"--read {path}: not a folder")
+        if real in ("/", real_home):
+            raise HandsError(f"--read {path}: name a folder inside your home folder, or use --read-home for all of it")
+        if real not in found:
+            found.append(real)
+    return found
+
+
 def _run_quiet(argv: list) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
@@ -354,7 +390,7 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         raise ConnectionError(str(getattr(e, "reason", e))) from e
 
 
-def check(invite: Optional[str], folder: str, read_only: bool = False) -> list:
+def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False) -> list:
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
@@ -388,6 +424,10 @@ def check(invite: Optional[str], folder: str, read_only: bool = False) -> list:
             found.append((False, f"{saved} is damaged: pair again with a new `/hands invite` line"))
     else:
         found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
+    if url and wire.plain_and_public(url):
+        found.append((None if plain_http else False,
+                      UNENCRYPTED.format(url=url) if not plain_http else
+                      f"{url} is not encrypted (--plain-http): commands and output can be read on the way"))
     if url:
         # A Hands server answers a request from no device with "no session here" (410).
         # Anything else that answers is a proxy, another service, or a wrong address.
@@ -418,7 +458,8 @@ def check(invite: Optional[str], folder: str, read_only: bool = False) -> list:
 
 class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
-                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False):
+                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
+                 plain_http: bool = False, read_home: bool = False, read: Any = ()):
         self.folder = os.path.realpath(os.path.expanduser(folder))
         if not os.path.isdir(self.folder):
             raise HandsError(f"{folder} is not a folder")
@@ -428,6 +469,11 @@ class Device:
             raise HandsError("the time window must be positive")
         self.allow_unsandboxed = allow_unsandboxed
         self.read_only = read_only  # commands may look at the folder and not change it
+        # Commands cannot read the home folder unless the person says so; what they need
+        # from it (toolchains, and any folder named with --read) is put back.
+        self.read_home = read_home
+        self.shown = shown_in_home(read)
+        self.named = [os.path.realpath(os.path.expanduser(str(path))) for path in read]
         # Where this device keeps its key, its log and the commands' temp folder. Commands
         # never see it (only the temp folder inside), so it cannot overlap what is shared.
         self.state = os.path.realpath(home())
@@ -441,7 +487,7 @@ class Device:
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
-                     writable=not read_only)  # fail before pairing
+                     writable=not read_only, home_visible=read_home, tools=self.shown)  # fail before pairing
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -454,6 +500,8 @@ class Device:
             self.url, self.secret, server = data["url"], "", data["server_key"]
         else:
             raise HandsError("no server paired yet: run `/hands invite` in a Hermes chat and pass the line it prints")
+        if not plain_http and wire.plain_and_public(self.url):
+            raise HandsError(UNENCRYPTED.format(url=self.url))
         self.server_key = wire.public_key(server)
         self.expires = time.time() + ttl_seconds
         self.grant = wire.mint_grant(self.key, self.server_key, self.folder, ttl_seconds)
@@ -698,7 +746,8 @@ class Device:
         try:
             argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
-                                hidden=[self.state], writable=not self.read_only)
+                                hidden=[self.state], writable=not self.read_only,
+                                home_visible=self.read_home, tools=self.shown)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
@@ -939,9 +988,14 @@ class Device:
         if kind is None:
             return ["No sandbox on this machine: commands run with your full access (--no-sandbox)."]
         lines = ["Commands can read this folder and cannot change it (--read-only)." if self.read_only else
-                 "Commands can change files only in this folder.",
-                 "They can read other files on this machine, except your keys, credentials, browser data and shell history.",
-                 "They can use the network."]
+                 "Commands can change files only in this folder."]
+        if self.read_home:
+            lines.append("They can read the rest of your home folder (--read-home), except your keys, credentials, "
+                         "browser data and shell history.")
+        else:
+            lines.append("They cannot read the rest of your home folder, except your toolchains"
+                         + (" and " + ", ".join(self.named) if self.named else "") + ".")
+        lines.append("They can read system files and use the network.")
         if kind == "sandbox-exec":
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
         return lines

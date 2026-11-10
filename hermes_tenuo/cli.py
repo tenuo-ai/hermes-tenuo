@@ -790,7 +790,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
         return 0
     if args.hands_command == "check":
         ok = True
-        for passed, text in device.check(args.invite, args.dir, read_only=args.read_only):
+        for passed, text in device.check(args.invite, args.dir, read_only=args.read_only,
+                                         plain_http=args.plain_http):
             ok = ok and passed is not False
             print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {text}")
         print("\n  Ready: run `hermes-tenuo hands up` with the same arguments." if ok else
@@ -802,7 +803,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
         return 2
     try:
         dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
-                            allow_unsandboxed=args.no_sandbox, read_only=args.read_only)
+                            allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
+                            plain_http=args.plain_http, read_home=args.read_home, read=args.read or ())
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
         return dev.serve()
@@ -903,10 +905,17 @@ def main() -> None:
                       help="Run commands with your full access when this machine has no sandbox")
     up_p.add_argument("--read-only", action="store_true",
                       help="Let commands read the folder but not change it")
+    up_p.add_argument("--plain-http", action="store_true",
+                      help="Connect to a server on the internet without encryption (not recommended)")
+    up_p.add_argument("--read", action="append", metavar="FOLDER",
+                      help="Also let commands read this folder in your home folder (repeatable)")
+    up_p.add_argument("--read-home", action="store_true",
+                      help="Let commands read your whole home folder, except keys, credentials and browser data")
     check_p = hands_sub.add_parser("check", help="See whether this machine is ready for `hands up`, without pairing")
     check_p.add_argument("invite", nargs="?", metavar="INVITE", help="The hands://... line, to test that its server is reachable")
     check_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder you plan to share (default: here)")
     check_p.add_argument("--read-only", action="store_true", help="Check for --read-only use")
+    check_p.add_argument("--plain-http", action="store_true", help="Check for --plain-http use")
     hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
         "--last", type=int, default=20, metavar="N")
 

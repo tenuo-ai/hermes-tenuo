@@ -260,10 +260,13 @@ plugins:
 uvx hermes-tenuo hands up 'hands://my-server:8765/…' --dir . --for 4h
 ```
 
-**Back in the chat**, type `/hands on`. From then on that conversation's
-`terminal`, `read_file`, `write_file` and the other file tools act on your
-machine. `/hands off` returns it to the server. Other conversations, bots and
-scheduled jobs are not affected.
+**Back in the chat**, the conversation that asked for the line starts using
+your machine as soon as it is up: its `terminal`, `read_file`, `write_file`
+and the other file tools act there. `/hands off` returns it to the server and
+`/hands on` switches it back. Other conversations, bots and scheduled jobs are
+not affected. On a chat platform that says who is writing, the machine is
+yours: other people cannot see it, use it or forget it, and a message from
+someone else in a shared chat does not run on it.
 
 | Command | Where | What it does |
 |---|---|---|
@@ -272,7 +275,7 @@ scheduled jobs are not affected.
 | `/hands off` | chat | This conversation runs on the server again. |
 | `/hands status` | chat | Which machines are up, and for how long. |
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
-| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. Add `--read-only` to let commands look at the folder without changing it. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. |
 | `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
 
@@ -280,9 +283,13 @@ What your machine enforces, whatever the server asks:
 
 - **One folder.** Commands run in one sandbox (`sandbox-exec` on macOS,
   bubblewrap on Linux) that can write only to the shared folder and a private
-  temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials,
-  keychains, browser profiles and shell history are unreadable. Other files
-  stay readable, and the network stays on.
+  temp folder. The rest of your home folder cannot be read: not your
+  documents, not other projects, not application data. Your toolchains stay
+  readable (rustup, pyenv, nvm, uv and similar, and folders on your `PATH`),
+  and `--read FOLDER` adds a folder of your choice. With `--read-home` the
+  home folder is readable except `~/.ssh`, `~/.aws`, cloud and package-manager
+  credentials, keychains, browser profiles and shell history, which are never
+  readable. System files stay readable, and the network stays on.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -312,7 +319,9 @@ What your machine enforces, whatever the server asks:
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
-network such as Tailscale or WireGuard. The listener serves a limited number
+network such as Tailscale or WireGuard. Your machine refuses a plain
+`http://` server that is not on a private network or the machine itself,
+unless you pass `--plain-http`. The listener serves a limited number
 of connections, and fewer from any one address, so put a reverse proxy in
 front of it if it is reachable from the internet.
 
@@ -423,7 +432,7 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only]   # on your own machine
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home]   # on your own machine
 hermes-tenuo hands check [INVITE] [--dir FOLDER]
 hermes-tenuo hands log [--last N]
 ```

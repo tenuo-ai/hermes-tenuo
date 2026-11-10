@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Any, Dict
 
+from hermes_tenuo.hands import wire
 from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
 
 logger = logging.getLogger("hermes_tenuo.hands")
@@ -49,6 +50,25 @@ def _conversation() -> str:
         return _scoped("")
 
 
+def _owner() -> str:
+    """Who is asking, where Hermes knows: the chat platform and the person on it. Empty on
+    a single-user Hermes (the CLI, the desktop app), where every machine is the user's."""
+    try:
+        from gateway.session_context import get_session_env
+        person = str(get_session_env("HERMES_SESSION_USER_ID", "") or "")
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "")
+    except Exception:
+        return ""
+    return f"{platform}:{person}" if person else ""
+
+
+def joined(conversation: str, name: str) -> None:
+    """A machine came up on the invite this conversation asked for: use it from now on."""
+    if can_switch:
+        with _lock:
+            _wanted[conversation] = name
+
+
 def _whole_profile() -> bool:
     """True if this profile's terminal backend is Hands itself, for every conversation."""
     try:
@@ -80,19 +100,25 @@ def command(raw_args: str = "") -> str:
                 "url: \"http://<this-server>:8765\"}` under plugins.entries.hermes-tenuo and restart.")
     try:
         if verb == "invite":
-            line = hub.invite()
+            line = hub.invite(_owner(), _conversation())
             local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
             return ("On your machine, in the folder you want to work in, run:\n\n"
                     f"  hermes-tenuo hands up '{line}' --dir . --for 4h\n\n"
-                    "The line works once and for 10 minutes. Then type /hands on here."
+                    "The line works once and for 10 minutes. "
+                    + ("This conversation starts using the machine as soon as it is up; /hands off switches back."
+                       if can_switch else "Then type /hands on here.")
                     + ("\n\nNote: that address only works on the server itself. Set hands.url in the "
-                       "plugin config to an address your machine can reach." if local else ""))
+                       "plugin config to an address your machine can reach." if local else "")
+                    + ("\n\nNote: that address is not encrypted and is on the internet, so your machine "
+                       "will refuse it. Put HTTPS in front of this server and set hands.url to the https:// "
+                       "address, or use a private network such as Tailscale." if wire.plain_and_public(hub.public_url)
+                       else ""))
         if verb == "on":
             if not can_switch:
                 return ("This Hermes version can't switch one conversation to a machine. Set "
                         "`terminal.backend: hands` for a profile to run all of its commands there.")
             name = words[1] if len(words) > 1 else ""
-            session = hub.pick(name)
+            session = hub.pick(name, _owner())
             with _lock:
                 _wanted[_conversation()] = session.name
             left = max(0, int((session.expires - time.time()) / 60))
@@ -110,12 +136,12 @@ def command(raw_args: str = "") -> str:
         if verb == "revoke":
             if len(words) < 2:
                 return "Which machine? /hands revoke <name>"
-            return (f"'{words[1]}' is forgotten; it needs a new invite to come back." if hub.revoke(words[1])
-                    else f"No machine called '{words[1]}'.")
+            return (f"'{words[1]}' is forgotten; it needs a new invite to come back."
+                    if hub.revoke(words[1], _owner()) else f"No machine of yours is called '{words[1]}'.")
         if verb == "status":
             how = {"read-only": ", read-only", "none": ", no sandbox"}
             rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}{how.get(s.mode, '')}, "
-                    f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions()]
+                    f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions(_owner())]
             here = _wanted.get(_conversation())
             if here is None:
                 here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
@@ -289,6 +315,11 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
     except HandsUnavailable:
         session = None  # the backend reports the missing device when the call runs
     folder = session.folder if session is not None else ""
+    if session is not None and session.owner and session.owner != _owner():
+        # The conversation is switched to a machine, but this message is from someone else
+        # (a shared chat). It is not run there, and never falls back to the server either.
+        raise HandsUnavailable(f"hands: '{session.name}' belongs to the person who paired it; this call was not "
+                               "run. They can type /hands off to return this conversation to the server")
     if not whole_profile:
         key = _scoped(task)
         with _lock:
