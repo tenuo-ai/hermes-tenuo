@@ -321,6 +321,7 @@ class TestExpiryCap:
             Warrant.mint_builder()
             .holder(agent_key.public_key)
             .capability("tool:web_search", query=Wildcard())
+            .capability("delegate_task")
             .ttl(60)
             .mint(cloud_key)
         )
@@ -335,8 +336,9 @@ class TestExpiryCap:
             signing_key=agent_key,
             trusted_roots=[cloud_key.public_key],
         )
-        child = guard._attenuate_for_toolsets(parent, [], agent_key)
-        assert child is not None
+        assert guard.pre_tool_call("delegate_task", {}, session_id="parent") is None
+        guard.on_subagent_start("parent", "child")
+        child, _ = guard._resolve_warrant("child")
         assert child.expires_at() <= parent.expires_at()
 
 

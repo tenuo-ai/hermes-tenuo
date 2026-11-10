@@ -215,8 +215,8 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | Scenario | What you do | What you get |
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
-| **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Tool calls from inside `execute_code` still follow the config warrant |
+| **Subagents via `delegate_task`** | Attenuate the parent's warrant for each child | Every child gets a fresh holder key and a verified chain; a researcher cannot suddenly `write_file` |
+| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
@@ -259,7 +259,7 @@ plugins:
 |---|---|
 | `pre_tool_call` | Verifies the tool name and arguments against the session's warrant. On denial, returns `{"action": "block", "message": ...}`; the handler never runs. |
 | `post_tool_call` | Adds timing to the recorded decision and writes the audit record. |
-| `subagent_start` | Hands the `child_warrant` to the new child session. |
+| `subagent_start` | Attaches the one-time child grant staged by the authorised `delegate_task` call. An unexpected child gets no authority. |
 | `on_session_end` | Clears any per-session warrant set with `guard.set_session_warrant()`, so gateway users never share one. |
 
 The decision itself runs in Tenuo's Rust core: signature, expiry, holder
@@ -337,13 +337,71 @@ variable equivalent.
 | `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Required for enforcement: without it every call is blocked (logged instead under `on_denial: log`). Warrants and delegation chains signed by anything else are rejected. |
 | `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
 | `require_warrant` | | If `true`, a loaded plugin blocks calls when no warrant is configured, including under `on_denial: log`. Default `false` preserves unconfigured passthrough. |
-| `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
+| `child_warrant` | `TENUO_CHILD_WARRANT` | Scope template used to attenuate a fresh, parent-chained grant for each `delegate_task` child. |
+| `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a versioned JSON plan that narrows tools, arguments, and TTL at each delegation depth. Mutually exclusive with `child_warrant`. |
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
 
 Keep secret key material in env vars or a secrets manager, never in
 `config.yaml`.
+
+### Delegation plans
+
+Use a delegation plan when different depths of a subagent tree need different
+authority. The plan can only narrow the signed parent warrant; Tenuo rejects a
+child grant that would widen it. Per-task `toolsets` narrow the planned level
+again, and every TTL is atomically capped to the parent's remaining lifetime.
+
+```json
+{
+  "version": 1,
+  "root": {
+    "tools": {
+      "terminal": {
+        "command": {
+          "binaries": ["kubectl"],
+          "patterns": ["^kubectl (get|logs) .+ -n shop$"]
+        }
+      },
+      "delegate_task": {}
+    }
+  },
+  "levels": [
+    {
+      "role": "investigator",
+      "ttl_seconds": 900,
+      "tools": {
+        "terminal": {
+          "command": {
+            "binaries": ["kubectl"],
+            "patterns": ["^kubectl (get|logs) .+ -n shop$"]
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+The root warrant must use matching `All(...)` constraint structure; the
+`hermes_tenuo.delegation.capability_members()` helper builds its members. Keep
+the plan operator-controlled, as a regular file that is not a symlink and is
+not group- or world-writable. Invalid or unreadable plans fail closed during
+plugin startup.
+
+Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
+expire when that call returns, including failed and background calls. Cancelled,
+timed-out, or errored lifecycle posts reserve their goals for the lifetime of the
+guard: retries must use distinct goals because abandoned workers can announce
+children late. Without an originating call ID or goal, start a new session
+after cancellation. Concurrent
+invocations with overlapping child goals are rejected because Hermes does not
+include the originating call ID in its child-start hook. Use distinct goals for
+concurrent delegations. Control actions (`list`, `steer`, `stop`) create no grants.
+A spawn denied by the warrant is blocked even under `on_denial: log`. Letting
+it run could attach its child to another invocation’s pending grant. Ordinary
+non-spawn calls retain log-only behavior.
 
 ## Things to know
 

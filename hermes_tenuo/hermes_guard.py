@@ -9,9 +9,13 @@ Typical use is the plugin entry point. You can also construct
 
 Invariants:
     - Agents consume warrants; they do not mint them.
-    - ``delegate_task`` children get a grant from the parent (``grant_builder``
-      or attenuation). Pass ``parent_warrant`` into ``set_session_warrant``
-      so the hop is verified as a chain.
+    - ``delegate_task`` children get a grant from the parent's warrant, one
+      per task, staged when the call is authorised and attached at
+      ``subagent_start``; the hop is verified as a chain. A child with no
+      staged grant holds no authority.
+    - Tool calls without a session id (``execute_code``) are attributed by
+      task id, never silently checked against the config warrant once more
+      than one warrant is in use.
     - Concurrent gateway sessions must use ``set_session_warrant`` per
       session with independently minted warrants. The single-agent child
       heuristic is not safe there.
@@ -20,15 +24,20 @@ Invariants:
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import sys
 import threading
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("hermes_tenuo")
+
+# Session marker: a subagent that a delegation plan did not authorise.
+_NO_AUTHORITY = object()
 
 # Bounded waits for signed receipts still in the deferred emitter's queue.
 _SESSION_END_FLUSH_SECS = 2.0
@@ -49,14 +58,7 @@ def _log_receipt_error(exc: BaseException) -> None:
 
 
 def _connect_control_plane() -> Any:
-    """Return the process control-plane client, with Cloud receipts when possible.
-
-    With ``TENUO_CONNECT_TOKEN`` set and ``tenuo[cloud]`` installed, the client
-    gets a ``CloudReceiptSink``, so every decision over a presented warrant is
-    also delivered to Tenuo Cloud as a signed receipt. Without the cloud SDK,
-    decisions still stream but no receipts are produced. Any failure here falls
-    back to the plain client: receipts never affect authorization.
-    """
+    """Return the process control-plane client, adding Cloud receipts when available."""
     from tenuo.control_plane import get_client, get_or_create
 
     if get_client() is not None or not os.environ.get("TENUO_CONNECT_TOKEN"):
@@ -99,6 +101,91 @@ def _flush_receipts(client: Any, timeout: float) -> None:
             logger.warning("hermes-tenuo: receipts still pending after %.0fs", timeout)
     except Exception as exc:  # noqa: BLE001
         logger.warning("hermes-tenuo: receipt flush failed: %s", _safe_error_message(exc))
+
+
+@dataclass
+class _ChildGrant:
+    """A warrant granted to one delegated child, waiting for its session id."""
+    warrant: Any
+    chain: List[Any]        # ancestor warrants, root first
+    key: Any                # the child's own signing key
+    goal: Optional[str]     # the task goal, matched against subagent_start
+    invocation_id: str = ""  # originating delegate_task tool_call_id
+
+
+def _toolset_list(value: Any) -> Optional[List[str]]:
+    """None when no toolsets were named; otherwise the names as a list."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return []
+
+
+def _is_delegation_spawn(tool_name: str, args: Dict[str, Any]) -> bool:
+    action = str(args.get("action") or "").strip().lower()
+    return tool_name.removeprefix("tool:") == "delegate_task" and action in {"", "spawn"}
+
+
+def _delegated_tasks(args: Dict[str, Any]) -> List[Tuple[Optional[str], Optional[List[str]]]]:
+    """(goal, toolsets) for each child a delegate_task call spawns, in Hermes's order.
+
+    ``tasks`` wins when it is a non-empty list (Hermes also accepts it as a
+    JSON string); otherwise ``goal`` is a single task. A task's own
+    ``toolsets`` override the top-level ones. ``None`` means none were named.
+    """
+    top = _toolset_list(args.get("toolsets"))
+    tasks = args.get("tasks")
+    if isinstance(tasks, str):
+        try:
+            tasks = json.loads(tasks)
+        except ValueError:
+            tasks = None
+    if isinstance(tasks, list) and tasks:
+        out = []
+        for task in tasks:
+            if isinstance(task, dict):
+                goal = task.get("goal")
+                toolsets = _toolset_list(task["toolsets"]) if "toolsets" in task else top
+                out.append((goal if isinstance(goal, str) else None, toolsets))
+            else:
+                out.append((task if isinstance(task, str) else None, top))
+        return out
+    goal = args.get("goal")
+    return [(goal if isinstance(goal, str) else None, top)]
+
+
+def _allows_unknown_args(warrant: Any, tool: str) -> bool:
+    """Whether *warrant* lets *tool* take arguments it does not name (``_allow_unknown``).
+
+    The Python binding does not expose the flag, so ask the core: a call
+    with an argument no warrant names fails as an unknown field only when
+    the flag is off.
+    """
+    probe = "__hermes_tenuo_probe__"
+    reason = warrant.check_constraints(tool, {probe: 0})
+    return not (reason and probe in str(reason) and "unknown field" in str(reason))
+
+
+def _alias_is_no_broader(warrant: Any, exact: str, alternate: str) -> bool:
+    """Whether *alternate* is a safe substitute for *exact* in one warrant."""
+    capabilities = warrant.capabilities or {}
+    exact_args = capabilities.get(exact)
+    alternate_args = capabilities.get(alternate)
+    if exact_args is None or alternate_args is None:
+        return False
+    if not _allows_unknown_args(warrant, exact) and _allows_unknown_args(warrant, alternate):
+        return False
+    if not set(exact_args).issubset(alternate_args):
+        return False
+    try:
+        for name, parent_constraint in exact_args.items():
+            parent_constraint.validate_attenuation(alternate_args[name])
+    except Exception:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +251,12 @@ class HermesGuard:
         Pass ``warrant`` and ``signing_key``. One session at a time.
 
     ``delegate_task``:
-        After the parent call is allowed, attach a grant from the parent
-        warrant (``grant_builder`` or ``subagent_start`` attenuation) with
-        ``set_session_warrant(..., parent_warrant=parent)`` so the chain
-        is verified.
+        When the parent's call is allowed, each task gets a warrant granted
+        from the parent's (``child_warrant`` scope if configured, else the
+        parent's own, narrowed by any toolsets named on the call) and a
+        fresh key. ``subagent_start`` attaches it to the child session with
+        the parent chain. A ``delegation_plan`` replaces this with per-depth
+        grants.
 
     Multi-user gateway:
         The single-agent child heuristic is not safe when sessions run
@@ -189,6 +278,7 @@ class HermesGuard:
         audit_callback: Optional[AuditCallback] = None,
         approval_handler: Optional[Callable] = None,
         require_session_warrant: Optional[bool] = None,
+        delegation_plan: Optional[Any] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
@@ -200,6 +290,13 @@ class HermesGuard:
         self._approval_handler = approval_handler
         # None = on once set_session_warrant has been used; True/False override.
         self._require_session_warrant = require_session_warrant
+        # Per-depth argument grants for delegate_task trees (hermes_tenuo.delegation).
+        self._delegation_plan = delegation_plan
+        # parent session → grants staged by an authorised delegate_task, awaiting subagent_start
+        self._planned_children: Dict[str, deque] = {}
+        # Cancelled workers may announce children late. Never reuse their goals.
+        self._cancelled_goals: Dict[str, set] = {}
+        self._cancelled_invocations: set = set()
         self._audit_only_warned = False  # warn once when running without a warrant
         self._uses_session_warrants = False  # set by set_session_warrant (gateway)
 
@@ -213,21 +310,23 @@ class HermesGuard:
         self._primary_session_id: Optional[str] = None
         self._primary_lock = threading.Lock()
 
-        # Pending child warrants: (parent_session_id, task_index) → warrant
-        self._pending_child_warrants: Dict[Tuple[str, int], Any] = {}
-        self._pending_lock = threading.Lock()
+        self._pending_lock = threading.Lock()  # guards _planned_children
+        self._saw_subagent_start = False
 
-        # Per-parent child counter for task_index assignment
-        self._child_counters: Dict[str, int] = {}
-        self._counter_lock = threading.Lock()
+        # task id → session ids seen with it (attributes sessionless execute_code calls)
+        self._task_sessions: Dict[str, set] = {}
+        self._task_lock = threading.Lock()
+        # Once the table is full, unknown task IDs remain fail-closed instead
+        # of evicting live ambiguity information and later trusting a singleton.
+        self._task_attribution_saturated = False
 
         # Pre-hook decisions: tool_call_id → (allowed, reason)
         # Stored by pre_tool_call so post_tool_call can record the accurate outcome.
         self._pre_decisions: Dict[str, Tuple[bool, str]] = {}
         self._pre_decisions_lock = threading.Lock()
 
-        # Connect to control plane (auto-discovers from env if not already
-        # connected); adds Cloud receipts when tenuo[cloud] is installed.
+        # Connect to control plane (auto-discovers from env if not already connected);
+        # adds signed Cloud receipts when the optional SDK is installed.
         self._control_plane = _connect_control_plane()
 
     @property
@@ -315,195 +414,323 @@ class HermesGuard:
         if entry is not None:
             return entry
 
-        if self._child_warrant is not None or self._pending_child_warrants:
-            # Lock ordering: _primary_lock → _pending_lock → _counter_lock → _session_lock.
-            # Acquire _primary_lock to determine the child warrant, then release it
-            # before touching _session_lock (set_session_warrant / _session_warrant_chains).
-            child_w = None
-            parent_w = None
-            is_child_session = False
-
+        if self._planned_children and not self._saw_subagent_start:
+            # Fallback for a Hermes build that does not fire subagent_start:
+            # the first session seen is the primary, and a new session id
+            # after an authorised delegate_task claims the next staged grant.
+            # Only safe when one parent runs at a time (CLI / cron); gateways
+            # attach session warrants explicitly and never reach this branch.
+            # Lock ordering: _primary_lock → _pending_lock → _session_lock.
+            grant = None
             with self._primary_lock:
                 if self._primary_session_id is None and session_id:
                     self._primary_session_id = session_id
                 elif self._primary_session_id != session_id and session_id:
-                    # V1 LIMITATION: single-parent-session only.
-                    # This heuristic is ONLY safe for single-agent deployments
-                    # (CLI / cron) where one parent runs at a time.
-                    # For multi-user gateways, use set_session_warrant() per
-                    # session instead — explicit session warrants bypass this
-                    # branch entirely (the session-registry lookup above).
-                    # subagent_start (wired Jun 2026) injects child warrants before
-                    # the first tool call, making this path a fallback for older builds.
-                    pending = self._claim_child_warrant(self._primary_session_id)
-                    if pending is not None:
-                        is_child_session = True
-                        if isinstance(pending, tuple):
-                            child_w, parent_w = pending
-                        else:
-                            child_w = pending
-                    # Note: if pending is None (no delegation happened for this primary),
-                    # this session is treated as a new independent session and falls
-                    # through to _static_warrant. We intentionally do NOT fall back to
-                    # _child_warrant here: a session with no pending warrant is a
-                    # concurrent parent session, not a child, so giving it _child_warrant
-                    # (potentially narrower or broader) would be wrong. The _child_warrant
-                    # fallback only applies inside _attenuate_for_toolsets when delegation
-                    # is actually in progress.
-            # _primary_lock released — now safe to acquire _session_lock
-
-            if is_child_session and child_w is not None:
-                if parent_w is not None:
-                    with self._session_lock:
-                        self._session_warrant_chains[session_id] = parent_w
-                self.set_session_warrant(session_id, child_w, self._static_signing_key)
-                return child_w, self._static_signing_key
+                    # No staged grant: a new independent session, not a child.
+                    grant = self._claim_child_grant(self._primary_session_id)
+            if grant is not None:
+                self._attach_child(session_id, grant)
+                return grant.warrant, grant.key
 
         return self._static_warrant, self._static_signing_key
 
     # ------------------------------------------------------------------
-    # delegate_task child warrant pre-registration
+    # delegate_task: one grant per child, staged when the call is allowed
     # ------------------------------------------------------------------
 
-    def _attenuate_for_toolsets(
-        self,
-        parent_warrant: Any,
-        toolsets: List[str],
-        signing_key: Any,
-    ) -> Optional[Any]:
-        """Attenuate the parent warrant to only the tools in the given Hermes toolsets.
+    def _tools_for_toolsets(self, toolsets: List[str], tools: List[str]) -> set:
+        """The subset of *tools* (warrant tool names) that *toolsets* cover.
 
-        Uses parent_warrant.attenuate_builder() with inherit_all() and
-        retain_tools() so parent constraints are kept and the child cannot
-        exceed the parent's scope.
+        A toolset that does not resolve contributes nothing, so a typo
+        narrows the child instead of widening it.
         """
+        wanted: set = set()
         try:
-            # Resolve toolset names → Hermes tool names
-            requested_tools: set = set()
-            resolution_failed = False
-            for ts in (toolsets or []):
+            from toolsets import resolve_toolset
+        except ImportError:
+            resolve_toolset = None
+        for ts in toolsets:
+            if resolve_toolset is not None:
                 try:
-                    from toolsets import resolve_toolset
-                    requested_tools.update(resolve_toolset(ts))
-                except ImportError:
-                    resolution_failed = True
-                    break
+                    wanted.update(resolve_toolset(ts) or [])
                 except Exception:
                     pass
+            # Also support a literal tool name and the conventional prefix
+            # form ("web" covers "web_search"). This keeps custom tools
+            # usable whether or not Hermes's toolset registry is importable.
+            for t in tools:
+                bare = t.removeprefix("tool:")
+                if bare == ts or bare.startswith(ts + "_"):
+                    wanted.add(bare)
+        return {t for t in tools if t.removeprefix("tool:") in wanted}
 
-            # Get parent's authorized tool names
-            parent_tools = set(parent_warrant.tools or [])
+    def _child_warrant_grants(self, parent_warrant: Any) -> Tuple[Dict[str, Dict[str, Any]], int]:
+        """Capabilities and TTL the configured ``child_warrant`` asks for, under *parent_warrant*.
 
-            # Determine which tools to keep in the child
-            if requested_tools:
-                # Map bare names to tool: prefixed names used on some warrants
-                keep = set()
-                for bare in requested_tools:
-                    for candidate in (f"tool:{bare}", bare):
-                        if candidate in parent_tools:
-                            keep.add(candidate)
-            elif not toolsets:
-                # No toolsets specified → child keeps the parent's tools
-                keep = parent_tools
-            elif resolution_failed:
-                # Hermes toolsets module unavailable — match toolset names as prefixes
-                # e.g. "web" matches "tool:web_search", "tool:web_extract"
-                keep = set()
-                for ts in toolsets:
-                    for t in parent_tools:
-                        bare = t.removeprefix("tool:")
-                        if bare == ts or bare.startswith(ts + "_") or bare.startswith(ts):
-                            keep.add(t)
-            else:
-                # Toolsets were named but none resolved to a parent tool
-                # (typo, empty toolset). Do not widen the child to the parent.
-                keep = set()
-
-            if not keep:
-                logger.warning(
-                    "hermes-tenuo: toolsets %s matched no parent tools — "
-                    "not widening the child to the parent's full scope",
-                    toolsets,
-                )
-                return self._child_warrant
-
-            # Build attenuated child via attenuate_builder:
-            # inherit_all() copies the parent's constraints, then retain_tools()
-            # keeps only the requested subset. with_tools() adds tools, so after
-            # inherit_all() it cannot narrow.
-            b = parent_warrant.attenuate_builder()
-            b.inherit_all()
-            b.retain_tools(sorted(keep))
-            # Tenuo 0.3.5 rejects (rather than silently caps) a requested TTL
-            # that would outlive the parent. Let the core atomically cap this
-            # request at build time, avoiding a wall-clock race (I3).
-            b.with_ttl_capped_to_parent(3600)
-            child = b.delegate(signing_key)
-
-            # Log scope reduction clearly — important for demo and audit
-            parent_tool_count = len(set(parent_warrant.tools or []))
-            logger.info(
-                "hermes-tenuo: delegation scope — parent has %d tools, child gets %d "
-                "(toolsets=%s, tools=%s)",
-                parent_tool_count,
-                len(keep),
-                toolsets,
-                sorted(keep),
+        Each tool keeps the parent's constraints and takes the child warrant's
+        constraints where it names them; Tenuo rejects the grant if any of
+        them is wider than the parent. Tools the parent does not hold are
+        dropped. Raises ValueError if the child warrant has expired.
+        """
+        child = self._child_warrant
+        remaining = int(child.ttl_remaining.total_seconds())
+        if child.is_expired() or remaining <= 0:
+            raise ValueError("the configured child_warrant has expired")
+        parent_caps = parent_warrant.capabilities or {}
+        caps: Dict[str, Dict[str, Any]] = {}
+        dropped = []
+        for tool, args in (child.capabilities or {}).items():
+            match = next(
+                (t for t in (tool, f"tool:{tool}", tool.removeprefix("tool:")) if t in parent_caps),
+                None,
             )
-            return child
+            if match is None:
+                dropped.append(tool)
+                continue
+            merged = dict(parent_caps[match])
+            merged.update(args)
+            # Keep "other arguments allowed" only where both warrants allow it.
+            if merged and _allows_unknown_args(child, tool) and _allows_unknown_args(parent_warrant, match):
+                merged["_allow_unknown"] = True
+            caps[match] = merged
+        if dropped:
+            logger.warning(
+                "hermes-tenuo: child_warrant tools %s are not held by the delegating "
+                "warrant; the child does not get them", sorted(dropped),
+            )
+        return caps, remaining
 
+    def _grant_children(
+        self, parent_session_id: str, tasks: List[Tuple[Optional[str], Optional[List[str]]]],
+        invocation_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Grant one warrant per delegated task from the parent's warrant; block if impossible.
+
+        With ``child_warrant`` configured, each child gets that scope, granted
+        under the parent so the hop verifies as a chain. Without it, the child
+        keeps the parent's scope (Hermes children inherit the parent's
+        toolsets). Toolsets named on the call narrow either one further.
+        Every child gets a fresh key that only it holds.
+        """
+        from tenuo import SigningKey
+
+        parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
+        if parent_warrant is None or parent_warrant is _NO_AUTHORITY or parent_key is None:
+            return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
+        chain = self._chain_for(parent_session_id) + [parent_warrant]
+        parent_tools = list(parent_warrant.tools or [])
+        grants = []
+        goal_scopes: Dict[str, frozenset[str]] = {}
+        try:
+            child_caps: Optional[Dict[str, Dict[str, Any]]] = None
+            ttl = 3600  # a requested maximum; the core caps it at the parent's expiry
+            if self._child_warrant is not None:
+                child_caps, ttl = self._child_warrant_grants(parent_warrant)
+            for goal, toolsets in tasks:
+                keep = set(child_caps) if child_caps is not None else set(parent_tools)
+                if toolsets is not None:
+                    keep &= self._tools_for_toolsets(toolsets, parent_tools)
+                if not keep:
+                    return {
+                        "action": "block",
+                        "message": (
+                            "tenuo: delegation rejected: the child would hold no tools"
+                            + (f" (toolsets={toolsets})" if toolsets is not None else "")
+                        ),
+                    }
+                if goal is not None:
+                    scope = frozenset(keep)
+                    prior_scope = goal_scopes.setdefault(goal, scope)
+                    if prior_scope != scope:
+                        return {
+                            "action": "block",
+                            "message": (
+                                "tenuo: delegation rejected: duplicate child goals "
+                                "have different authority"
+                            ),
+                        }
+                child_key = SigningKey.generate()
+                builder = parent_warrant.attenuate_builder()
+                builder.inherit_all()
+                builder.retain_tools(sorted(keep))
+                if child_caps is not None:
+                    for tool in sorted(keep):
+                        builder.with_capability(tool, child_caps[tool])
+                builder.with_holder(child_key.public_key)
+                # This is an atomic cap in the signed delegation operation. It
+                # cannot accidentally request a lifetime beyond the parent.
+                builder.with_ttl_capped_to_parent(ttl)
+                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
+                    # The child can't delegate, so its grant can't be delegated either.
+                    builder.terminal()
+                child = builder.delegate(parent_key)
+                logger.info(
+                    "hermes-tenuo: delegation scope: parent has %d tools, child gets %s",
+                    len(parent_tools), sorted(keep),
+                )
+                grants.append(_ChildGrant(child, chain, child_key, goal, invocation_id))
         except Exception as exc:
-            logger.warning("hermes-tenuo: attenuation failed (%s), using static child_warrant", exc)
-            return self._child_warrant
+            error_type = type(exc).__name__
+            logger.warning("hermes-tenuo: delegation grant failed (%s)", error_type)
+            return {"action": "block", "message": f"tenuo: delegation rejected ({error_type})"}
+        return self._stage_grants(parent_session_id, grants)
 
-    def _register_child_warrants(
-        self, parent_session_id: str, task_count: int, toolsets: Optional[List[str]] = None
+    def _register_planned_children(
+        self, parent_session_id: str, tasks: List[Tuple[Optional[str], Optional[List[str]]]],
+        invocation_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Grant each child of one delegate_task call its plan level; block if impossible.
+
+        Each child gets a fresh key, so its warrant is bound to a key only it holds.
+        """
+        from tenuo import SigningKey
+
+        plan = self._delegation_plan
+        depth = len(self._chain_for(parent_session_id)) + 1
+        level = plan.level(depth)
+        if level is None:
+            return {"action": "block",
+                    "message": f"tenuo: delegation depth {depth} is beyond the delegation plan (max {plan.max_depth})"}
+        parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
+        if parent_warrant is None or parent_warrant is _NO_AUTHORITY or parent_key is None:
+            return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
+        chain = self._chain_for(parent_session_id) + [parent_warrant]
+        try:
+            planned = []
+            goal_scopes: Dict[str, frozenset[str]] = {}
+            level_tools = plan.constraints_for(depth)
+            available_tools = list(level_tools)
+            for goal, toolsets in tasks:
+                keep = set(available_tools)
+                if toolsets is not None:
+                    keep &= self._tools_for_toolsets(toolsets, available_tools)
+                if not keep:
+                    return {
+                        "action": "block",
+                        "message": (
+                            "tenuo: delegation rejected: the child would hold no tools"
+                            + (f" (toolsets={toolsets})" if toolsets is not None else "")
+                        ),
+                    }
+                if goal is not None:
+                    scope = frozenset(keep)
+                    prior_scope = goal_scopes.setdefault(goal, scope)
+                    if prior_scope != scope:
+                        return {
+                            "action": "block",
+                            "message": (
+                                "tenuo: delegation rejected: duplicate child goals "
+                                "have different authority"
+                            ),
+                        }
+                child_key = SigningKey.generate()
+                builder = parent_warrant.attenuate_builder()
+                builder.inherit_all()
+                builder.retain_tools(sorted(keep))
+                for tool in sorted(keep):
+                    tool_args = level_tools[tool]
+                    if tool_args:
+                        builder.with_capability(tool, tool_args)
+                builder.with_holder(child_key.public_key)
+                builder.with_ttl_capped_to_parent(level.ttl_seconds)
+                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
+                    # The child can't delegate, so its grant can't be delegated either.
+                    builder.terminal()
+                planned.append(_ChildGrant(builder.delegate(parent_key), chain, child_key, goal, invocation_id))
+        except Exception as exc:
+            error_type = type(exc).__name__
+            logger.warning("hermes-tenuo: delegation plan grant failed at depth %d (%s)", depth, error_type)
+            return {
+                "action": "block",
+                "message": f"tenuo: delegation to depth {depth} rejected ({error_type})",
+            }
+        return self._stage_grants(parent_session_id, planned)
+
+    def _stage_grants(
+        self, parent_session_id: str, grants: List["_ChildGrant"]
+    ) -> Optional[Dict[str, Any]]:
+        # subagent_start carries a goal, but no originating tool-call ID.
+        # Never let two outstanding invocations compete for the same goal.
+        with self._pending_lock:
+            if any((parent_session_id, g.invocation_id) in self._cancelled_invocations for g in grants):
+                return {"action": "block", "message": "tenuo: delegation invocation was cancelled"}
+            cancelled = self._cancelled_goals.get(parent_session_id, set())
+            if cancelled and any(None in cancelled or g.goal is None or g.goal in cancelled for g in grants):
+                return {
+                    "action": "block",
+                    "message": "tenuo: delegation rejected: cancelled child goal cannot be reused; use a distinct goal",
+                }
+            pending = self._planned_children.setdefault(parent_session_id, deque())
+            if pending and any(
+                not old.invocation_id or not new.invocation_id
+                or old.invocation_id == new.invocation_id
+                or old.goal is None or new.goal is None or old.goal == new.goal
+                for old in pending for new in grants
+            ):
+                return {
+                    "action": "block",
+                    "message": "tenuo: delegation rejected: an outstanding invocation has ambiguous child goals",
+                }
+            pending.extend(grants)
+        return None
+
+    def _finish_delegation(
+        self,
+        session_id: str,
+        invocation_id: str,
+        status: str = "",
+        args: Optional[dict] = None,
+        error_type: str = "",
     ) -> None:
-        """Pre-register attenuated warrants for upcoming child sessions.
-
-        If toolsets is provided, dynamically attenuates the parent warrant.
-        The parent warrant is stored alongside the child so enforcement can
-        pass the full delegation chain to enforce_tool_call (warrant_chain=[parent]).
-        """
-        parent_warrant, signing_key = self._resolve_warrant(parent_session_id)
-
-        # Try dynamic attenuation first if we have both parent warrant and signing key
-        if parent_warrant and signing_key and (toolsets is not None or self._child_warrant is None):
-            child = self._attenuate_for_toolsets(parent_warrant, toolsets or [], signing_key)
-        elif self._child_warrant:
-            child = self._child_warrant
-            parent_warrant = None  # no chain for static child_warrant
-        else:
-            return
-
-        if child is None:
-            return
-        if parent_warrant is not None:
-            # The child presents every ancestor, so it verifies at any depth.
-            parent_warrant = self._chain_for(parent_session_id) + [parent_warrant]
-
-        with self._pending_lock:
-            for i in range(task_count):
-                # Store (child_warrant, parent_warrant) so enforcement can use
-                # the full chain: warrant_chain=[parent] + child as leaf
-                self._pending_child_warrants[(parent_session_id, i)] = (child, parent_warrant)
-        logger.debug(
-            "hermes-tenuo: pre-registered %d child warrant(s) for session %s (chain=%s)",
-            task_count, parent_session_id, parent_warrant is not None,
+        # Normal returns occur after child construction. Cancellation/timeout
+        # posts can precede worker exit, so reserve those goals permanently for
+        # this guard. Session-end must not erase protection against late hooks.
+        abandoned = status in {"cancelled", "timeout"} or (
+            status == "error" and error_type != "tool_error"
         )
-
-    def _claim_child_warrant(
-        self, parent_session_id: str
-    ) -> Optional[Any]:
-        """Claim the next pending child warrant for this parent (FIFO by task_index).
-
-        Returns the child warrant (or a (child, parent) tuple if chain is available).
-        """
-        with self._counter_lock:
-            idx = self._child_counters.get(parent_session_id, 0)
-            self._child_counters[parent_session_id] = idx + 1
         with self._pending_lock:
-            return self._pending_child_warrants.pop((parent_session_id, idx), None)
+            pending = self._planned_children.get(session_id)
+            if abandoned:
+                self._cancelled_invocations.add((session_id, invocation_id))
+                goals = {goal for goal, _ in _delegated_tasks(args or {})}
+                self._cancelled_goals.setdefault(session_id, set()).update(goals)
+            if pending is not None:
+                if abandoned:
+                    goals = {g.goal for g in pending if g.invocation_id == invocation_id}
+                    if goals:
+                        self._cancelled_goals.setdefault(session_id, set()).update(goals)
+                remaining = deque(g for g in pending if g.invocation_id != invocation_id)
+                if remaining:
+                    self._planned_children[session_id] = remaining
+                else:
+                    self._planned_children.pop(session_id, None)
+
+    def _claim_child_grant(
+        self, parent_session_id: str, goal: Optional[str] = None
+    ) -> Optional["_ChildGrant"]:
+        """Take the staged grant for the next child of *parent_session_id*.
+
+        With *goal* (Hermes passes the child's goal to ``subagent_start``) only
+        a grant staged for that goal matches. Without it, grants are taken in
+        task order, which is the order Hermes builds the children in.
+        """
+        with self._pending_lock:
+            cancelled = self._cancelled_goals.get(parent_session_id, set())
+            if cancelled and (goal is None or None in cancelled or goal in cancelled):
+                return None
+            queue = self._planned_children.get(parent_session_id)
+            if not queue:
+                return None
+            if goal is None:
+                return queue.popleft()
+            for i, grant in enumerate(queue):
+                if grant.goal == goal:
+                    del queue[i]
+                    return grant
+        return None
+
+    def _attach_child(self, child_session_id: str, grant: "_ChildGrant") -> None:
+        self.set_session_warrant(child_session_id, grant.warrant, grant.key, parent_warrant=grant.chain)
 
     # ------------------------------------------------------------------
     # Hook: on_session_start / on_session_end
@@ -515,35 +742,17 @@ class HermesGuard:
         parent_session_id: Optional[str] = None,
         task_index: Optional[int] = None,
     ) -> None:
-        """Called when Hermes fires on_session_start (fired since upstream commit 455bf2e, Mar 2026).
+        """Called when Hermes fires on_session_start.
 
-        Passes session_id, model, and platform. Does not pass parent_session_id —
-        use the subagent_start hook for child-session warrant injection.
+        Hermes passes session_id, model, and platform, not parent_session_id, so
+        ``subagent_start`` is where child sessions get their grants. If a
+        parent id is ever passed here, the child is attached the same way.
         """
-        # on_session_start fires but without parent_session_id, so this branch only
-        # applies if Hermes ever adds that kwarg. The subagent_start hook is the
-        # authoritative path for child warrant injection today.
-        if parent_session_id and self._child_warrant:
-            claimed = self._claim_child_warrant(parent_session_id)
-            if isinstance(claimed, tuple):
-                child_w, parent_w = claimed
-            else:
-                child_w, parent_w = claimed, None
-            warrant = child_w or self._child_warrant
-            if parent_w is not None:
-                with self._session_lock:
-                    self._session_warrant_chains[session_id] = parent_w
-            self.set_session_warrant(session_id, warrant, self._static_signing_key)
-            logger.debug(
-                "hermes-tenuo: on_session_start fired — child session %s registered "
-                "(parent=%s, chain=%s)",
-                session_id, parent_session_id, parent_w is not None,
-            )
+        if parent_session_id and session_id:
+            self.on_subagent_start(parent_session_id, session_id)
 
     def on_session_end(self, session_id: str) -> None:
         self.clear_session_warrant(session_id)
-        with self._counter_lock:
-            self._child_counters.pop(session_id, None)
         # Reset primary if this was the primary session, so the next session
         # is correctly identified as a new primary rather than a child.
         with self._primary_lock:
@@ -551,6 +760,16 @@ class HermesGuard:
                 self._primary_session_id = None
         with self._session_lock:
             self._session_warrant_chains.pop(session_id, None)
+        with self._pending_lock:
+            abandoned = self._planned_children.pop(session_id, ())
+            if abandoned:
+                self._cancelled_goals.setdefault(session_id, set()).update(g.goal for g in abandoned)
+                self._cancelled_invocations.update((session_id, g.invocation_id) for g in abandoned)
+        with self._task_lock:
+            for task_id in [t for t, s in self._task_sessions.items() if session_id in s]:
+                self._task_sessions[task_id].discard(session_id)
+                if not self._task_sessions[task_id]:
+                    del self._task_sessions[task_id]
         if self._control_plane is not None:
             _flush_receipts(self._control_plane, _SESSION_END_FLUSH_SECS)
 
@@ -562,51 +781,93 @@ class HermesGuard:
         self,
         parent_session_id: Optional[str],
         child_session_id: Optional[str],
+        *,
+        child_goal: Optional[str] = None,
+        child_task_id: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
-        """Called when Hermes fires subagent_start (upstream delegate_tool.py, Jun 2026).
+        """Called when Hermes fires subagent_start (both session ids known, before the child runs).
 
-        This is the authoritative injection point for child-session warrants: both
-        parent and child session IDs are known before the child runs any tool calls.
-        Takes precedence over the heuristic in _resolve_warrant for delegate_task children.
+        Attaches the grant staged when the parent's ``delegate_task`` call was
+        authorised. A child with no matching grant holds no authority: its
+        calls are blocked rather than falling back to the parent's warrant.
         """
         if not parent_session_id or not child_session_id:
             return
-
-        # Prefer a pre-registered pending warrant (staged in pre_tool_call when
-        # delegate_task was authorised) — these carry task-specific attenuation.
-        pending = self._claim_child_warrant(parent_session_id)
-        if pending is not None:
-            child_w, parent_w = (pending if isinstance(pending, tuple) else (pending, None))
-            if parent_w is not None:
-                with self._session_lock:
-                    self._session_warrant_chains[child_session_id] = parent_w
-            self.set_session_warrant(child_session_id, child_w, self._static_signing_key)
-            logger.debug(
-                "hermes-tenuo: subagent_start — child %s registered from pending warrant (parent=%s)",
-                child_session_id, parent_session_id,
-            )
-            return
-
-        # No pending warrant — attenuate live from the parent's warrant.
-        parent_warrant, signing_key = self._resolve_warrant(parent_session_id)
-        if parent_warrant is None:
-            logger.debug(
-                "hermes-tenuo: subagent_start — no warrant for parent %s; child %s falls through to static",
-                parent_session_id, child_session_id,
-            )
-            return
-        child_w = self._attenuate_for_toolsets(parent_warrant, [], signing_key)
-        if child_w is None:
-            return
-        chain = self._chain_for(parent_session_id) + [parent_warrant]
+        self._saw_subagent_start = True  # the session-order fallback is no longer needed
         with self._session_lock:
-            self._session_warrant_chains[child_session_id] = chain
-        self.set_session_warrant(child_session_id, child_w, signing_key)
-        logger.debug(
-            "hermes-tenuo: subagent_start — child %s attenuated from parent %s",
-            child_session_id, parent_session_id,
+            if child_session_id in self._session_warrants:
+                # Hermes may replay lifecycle hooks. Never consume another
+                # one-time grant or revoke an already attached child.
+                return
+        if child_task_id:
+            # Hermes runs the child under this task id; execute_code calls made
+            # by the child carry it without a session id.
+            self._remember_task(child_task_id, child_session_id)
+
+        grant = self._claim_child_grant(parent_session_id, child_goal)
+        if grant is not None:
+            self._attach_child(child_session_id, grant)
+            logger.debug(
+                "hermes-tenuo: subagent_start: child %s attached (parent=%s, depth=%d)",
+                child_session_id, parent_session_id, len(grant.chain),
+            )
+            return
+
+        parent_warrant, _ = self._resolve_warrant(parent_session_id)
+        if parent_warrant is None:
+            # Unconfigured (audit-only) guard: nothing to narrow.
+            return
+        logger.warning(
+            "hermes-tenuo: subagent %s (parent %s) does not match an authorised "
+            "delegate_task call; it holds no authority", child_session_id, parent_session_id,
         )
+        self.set_session_warrant(child_session_id, _NO_AUTHORITY, None)
+
+    # ------------------------------------------------------------------
+    # Sessionless calls (execute_code): attribute by task id
+    # ------------------------------------------------------------------
+
+    _MAX_TASKS = 4096
+
+    def _remember_task(self, task_id: str, session_id: str) -> None:
+        with self._task_lock:
+            sessions = self._task_sessions.get(task_id)
+            if sessions is not None:
+                sessions.add(session_id)
+                return
+            if len(self._task_sessions) >= self._MAX_TASKS:
+                self._task_attribution_saturated = True
+                return
+            self._task_sessions[task_id] = {session_id}
+
+    def _attribute_session(self, session_id: str, task_id: str) -> Tuple[str, Optional[str]]:
+        """Return (session_id, block_reason) for a tool call.
+
+        Hermes dispatches tool calls made inside ``execute_code`` with the
+        task id and no session id. Every agent's own calls carry both, so the
+        task id maps back to the session that ran the script. A sessionless
+        call whose task id maps to no single session is blocked once more
+        than one warrant is in play (sub-agents or gateway sessions), instead
+        of being checked against the config warrant.
+        """
+        if session_id:
+            if task_id:
+                self._remember_task(task_id, session_id)
+            return session_id, None
+        if not task_id and not self._uses_session_warrants:
+            return session_id, None
+        with self._task_lock:
+            sessions = set(self._task_sessions.get(task_id, ()))
+        if len(sessions) == 1:
+            return sessions.pop(), None
+        if self._uses_session_warrants:
+            return session_id, (
+                f"tenuo: this tool call has no session id and its task id {task_id!r} "
+                f"does not identify one session; blocked because more than one warrant "
+                f"is in use"
+            )
+        return session_id, None
 
     # ------------------------------------------------------------------
     # Hook: pre_tool_call
@@ -625,7 +886,17 @@ class HermesGuard:
         Returns {"action": "block", "message": "..."} to block the call,
         or None to allow it.
         """
+        session_id, unattributed = self._attribute_session(session_id, task_id)
+        if unattributed is not None:
+            self._emit_audit(tool_name, args, False, unattributed, session_id, task_id, tool_call_id)
+            self._remember_decision(tool_call_id, False, unattributed)
+            return {"action": "block", "message": unattributed}
         warrant, signing_key = self._resolve_warrant(session_id)
+        if warrant is _NO_AUTHORITY:
+            reason = "tenuo: this subagent was not started by an authorised delegation and holds no authority"
+            self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+            self._remember_decision(tool_call_id, False, reason)
+            return {"action": "block", "message": reason}
 
         # Ensure primary session is tracked even before child sessions appear
         if session_id and self._primary_session_id is None:
@@ -663,18 +934,7 @@ class HermesGuard:
                 "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
             }
 
-        result = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
-
-        # Intercept delegate_task: only pre-register attenuated child warrants if
-        # the delegation call itself was AUTHORIZED. Registering before authorization
-        # would let a denied delegation poison pending slots — the next heuristic
-        # child session could claim a warrant with no valid parent delegation.
-        if tool_name == "delegate_task" and result is None:
-            tasks = args.get("tasks") or []
-            task_count = len(tasks) if isinstance(tasks, list) else 1
-            toolsets = args.get("toolsets") or []
-            self._register_child_warrants(session_id, task_count, toolsets=toolsets)
-
+        result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
 
     def _enforce(
@@ -686,14 +946,18 @@ class HermesGuard:
         session_id: str,
         task_id: str,
         tool_call_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Run enforce_tool_call once against the normalized tool name."""
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Return the hook response and the actual authorization decision.
+
+        Logging a denial may permit execution, but must never mint authority.
+        """
         try:
             from tenuo._enforcement import enforce_tool_call
             from tenuo.config import resolve_trusted_roots
 
             bound = warrant.bind(signing_key)
-            # Ancestors root first; core verifies the whole chain against trusted_roots.
+            # For chain verification: use configured trusted_roots.
+            # If not configured, extract the root from the parent warrant's issuer.
             chain = self._chain_for(session_id)
             with self._trusted_roots_lock:
                 trusted = resolve_trusted_roots(self._trusted_roots)
@@ -701,8 +965,20 @@ class HermesGuard:
             # warrant in the chain being verified. Deriving trust from the
             # credential under test accepts any chain an attacker signs. Without
             # a configured trusted_root, enforce_tool_call fails closed.
+            # Preserve exact matches across the entire chain. If an ancestor
+            # had an exact capability that the leaf dropped, falling back to a
+            # broader alias would bypass the ancestor's restriction.
+            authorization_tool = tool_name
+            alternate = tool_name.removeprefix("tool:") if tool_name.startswith("tool:") else f"tool:{tool_name}"
+            exact_ancestors = [item for item in chain if tool_name in (item.tools or [])]
+            if tool_name not in (warrant.tools or []) and alternate in (warrant.tools or []):
+                if not exact_ancestors or all(
+                    _alias_is_no_broader(item, tool_name, alternate)
+                    for item in exact_ancestors
+                ):
+                    authorization_tool = alternate
             result = enforce_tool_call(
-                tool_name=tool_name,
+                tool_name=authorization_tool,
                 tool_args=args,
                 bound_warrant=bound,
                 trusted_roots=trusted,
@@ -716,7 +992,22 @@ class HermesGuard:
             # failures (bad warrant, expired key, crypto error) should never silently
             # allow execution, regardless of the on_denial setting.
             self._remember_decision(tool_call_id, False, f"Authorization error: {exc}")
-            return {"action": "block", "message": f"Authorization error: {exc}"}
+            return {"action": "block", "message": f"Authorization error: {exc}"}, False
+
+        # Grant validation is part of the effective delegation decision. Do it
+        # before publishing any ALLOW, and never issue authority for log-only denials.
+        grant_rejected = False
+        if result.allowed and _is_delegation_spawn(tool_name, args):
+            tasks = _delegated_tasks(args)
+            if self._delegation_plan is not None:
+                blocked = self._register_planned_children(session_id, tasks, tool_call_id)
+            else:
+                blocked = self._grant_children(session_id, tasks, tool_call_id)
+            if blocked is not None:
+                grant_rejected = True
+                # A plugin policy refusal is not a Rust-attested authorization.
+                result = replace(result, allowed=False, denial_reason=blocked["message"],
+                                 error_type="delegation_rejected", chain_result=None)
 
         if self._control_plane is not None:
             try:
@@ -733,13 +1024,13 @@ class HermesGuard:
             # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
             # so the post record must carry this decision, not "post-dispatch".
             self._remember_decision(tool_call_id, False, reason)
-            if self._on_denial == "log":
+            if self._on_denial == "log" and not grant_rejected and not _is_delegation_spawn(tool_name, args):
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
-                return None
-            return {"action": "block", "message": reason}
+                return None, False
+            return {"action": "block", "message": reason}, False
 
         self._remember_decision(tool_call_id, True, "")
-        return None
+        return None, True
 
     _MAX_PENDING_DECISIONS = 2048
 
@@ -767,9 +1058,34 @@ class HermesGuard:
         session_id: str = "",
         tool_call_id: str = "",
         duration_ms: int = 0,
+        status: str = "",
+        error_type: str = "",
     ) -> None:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
+        # A recorded pre-hook denial wins even when no static warrant exists
+        # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
+        pre = None
+        if tool_call_id:
+            with self._pre_decisions_lock:
+                pre = self._pre_decisions.pop(tool_call_id, None)
+        session_id, unattributed = self._attribute_session(session_id, task_id)
+        if pre is None and unattributed is not None:
+            self._emit_audit(
+                tool_name, args, False, unattributed,
+                session_id, task_id, tool_call_id, duration_ms,
+            )
+            return
+        if _is_delegation_spawn(tool_name, args) and unattributed is None:
+            self._finish_delegation(session_id, tool_call_id, status, args, error_type)
+        if pre is not None:
+            allowed, reason = pre
+            self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
+            return
         warrant, _ = self._resolve_warrant(session_id)
+        if warrant is _NO_AUTHORITY:
+            self._emit_audit(tool_name, args, False, "tenuo: this subagent holds no authority",
+                             session_id, task_id, tool_call_id, duration_ms)
+            return
 
         # In audit-only mode (no warrant), emit a passthrough audit event
         if warrant is None:
@@ -787,17 +1103,8 @@ class HermesGuard:
             self._emit_audit(tool_name, args, True, "audit-only", session_id, task_id, tool_call_id, duration_ms)
             return
 
-        # The pre hook already decided; this record adds timing. Without a stored
-        # decision (no tool_call_id, or a call that skipped the pre hook) the
-        # handler did run, so it is an ALLOW tagged "post-dispatch".
-        allowed = True
-        reason = "post-dispatch"
-        if tool_call_id:
-            with self._pre_decisions_lock:
-                pre = self._pre_decisions.pop(tool_call_id, None)
-            if pre is not None:
-                allowed, reason = pre
-        self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
+        # No correlated pre decision: this is an unobserved post-dispatch event.
+        self._emit_audit(tool_name, args, True, "post-dispatch", session_id, task_id, tool_call_id, duration_ms)
 
     # ------------------------------------------------------------------
     # Internal: audit callback
