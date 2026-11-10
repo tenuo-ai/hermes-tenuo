@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1955,8 +1956,10 @@ def test_extra_read_does_not_expose_a_live_host_socket(tmp_path, monkeypatch):
         listener.bind(address)
         listener.listen(1)
         script = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({address!r})"
+        # The system's Python: the one running the tests may live in the home folder, which is hidden here.
+        python = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
         for exposed in (runtime, tmp_path):
-            argv = sandbox.wrap(str(project), str(temp), [sys.executable, "-I", "-S", "-c", script],
+            argv = sandbox.wrap(str(project), str(temp), [python, "-I", "-S", "-c", script],
                                 home_visible=False, tools=[str(exposed)])
             result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
             assert result.returncode != 0 and "FileNotFoundError" in result.stderr, result.stderr
