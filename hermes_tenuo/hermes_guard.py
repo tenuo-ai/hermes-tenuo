@@ -1036,15 +1036,11 @@ class HermesGuard:
         """
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
-            self._emit_audit(tool_name, args, False, unattributed, session_id, task_id, tool_call_id)
-            self._remember_decision(tool_call_id, False, unattributed)
-            return {"action": "block", "message": unattributed}
+            return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
         reason = _marker_reason(warrant)
         if reason is not None:
-            self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
-            self._remember_decision(tool_call_id, False, reason)
-            return {"action": "block", "message": reason}
+            return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
 
         # Ensure primary session is tracked even before child sessions appear
         if session_id and self._primary_session_id is None:
@@ -1052,19 +1048,13 @@ class HermesGuard:
                 if self._primary_session_id is None:
                     self._primary_session_id = session_id
 
-        # No warrant on this call. An unconfigured single-agent guard is a
-        # documented no-op. A gateway that already called set_session_warrant
-        # is configured: unknown sessions fail closed unless the operator
-        # sets require_session_warrant=False.
+        reason = self._denial_before_enforcement(warrant, signing_key)
+        if reason is not None:
+            return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
+
+        # No warrant on this call: an unconfigured single-agent guard is a
+        # documented no-op.
         if warrant is None:
-            if self._session_warrant_required:
-                return {
-                    "action": "block",
-                    "message": (
-                        "tenuo: no warrant for this session — "
-                        "require_session_warrant is on"
-                    ),
-                }
             if not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
@@ -1073,17 +1063,41 @@ class HermesGuard:
                 )
             return None
 
-        # Enforcement requires a signing key for Proof-of-Possession.
-        # Hard block: a misconfigured demo that silently passes through
-        # defeats the point of running Tenuo at all.
-        if signing_key is None:
-            return {
-                "action": "block",
-                "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
-            }
-
         result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
+
+    def _denial_before_enforcement(self, warrant: Any, signing_key: Optional[Any]) -> Optional[str]:
+        """Why a call is blocked before the warrant is checked, or None if it is not.
+
+        Shared by the pre and post hooks so a call blocked here is never
+        recorded as allowed.
+        """
+        reason = _marker_reason(warrant)
+        if reason is not None:
+            return reason
+        if warrant is None:
+            # A gateway that already called set_session_warrant is configured:
+            # unknown sessions fail closed unless the operator sets
+            # require_session_warrant=False.
+            if self._session_warrant_required:
+                return "tenuo: no warrant for this session — require_session_warrant is on"
+            return None
+        if signing_key is None:
+            # Enforcement requires a signing key for Proof-of-Possession. Hard
+            # block: a misconfigured install that silently passes through
+            # defeats the point of running Tenuo at all.
+            return "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set"
+        return None
+
+    def _block(
+        self, tool_name: str, args: Dict[str, Any], reason: str,
+        session_id: str, task_id: str, tool_call_id: str,
+    ) -> Dict[str, Any]:
+        """Record a denial and return the block response for it."""
+        self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+        # Hermes may fire post_tool_call for a blocked call; it must carry this decision.
+        self._remember_decision(tool_call_id, False, reason)
+        return {"action": "block", "message": reason}
 
     def _enforce(
         self,
@@ -1139,8 +1153,9 @@ class HermesGuard:
             # *policy* denials from the Rust core (result.allowed=False). Internal
             # failures (bad warrant, expired key, crypto error) should never silently
             # allow execution, regardless of the on_denial setting.
-            self._remember_decision(tool_call_id, False, f"Authorization error: {exc}")
-            return {"action": "block", "message": f"Authorization error: {exc}"}, False
+            return self._block(
+                tool_name, args, f"Authorization error: {exc}", session_id, task_id, tool_call_id,
+            ), False
 
         # Grant validation is part of the effective delegation decision. Do it
         # before publishing any ALLOW, and never issue authority for log-only denials.
@@ -1229,10 +1244,12 @@ class HermesGuard:
             allowed, reason = pre
             self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
             return
-        warrant, _ = self._resolve_warrant(session_id)
-        marker_reason = _marker_reason(warrant)
-        if marker_reason is not None:
-            self._emit_audit(tool_name, args, False, marker_reason,
+        # No pre decision to go by (no tool-call id, or an older Hermes). A
+        # call the pre hook would have blocked outright is still a denial.
+        warrant, signing_key = self._resolve_warrant(session_id)
+        denial = self._denial_before_enforcement(warrant, signing_key)
+        if denial is not None:
+            self._emit_audit(tool_name, args, False, denial,
                              session_id, task_id, tool_call_id, duration_ms)
             return
 

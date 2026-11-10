@@ -199,11 +199,15 @@ Mint onto the path the worker loads:
 
 ```bash
 hermes-tenuo mint --task <task_id> --ttl 2h \
+  --issuer-key issuer.key --holder-public-key holder.pub \
   --allow read_file:path=/data/that-card
 ```
 
-That writes `~/.hermes/tenuo/warrants/<task_id>.warrant` for the
-current holder (`TENUO_SIGNING_KEY` if set). A worker with no file
+That writes `~/.hermes/tenuo/warrants/<task_id>.warrant`, signed by
+the issuer the worker's `trusted_root` names, for the worker's holder
+key. Without `--issuer-key` the warrant is signed by a new issuer each
+time, and the worker rejects it until `trusted_root` is changed to
+match. A worker with no file
 is blocked entirely — it must not fall back to the install-wide
 warrant. A denial marks the task blocked on the board.
 

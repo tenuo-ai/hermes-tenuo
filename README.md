@@ -140,7 +140,8 @@ hermes
   its hooks. This does not look at your warrant. If it cannot find the plugin,
   go back to step 1.
 - `uvx hermes-tenuo doctor` — checks the config you pasted, the warrant, its
-  expiry, and that the signing key matches the warrant holder. Fix anything it
+  expiry, that the signing key matches the warrant holder, and that
+  `trusted_root` is the issuer that signed the warrant. Fix anything it
   marks with `✗` before you start Hermes. This command runs outside Hermes, so
   it does not report the enforcement path.
 - `hermes` — start the agent.
@@ -217,7 +218,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Attenuate the parent's warrant for each child | Every child gets a fresh holder key and a verified chain; a researcher cannot suddenly `write_file` |
 | **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts and `guard.clear_session_warrant(session_id)` when it ends | That user's tools follow that warrant on every turn until you clear it. A cleared session is denied; it never falls back to the config warrant. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
-| **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
+| **Kanban workers** | `hermes-tenuo mint --task <id> --issuer-key issuer.key --holder-public-key holder.pub --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant`, signed by the issuer the worker's `trusted_root` names; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
 Runnable versions of the first three live in
@@ -319,8 +320,9 @@ hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
 After a catalog install these commands are not on your path. Prefix each
 one with `uvx `.
 
-`uvx hermes-tenuo doctor` checks the config, warrant validity and expiry, and
-that the signing key matches the warrant holder. Export
+`uvx hermes-tenuo doctor` checks the config, warrant validity and expiry,
+that the signing key matches the warrant holder, that `trusted_root` signed
+the warrant, and that a configured delegation plan loads. Export
 `TENUO_SIGNING_KEY` in that shell first, because `uvx` does not load
 `~/.hermes/.env`. It does not report the enforcement path. Confirm Hermes
 loaded the plugin with `hermes plugins doctor hermes-tenuo`. Run both after
@@ -520,6 +522,13 @@ Give the agent `reports.warrant` and the trusted `issuer.pub`. Configure
 (the trusted-root setting does not read a file path). Load the holder
 private file into the agent's `TENUO_SIGNING_KEY` environment variable using your
 secret manager. Do not give the agent `issuer.key`.
+
+For a kanban worker, replace `--out` with `--task ID`. The warrant is written
+to `~/.hermes/tenuo/warrants/ID.warrant` and replaces any earlier one for that
+task, so every task is signed by the one issuer in the worker's
+`trusted_root`. Without `--issuer-key`, `mint --task` signs with a new issuer
+each time and prints its public key; the worker accepts that warrant only once
+its `trusted_root` is set to that value.
 
 Optional `--session-id ID` embeds a session binding in the signed warrant. It
 neither discovers a running session nor attaches the warrant to one. Ordinary
