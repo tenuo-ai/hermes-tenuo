@@ -401,6 +401,10 @@ Install the cloud extra to also deliver each decision as a signed receipt:
 pip install "hermes-tenuo[cloud]"
 ```
 
+The extra applies on Python 3.13 and earlier. On Python 3.14, which Hermes's
+managed install uses, it installs nothing: `tenuo-cloud` has no 3.14 build yet,
+so decisions stream without signed receipts there.
+
 A receipt is signed by the agent's key, carries the proof-of-possession
 signature from the call it records, and links to the receipt before it, so a
 removed or edited entry shows up as a broken chain. Receipts are flushed when
