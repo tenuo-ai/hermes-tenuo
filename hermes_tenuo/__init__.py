@@ -103,6 +103,12 @@ def _register_block_all(ctx: Any, deny_msg: str) -> None:
 def register(ctx: Any) -> None:
     """Called by Hermes plugin loader at startup."""
     _register_skills(ctx)
+    try:
+        # Hands is its own feature: it works with or without an enforcement warrant.
+        from hermes_tenuo import hands
+        hands.register(ctx)
+    except Exception as exc:
+        logger.warning("hermes-tenuo: Hands did not start (%s)", exc)
     from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
 
     try:
