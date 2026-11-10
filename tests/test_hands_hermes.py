@@ -88,6 +88,7 @@ SCRIPT = textwrap.dedent('''
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
+    tool("bg_poll_named", "process_manage", {"action": "poll", "session_id": out["bg"]["session"]})
     tool("bg_stop", "terminal", {"command": f"kill {out['bg']['pid']} && echo stopped"})
     # The device goes down and comes back: the same conversation carries on.
     device.stop(); serving.join(20)
@@ -165,6 +166,8 @@ def _on_the_device(out, project, server_dir):
     # Each result says which machine it ran on; a refusal there also says what it shares.
     for key in ("first", "pwd", "read", "write", "escape"):
         assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
+    for key in ("bg_poll", "bg_poll_named"):  # the process tool, under either of its names
+        assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"], (key, out[key])
     assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
     assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
     assert out["pwd"]["note"] is None

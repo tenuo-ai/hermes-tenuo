@@ -341,6 +341,10 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read(wire.MAX_BODY))
     except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            # A proxy in front of the server, or the server itself failing: not an answer
+            # about this device. It is tried again like any lost connection.
+            raise ConnectionError(f"the server answered {e.code}") from e
         try:
             detail = json.loads(e.read(65536)).get("error", "")
         except ValueError:
@@ -981,6 +985,7 @@ class Device:
                     try:
                         self.pair()
                     except ConnectionError as lost:
+                        rejoins -= 1  # the server did not answer: not one of its refusals to remember
                         failures += 1
                         if failures == 1:
                             self.say(f"Can't reach the server ({lost}); retrying.")

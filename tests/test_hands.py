@@ -889,6 +889,50 @@ def test_device_keeps_trying_when_pairing_again_cannot_reach_the_server(hub, fol
 
 
 @sandboxed
+def test_a_proxy_error_while_pairing_again_is_not_a_refusal(hub, folder, monkeypatch):
+    import urllib.error
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    real, failed = device_module.urllib.request.urlopen, {"n": 0}
+
+    def flaky(request, timeout=None):
+        if request.full_url.endswith("/pair") and failed["n"] < 3:
+            failed["n"] += 1
+            raise urllib.error.HTTPError(request.full_url, 502 if failed["n"] % 2 else 503, "Bad Gateway", {}, None)
+        return real(request, timeout=timeout)
+
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", flaky)
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 40
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert failed["n"] == 3 and device.thread.is_alive()
+    assert run(hub, "echo back")[0].strip() == "back"
+    assert not any("ended this session" in line for line in device.lines)
+    device.stop()
+
+
+def test_a_server_error_is_a_lost_connection_and_a_refusal_is_not(monkeypatch):
+    import io
+    import urllib.error
+
+    def answer(code, body=b""):
+        def urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body))
+        return urlopen
+
+    for code in (500, 502, 503, 504):
+        monkeypatch.setattr(device_module.urllib.request, "urlopen", answer(code))
+        with pytest.raises(ConnectionError):
+            device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", answer(403, b'{"error": "this device is not paired"}'))
+    with pytest.raises(HandsError, match="not paired"):
+        device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
+
+
+@sandboxed
 def test_a_revoked_device_does_not_pair_again(hub, folder, monkeypatch):
     monkeypatch.setattr(wire, "POLL_SECONDS", 1)
     device = up(hub, folder)
