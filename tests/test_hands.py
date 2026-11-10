@@ -922,6 +922,7 @@ def test_commands_are_told_where_toolchains_live_but_get_no_secrets(hub, folder,
     real_home = tmp_path / "real-home"
     (real_home / ".rustup").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.delenv("NVM_DIR", raising=False)
     monkeypatch.setenv("JAVA_HOME", "/opt/java")
     monkeypatch.setenv("PYENV_ROOT", str(tmp_path))  # set by the person: passed on as is
     monkeypatch.setenv("NPM_TOKEN", "must-not-reach-a-command")
