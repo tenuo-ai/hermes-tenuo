@@ -119,7 +119,10 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
-            "--die-with-parent"]
+            "--die-with-parent", "--unshare-net"]
+    # A private network namespace also hides abstract Unix sockets, which cannot be
+    # masked with filesystem mounts. Commands have loopback only; the device keeps
+    # its host network connection outside the sandbox.
     emptied: List[str] = []  # folders shown empty; made read-only at the end, once what goes inside is in place
     if not home_visible:
         argv += ["--tmpfs", _home()]  # an empty home folder; what commands need from it is put back below
@@ -214,8 +217,8 @@ def available() -> Optional[str]:
             kind = "sandbox-exec"
         elif sys.platform.startswith("linux") and shutil.which("bwrap"):
             try:
-                tried = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--", "true"], capture_output=True,
-                                       text=True, timeout=10)
+                tried = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--unshare-net", "--", "true"],
+                                       capture_output=True, text=True, timeout=10)
                 ok = tried.returncode == 0
                 if not ok:
                     _refusal.append((tried.stderr or "").strip().splitlines()[-1][:200] if tried.stderr.strip() else "")

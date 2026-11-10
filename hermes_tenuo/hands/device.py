@@ -1022,12 +1022,11 @@ class Device:
         else:
             lines.append("They cannot read the rest of your home folder, except your toolchains"
                          + (" and " + ", ".join(self.named) if self.named else "") + ".")
-        lines.append("They can read system files and use the network.")
         if kind == "sandbox-exec":
+            lines.append("They can read system files and use the network.")
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
-        elif not sandbox.scopes_sockets():
-            lines.append("On this Linux kernel (before 6.12) they can reach other programs' local sockets that are "
-                         "not files; share this machine only with a server you trust.")
+        else:
+            lines.append("They can read system files. They have no network: no internet, and no services on this machine.")
         return lines
 
     def stop(self, *from_signal: Any) -> None:

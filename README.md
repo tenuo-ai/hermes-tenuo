@@ -289,7 +289,9 @@ What your machine enforces, whatever the server asks:
   and `--read FOLDER` adds a folder of your choice. With `--read-home` the
   home folder is readable except `~/.ssh`, `~/.aws`, cloud and package-manager
   credentials, keychains, browser profiles and shell history, which are never
-  readable. System files stay readable, and the network stays on.
+  readable. System files stay readable. On macOS the network stays on; Linux
+  commands have an isolated loopback network with no host or internet access.
+  The device itself can still connect to the Hermes server.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -341,12 +343,12 @@ printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwra
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
-Limits today: macOS and Linux machines only; commands share your machine's
-network, so they can reach services that listen on the machine itself
-(`localhost`); on Linux before kernel 6.12 they can also reach other
-programs' local sockets that are not files, so share such a desktop machine
-only with a server you trust (from 6.12 on they cannot); a machine with no
-sandbox refuses to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
+Limits today: macOS and Linux machines only; on macOS commands share your
+machine's network, so they can reach services that listen on the machine
+itself (`localhost`); Linux commands cannot download dependencies or reach
+host services, and dev servers are reachable only from other commands in the
+same Hands sandbox; a machine with no sandbox refuses
+to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
 see the machines; `/hands on` needs a Hermes version with tool-execution
