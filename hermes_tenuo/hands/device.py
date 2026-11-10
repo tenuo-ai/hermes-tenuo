@@ -635,6 +635,16 @@ class Device:
     def _deliver(self, job_id: str, output: str, returncode: int) -> None:
         """Keep the result before trying delivery, including when a stop interrupts it."""
         self._unsent.append((job_id, output, returncode))
+        if self._stop:
+            # A command just interrupted locally can still confirm its exit immediately.
+            # This is one short attempt, not a flush of previously queued results.
+            self._waiting = True
+            try:
+                self.report(job_id, output, returncode, timeout=1)
+            finally:
+                self._waiting = False
+            self._unsent.pop()
+            return
         self._send_unsent()
 
     def _send_unsent(self, deadline: Optional[float] = None) -> None:

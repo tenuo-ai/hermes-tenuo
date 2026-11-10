@@ -2246,3 +2246,20 @@ def test_idle_proxy_keepalives_do_not_consume_caller_quota(tmp_path, monkeypatch
         for conn in connections:
             conn.close()
         h.close()
+
+
+def test_stopped_command_gets_only_one_short_immediate_report(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device.stop()
+    attempts = []
+
+    def report(*args, timeout):
+        assert timeout == 1 and device._waiting
+        attempts.append(args)
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    with pytest.raises(ConnectionError):
+        device._deliver("stopped", "cancelled", 130)
+    device._drain_results()
+    assert len(attempts) == 1 and not device._waiting
