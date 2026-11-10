@@ -23,5 +23,9 @@ jobs:
           pip install -e ".[dev]"
       - name: Lint
         run: python -m ruff check
+      - name: Install bubblewrap (the Hands sandbox on Linux)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short

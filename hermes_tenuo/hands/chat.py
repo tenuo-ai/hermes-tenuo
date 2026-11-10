@@ -1,0 +1,285 @@
+"""The `/hands` chat command, and switching one conversation over to a device."""
+
+from __future__ import annotations
+
+import contextvars
+import logging
+import threading
+import time
+from typing import Any, Dict
+
+from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
+
+logger = logging.getLogger("hermes_tenuo.hands")
+
+_lock = threading.Lock()
+# One Hermes process can serve several profiles, and neither conversation keys nor task ids
+# are unique across them. Everything below is keyed by `_scoped(...)`, which adds the profile.
+_wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one up), set by /hands on
+_applied: Dict[str, tuple] = {}  # task -> (conversation it was switched for, the task id as Hermes knows it)
+_devices: Dict[str, str] = {}  # task -> device name
+_saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
+_route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
+can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
+
+HELP = """Hands runs this conversation's commands on your own machine.
+  /hands invite        print the line to run on your machine
+  /hands on [name]     run this conversation's commands on that machine
+  /hands off           run them on the server again
+  /hands status        which machines are up
+  /hands revoke <name> forget a machine"""
+
+
+def _scoped(key: str) -> str:
+    """`key` with the profile this call was routed to, where Hermes serves several."""
+    try:
+        from tools.terminal_tool import _qualify_task_key
+        return _qualify_task_key(key)
+    except Exception:
+        return key
+
+
+def _conversation() -> str:
+    """The conversation the current message belongs to; the same for a whole single-session CLI."""
+    try:
+        from gateway.session_context import get_session_env
+        return _scoped(get_session_env("HERMES_SESSION_KEY", "") or "")
+    except Exception:
+        return _scoped("")
+
+
+def _whole_profile() -> bool:
+    """True if this profile's terminal backend is Hands itself, for every conversation."""
+    try:
+        from hermes_tenuo.hands.backend import NAME
+        from tools.terminal_scope import terminal_env
+        return terminal_env("TERMINAL_ENV", "local") == NAME
+    except Exception:
+        return False
+
+
+def device_for(task_id: str) -> str:
+    with _lock:
+        return _devices.get(task_id) or _devices.get(_scoped(task_id), "")
+
+
+def current_device() -> Any:
+    """The device the tool call in progress was routed to, or None outside one."""
+    return _route.get()
+
+
+def command(raw_args: str = "") -> str:
+    hub = get_hub()
+    words = (raw_args or "").split()
+    verb = words[0].lower() if words else "status"
+    if verb in ("help", "-h", "--help"):
+        return HELP
+    if hub is None:
+        return ("Hands is off in this Hermes process. Add `hands: {listen: \"0.0.0.0:8765\", "
+                "url: \"http://<this-server>:8765\"}` under plugins.entries.hermes-tenuo and restart.")
+    try:
+        if verb == "invite":
+            line = hub.invite()
+            local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
+            return ("On your machine, in the folder you want to work in, run:\n\n"
+                    f"  hermes-tenuo hands up '{line}' --dir . --for 4h\n\n"
+                    "The line works once and for 10 minutes. Then type /hands on here."
+                    + ("\n\nNote: that address only works on the server itself. Set hands.url in the "
+                       "plugin config to an address your machine can reach." if local else ""))
+        if verb == "on":
+            if not can_switch:
+                return ("This Hermes version can't switch one conversation to a machine. Set "
+                        "`terminal.backend: hands` for a profile to run all of its commands there.")
+            name = words[1] if len(words) > 1 else ""
+            session = hub.pick(name)
+            with _lock:
+                _wanted[_conversation()] = session.name
+            left = max(0, int((session.expires - time.time()) / 60))
+            return (f"This conversation now runs commands on '{session.name}' in {session.folder} "
+                    f"({left} min left). /hands off switches back to the server.")
+        if verb == "off":
+            with _lock:
+                _wanted.pop(_conversation(), None)
+            _release(_conversation())
+            if _whole_profile():
+                return ("This profile runs every conversation's commands on your machine (terminal.backend: "
+                        "hands), so /hands off cannot move this one to the server. Change the profile's "
+                        "terminal backend to do that.")
+            return "This conversation runs commands on the server again."
+        if verb == "revoke":
+            if len(words) < 2:
+                return "Which machine? /hands revoke <name>"
+            return (f"'{words[1]}' is forgotten; it needs a new invite to come back." if hub.revoke(words[1])
+                    else f"No machine called '{words[1]}'.")
+        if verb == "status":
+            rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}, "
+                    f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions()]
+            here = _wanted.get(_conversation())
+            if here is None:
+                here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
+            return "\n".join(["Machines:"] + (rows or ["  none are up (/hands invite to add one)"]) +
+                             [f"This conversation runs on: {here}"])
+    except HandsUnavailable as e:
+        return str(e)
+    return HELP
+
+
+def _release(conversation: str) -> None:
+    try:
+        from tools.terminal_tool import clear_task_env_overrides
+    except Exception:
+        return
+    with _lock:
+        mine = [(key, entry[1]) for key, entry in _applied.items() if entry[0] == conversation]
+        for key, _ in mine:
+            _applied.pop(key, None)
+            _devices.pop(key, None)
+    for key, task in mine:
+        _drop_shell(task)  # while the task still has its own slot, so the server's shell is untouched
+        with _lock:
+            before = _saved.pop(key, None)
+        clear_task_env_overrides(task)  # also forgets the device folder as this task's directory
+        if before:
+            try:
+                from tools.terminal_tool import register_task_env_overrides
+                register_task_env_overrides(task, before)  # what the task had before /hands on
+            except Exception as e:
+                logger.warning("hermes-tenuo hands: could not restore the task's settings (%s)", e)
+
+
+def _own_overrides(task: str) -> Dict[str, Any]:
+    """The overrides Hermes holds for this task itself (registering replaces them all)."""
+    try:
+        from tools import terminal_tool
+        return dict(terminal_tool._task_env_overrides.get(terminal_tool._qualify_task_key(task)) or {})
+    except Exception:
+        return {}
+
+
+def _other_shell(task: str) -> bool:
+    """True if this task already has a shell of its own that is not on a device. Hermes
+    would keep using it, so the call must not go ahead as if it ran on the device."""
+    try:
+        from hermes_tenuo.hands.backend import HandsEnvironment
+        from tools import terminal_tool
+        cached = terminal_tool._active_environments
+        env = cached.get(terminal_tool._qualify_task_key(task)) or cached.get(task)
+        return env is not None and not isinstance(env, HandsEnvironment)
+    except Exception:
+        return False
+
+
+def _drop_shell(task: str) -> None:
+    """Forget the shell a task had on a device, so its next command starts fresh where the
+    conversation now points: another machine, or the server."""
+    try:
+        from hermes_tenuo.hands.backend import HandsEnvironment
+        from tools import terminal_tool
+        from tools.terminal_tool_lifecycle import cleanup_vm
+        # Hermes removes exactly the key it is given, and the key it caches under carries
+        # the routed profile. Try the ways it may have keyed this task, and only ever
+        # remove a shell that is on a device.
+        keys = []
+        for find in (lambda: terminal_tool._resolve_container_task_id(task), lambda: _scoped(task), lambda: task):
+            try:
+                key = find()
+            except Exception:
+                continue
+            if key and key not in keys:
+                keys.append(key)
+        for key in keys:
+            if isinstance(terminal_tool._active_environments.get(key), HandsEnvironment):
+                cleanup_vm(key)
+    except Exception as e:
+        logger.debug("hermes-tenuo hands: could not drop the device shell for %s (%s)", task, e)
+
+
+def _policy_with_hands() -> Dict[str, str]:
+    """This context's complete terminal policy, with the backend set to the device."""
+    import os
+
+    from hermes_tenuo.hands.backend import NAME
+    from tools.terminal_scope import get_terminal_scope
+    current = get_terminal_scope()
+    policy = dict(current) if current is not None else {
+        k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")}
+    policy["TERMINAL_ENV"] = NAME
+    policy.pop("TERMINAL_CWD", None)  # a server path means nothing on the device
+    return policy
+
+
+def _inside(path: Any, folder: str) -> bool:
+    return isinstance(path, str) and (path == folder or path.startswith(folder.rstrip("/") + "/"))
+
+
+def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
+                **_: Any) -> Any:
+    """tool_execution middleware: run this tool call on the device when the conversation is
+    switched on (or the whole profile uses the `hands` backend).
+
+    Hermes picks the terminal backend from a per-context policy, so the switch wraps this
+    call only. The task also gets its own environment slot, so the server's shell for the
+    same conversation is left untouched.
+
+    File tools resolve a relative path against the session's recorded directory before any
+    command has run, so that record is pointed at the device's folder first. Otherwise a
+    session whose first call is `write_file` would aim at a server path.
+    """
+    conversation = _conversation()
+    task = str(task_id or "default")
+    with _lock:
+        wanted = _wanted.get(conversation)
+    try:
+        from hermes_tenuo.hands.backend import NAME
+        from tools.terminal_scope import (
+            TerminalPolicyRefusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope, terminal_env)
+        from tools.terminal_tool import get_session_cwd, record_session_cwd, register_task_env_overrides
+        if isinstance(get_terminal_scope(), TerminalPolicyRefusal):
+            return next_call()  # Hermes is refusing terminal use for this profile; leave that alone
+        whole_profile = wanted is None and terminal_env("TERMINAL_ENV", "local") == NAME
+    except Exception as e:
+        if wanted is not None:
+            logger.warning("hermes-tenuo hands: could not route tool call to the device (%s)", e)
+            raise HandsUnavailable("hands: could not route this tool call to the device; it was not run") from e
+        logger.debug("hermes-tenuo hands: tool call left on the server (%s)", e)
+        return next_call()
+    if wanted is None and not whole_profile:
+        return next_call()
+
+    hub = get_hub()
+    try:
+        folder = hub.pick(wanted or "").folder if hub is not None else ""
+    except HandsUnavailable:
+        folder = ""  # the backend reports the missing device when the call runs
+    if not whole_profile:
+        key = _scoped(task)
+        with _lock:
+            entry = _applied.get(key)
+            fresh = entry is None or entry[0] != conversation
+            switched = not fresh and _devices.get(key) != wanted
+            _applied[key] = (conversation, task)
+            _devices[key] = wanted
+        if fresh:
+            before = _own_overrides(task)
+            if before.get("env_type") == NAME:
+                before.pop("env_type")  # never save our own switch as the thing to go back to
+            with _lock:
+                _saved[key] = before
+            register_task_env_overrides(task, {**before, "env_type": NAME})
+        elif switched:
+            _drop_shell(task)  # /hands on <another machine>: never keep running on the first one
+        if _other_shell(task):
+            raise HandsUnavailable("hands: this conversation already has its own sandbox on the server, so its "
+                                   "commands cannot move to your machine. Start a new conversation and type "
+                                   "/hands on there; this call was not run")
+    if folder and not _inside(get_session_cwd(task), folder):
+        record_session_cwd(task, folder)
+    if whole_profile:
+        return next_call()
+    token = set_terminal_scope(_policy_with_hands())
+    chosen = _route.set(wanted)
+    try:
+        return next_call()
+    finally:
+        _route.reset(chosen)
+        reset_terminal_scope(token)

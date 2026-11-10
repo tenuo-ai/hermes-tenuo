@@ -773,6 +773,35 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # TTL parser
 # ---------------------------------------------------------------------------
 
+def cmd_hands(args: argparse.Namespace) -> int:
+    import signal
+
+    from hermes_tenuo.hands import device
+    from hermes_tenuo.hands.sandbox import SandboxUnavailable
+    if args.hands_command == "log":
+        path = device.home() / "log.jsonl"
+        lines = path.read_text().splitlines()[-args.last:] if path.is_file() else []
+        for line in lines:
+            entry = json.loads(line)
+            what = entry["note"] or f"exit {entry['exit']}"
+            print(f"{entry['at']}  {device.printable(str(what)):<12}  {device.printable(str(entry['command']))}")
+        if not lines:
+            print("Nothing has run on this machine yet.")
+        return 0
+    if args.hands_command != "up":
+        print("usage: hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h | hermes-tenuo hands log")
+        return 2
+    try:
+        dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
+                            allow_unsandboxed=args.no_sandbox)
+        signal.signal(signal.SIGINT, dev.stop)
+        signal.signal(signal.SIGTERM, dev.stop)
+        return dev.serve()
+    except (device.HandsError, SandboxUnavailable, ConnectionError, ValueError) as exc:
+        print(f"hermes-tenuo hands: {exc}", file=sys.stderr)
+        return 1
+
+
 def _parse_ttl(ttl: str) -> int:
     raw = ttl.strip().lower()
     try:
@@ -853,6 +882,19 @@ def main() -> None:
 
     subparsers.add_parser("demo", help="Print a local allow/deny transcript (no Hermes process)")
 
+    hands_p = subparsers.add_parser("hands", help="Let your Hermes server use a folder on this machine")
+    hands_sub = hands_p.add_subparsers(dest="hands_command")
+    up_p = hands_sub.add_parser("up", help="Share one folder with the server for a set time")
+    up_p.add_argument("invite", nargs="?", metavar="INVITE",
+                      help="The hands://... line from `/hands invite` (only needed the first time)")
+    up_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder the server may work in (default: here)")
+    up_p.add_argument("--for", dest="ttl", default="4h", metavar="DURATION", help="How long, e.g. 30m, 4h (default: 4h)")
+    up_p.add_argument("--name", metavar="NAME", help="What to call this machine (default: its hostname)")
+    up_p.add_argument("--no-sandbox", action="store_true",
+                      help="Run commands with your full access when this machine has no sandbox")
+    hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
+        "--last", type=int, default=20, metavar="N")
+
     args = parser.parse_args()
 
     if args.command == "keygen":
@@ -867,6 +909,8 @@ def main() -> None:
         sys.exit(cmd_doctor(args))
     elif args.command == "audit":
         sys.exit(cmd_audit(args))
+    elif args.command == "hands":
+        sys.exit(cmd_hands(args))
     elif args.command == "demo":
         from hermes_tenuo.demo import main as cmd_demo
         sys.exit(cmd_demo())
