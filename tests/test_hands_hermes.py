@@ -1,13 +1,16 @@
 """Hands inside real Hermes: plugin loader, tool dispatch, file tools and `/hands`.
 
 Skipped unless ``hermes_cli`` is importable (the ``upstream-hermes`` workflow installs
-it). Runs in a subprocess with its own ``HERMES_HOME``, like ``test_upstream_hermes``.
+it). Runs in a subprocess with its own ``HERMES_HOME``, like ``test_upstream_hermes``,
+and through whichever install route that workflow set up: the pip-installed package, or
+a copy of the repo under ``$HERMES_HOME/plugins``.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,6 +22,7 @@ import pytest
 pytest.importorskip("hermes_cli.plugins")
 
 from hermes_tenuo.hands import sandbox  # noqa: E402
+from tests.test_upstream_hermes import _IGNORE, ROOT, _plugin_installed  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sandbox.available() is None, reason="needs sandbox-exec or bubblewrap")
 
@@ -31,6 +35,7 @@ SCRIPT = textwrap.dedent('''
 
     from hermes_cli.plugins import discover_plugins
     discover_plugins(force=True)
+    assert "hermes_tenuo" in sys.modules, "Hermes did not load the plugin"
     from model_tools import handle_function_call
     from hermes_tenuo.hands import chat
     from hermes_tenuo.hands.device import Device
@@ -70,7 +75,9 @@ SCRIPT = textwrap.dedent('''
 
 def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     home = tmp_path / "hermes-home"
-    home.mkdir()
+    (home / "plugins").mkdir(parents=True)
+    if not _plugin_installed():
+        shutil.copytree(ROOT, home / "plugins" / "hermes-tenuo", ignore=_IGNORE)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -86,7 +93,7 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     for name in ("TERMINAL_ENV", "TERMINAL_CWD", "TENUO_WARRANT", "TENUO_SIGNING_KEY"):
         env.pop(name, None)
     done = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path)], capture_output=True, text=True,
-                          env=env, timeout=180)
+                          env=env, timeout=180, cwd=str(tmp_path))
     lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
     assert lines, done.stdout[-2000:] + done.stderr[-4000:]
     out = json.loads(lines[-1][7:])
