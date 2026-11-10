@@ -31,7 +31,8 @@ ONLINE_SECONDS = wire.POLL_SECONDS + 20
 GRACE_SECONDS = 20  # how long past a command's own time the server waits for its result
 WATCH_SECONDS = 20  # how long a device's "should I stop this command?" request stays open
 READ_SECONDS = 20   # how long a connection may take to send its request
-MAX_CONNECTIONS = 64
+MAX_CONNECTIONS = 128
+MAX_PER_ADDRESS = 32  # one address cannot take every connection and lock other machines out
 
 
 class HandsUnavailable(RuntimeError):
@@ -493,25 +494,47 @@ class Hub:
                     return False
 
         class Listener(ThreadingHTTPServer):
-            """At most MAX_CONNECTIONS at once; more are closed, not queued."""
+            """At most MAX_CONNECTIONS at once, and MAX_PER_ADDRESS from one address; more
+            are closed, not queued."""
             daemon_threads = True
-            slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+            request_queue_size = 128  # room for real connections to wait while others are turned away
+            counting = threading.Lock()
+            total = 0
+            per_address: Dict[str, int] = {}
+
+            def _take(self, address: str) -> bool:
+                with self.counting:
+                    if self.total >= MAX_CONNECTIONS or self.per_address.get(address, 0) >= MAX_PER_ADDRESS:
+                        return False
+                    self.total += 1
+                    self.per_address[address] = self.per_address.get(address, 0) + 1
+                    return True
+
+            def _give(self, address: str) -> None:
+                with self.counting:
+                    self.total -= 1
+                    left = self.per_address.get(address, 1) - 1
+                    if left > 0:
+                        self.per_address[address] = left
+                    else:
+                        self.per_address.pop(address, None)
 
             def process_request(self, request: Any, client_address: Any) -> None:
-                if not self.slots.acquire(blocking=False):
+                address = str(client_address[0]) if client_address else ""
+                if not self._take(address):
                     self.shutdown_request(request)
                     return
                 try:
                     super().process_request(request, client_address)
                 except Exception:
-                    self.slots.release()
+                    self._give(address)
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    self.slots.release()
+                    self._give(str(client_address[0]) if client_address else "")
 
         server = Listener((host or "127.0.0.1", int(port)), Handler)
         self._server = server

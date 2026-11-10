@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 
+from pathlib import Path
+
 import pytest
 
 from hermes_tenuo.hands import hub as hub_module
@@ -255,7 +257,8 @@ def test_device_commands_do_not_inherit_exported_secrets(hub, paired, monkeypatc
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "also-must-not-reach-a-command")
     monkeypatch.setenv("PATH", "/safe/bin")
     env = paired._env()
-    assert env["PATH"] == "/safe/bin"
+    # The person's own path, after this machine's developer tools where there are any.
+    assert env["PATH"] == os.pathsep.join(["/safe/bin", *paired._tools[0]])
     assert env["HOME"] == paired.tmp
     assert env["TMPDIR"] == paired.tmp
     assert "OPENAI_API_KEY" not in env
@@ -911,3 +914,89 @@ def test_caller_is_told_when_the_window_ends_without_a_result(hub, paired, monke
     session.expires = time.time() - wire.REPORT_GRACE - 1
     waiter.join(5)
     assert not waiter.is_alive() and result["r"][1] == 125 and "end of its time window" in result["r"][0]
+
+
+# --- what a command's stand-in home starts with ------------------------------------------------
+
+def test_commands_are_told_where_toolchains_live_but_get_no_secrets(hub, folder, tmp_path, monkeypatch):
+    real_home = tmp_path / "real-home"
+    (real_home / ".rustup").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("JAVA_HOME", "/opt/java")
+    monkeypatch.setenv("PYENV_ROOT", str(tmp_path))  # set by the person: passed on as is
+    monkeypatch.setenv("NPM_TOKEN", "must-not-reach-a-command")
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    env = device._env()
+    assert env["RUSTUP_HOME"] == str(real_home / ".rustup") and env["PYENV_ROOT"] == str(tmp_path)
+    assert env["JAVA_HOME"] == "/opt/java" and "NVM_DIR" not in env  # no such folder here
+    assert env["HOME"] == device.tmp and "NPM_TOKEN" not in env
+    assert not [name for name in env if any(word in name for word in ("KEY", "TOKEN", "SECRET", "PASSWORD"))]
+
+
+def test_commits_made_through_hands_carry_the_persons_name(hub, folder, tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("git"):
+        pytest.skip("needs git")
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    (real_home / ".gitconfig").write_text(
+        '[user]\n\tname = "Ada O\'Brien #1; Lovelace"\n\temail = ada@example.com\n'
+        "[alias]\n\tdanger = !touch should-not-be-copied\n[credential]\n\thelper = store\n")
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    copied = (Path(device.tmp) / ".gitconfig").read_text()
+    assert "ada@example.com" in copied and "alias" not in copied and "credential" not in copied
+    done = subprocess.run("git init -q . && git add -A && git commit -q -m first && git log -1 --format='%an <%ae>'",
+                          shell=True, cwd=folder, env=device._env(), capture_output=True, text=True)
+    assert done.stdout.strip() == "Ada O'Brien #1; Lovelace <ada@example.com>", done.stdout + done.stderr
+    (Path(device.tmp) / ".gitconfig").write_text("[user]\n\tname = Changed By A Command\n")
+    Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)  # started again: it leaves the file alone
+    assert "Changed By A Command" in (Path(device.tmp) / ".gitconfig").read_text()
+
+
+@sandboxed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS developer tools")
+def test_macos_developer_tools_run_without_cache_errors(hub, folder):
+    device = up(hub, folder)
+    if not device.device._tools[0]:
+        pytest.skip("no developer tools on this machine")
+    for login in (False, True):
+        out, code = run(hub, "git --version; make -v | head -1; cc --version | head -1", login=login)
+        assert code == 0 and "git version" in out and "xcrun_db" not in out and "error" not in out.lower(), out
+
+
+def test_one_address_cannot_take_every_connection(tmp_path, monkeypatch):
+    import socket
+    monkeypatch.setattr(hub_module, "MAX_PER_ADDRESS", 5)
+    monkeypatch.setattr(hub_module, "READ_SECONDS", 30)
+    h = Hub(state_dir=tmp_path / "server-state")
+    h.listen("127.0.0.1:0")
+    held = []
+    try:
+        host, port = h.public_url.split("//")[1].split(":")
+        for _ in range(12):
+            held.append(socket.create_connection((host, int(port)), timeout=5))
+        time.sleep(0.5)
+        open_now = 0
+        for s in held:
+            s.setblocking(False)
+            try:
+                if s.recv(1) != b"":
+                    open_now += 1
+            except BlockingIOError:
+                open_now += 1  # still held open by the server
+            except OSError:
+                pass
+        assert open_now == 5, open_now
+    finally:
+        for s in held:
+            s.close()
+        h.close()
+
+
+def test_developer_tools_never_come_before_the_persons_own_path():
+    from hermes_tenuo.hands import device as device_module
+    placed = device_module._before_usr_bin("/opt/mine/bin:/usr/local/bin:/usr/bin:/bin", ["/dev/tools"])
+    assert placed == "/opt/mine/bin:/usr/local/bin:/dev/tools:/usr/bin:/bin"
+    assert device_module._before_usr_bin("/opt/mine/bin", ["/dev/tools"]) == "/opt/mine/bin:/dev/tools"

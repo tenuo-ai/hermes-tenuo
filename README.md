@@ -287,7 +287,9 @@ What your machine enforces, whatever the server asks:
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
   Linux they do not get your session's sockets. Commands receive a small shell
   environment, not credentials or other variables exported by the process that
-  started Hands.
+  started Hands. Their home folder is a private stand-in that starts with your
+  git name and email, and they are told where your toolchains are (rustup,
+  pyenv, nvm and similar), so builds and commits work as usual.
 - **A time window.** When it ends, your machine stops answering. Run `hands up`
   again to continue; the conversation picks the machine up again by itself.
 - **No late runs.** A command that reaches your machine after the server
@@ -303,7 +305,9 @@ What your machine enforces, whatever the server asks:
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
-network such as Tailscale or WireGuard.
+network such as Tailscale or WireGuard. The listener serves a limited number
+of connections, and fewer from any one address, so put a reverse proxy in
+front of it if it is reachable from the internet.
 
 Interrupting a command in Hermes stops it on your machine. A process a command
 leaves running (a dev server started with

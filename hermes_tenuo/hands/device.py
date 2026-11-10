@@ -12,6 +12,7 @@ import math
 import os
 import secrets
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -36,6 +37,17 @@ SAFE_ENV = {
     "COLORTERM", "FORCE_COLOR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
     "LOGNAME", "NO_COLOR", "PATH", "SHELL", "TERM", "USER", "__CF_USER_TEXT_ENCODING",
 }
+
+# Commands run with a stand-in home folder, so tools that keep their toolchains under the
+# real one are told where those are. Locations only, read as any other file: no credentials.
+# The variable is passed on if the person set it, else pointed at the usual folder if it exists.
+TOOL_HOMES = {
+    "RUSTUP_HOME": ".rustup", "PYENV_ROOT": ".pyenv", "NVM_DIR": ".nvm", "RBENV_ROOT": ".rbenv",
+    "ASDF_DATA_DIR": ".asdf", "VOLTA_HOME": ".volta", "SDKMAN_DIR": ".sdkman",
+}
+TOOL_PATHS = ("JAVA_HOME", "ANDROID_HOME", "GOROOT")  # passed on only if set
+
+PROFILE = ".hands_profile"  # in the stand-in home; keeps this device's settings in login shells too
 
 # Runs inside a sandbox and starts the commands, so they share it: a later command can stop
 # a server an earlier one started, and nothing can signal a process outside. Standard
@@ -181,6 +193,48 @@ def _within(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
+def _run_quiet(argv: list) -> str:
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+        return done.stdout.strip() if done.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _developer_tools() -> tuple:
+    """On macOS, where the real developer tools and SDK are. `/usr/bin/git`, `cc` and the
+    like are small launchers that look the real tool up, and keep a cache of that lookup
+    in a folder commands cannot write; with these first on the path the launchers are not used."""
+    if sys.platform != "darwin":
+        return [], ""
+    root = _run_quiet(["/usr/bin/xcode-select", "-p"])
+    if not root:
+        return [], ""
+    dirs = [d for d in (os.path.join(root, "usr", "bin"),
+                        os.path.join(root, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin")) if os.path.isdir(d)]
+    return dirs, _run_quiet(["/usr/bin/xcrun", "--show-sdk-path"])
+
+
+def _before_usr_bin(path: str, dirs: list) -> str:
+    """`path` with `dirs` placed just ahead of /usr/bin: they stand in for the launchers
+    there, and must not come before anything the person put on their path themselves."""
+    parts = [part for part in path.split(os.pathsep) if part]
+    at = parts.index("/usr/bin") if "/usr/bin" in parts else len(parts)
+    return os.pathsep.join(parts[:at] + list(dirs) + parts[at:])
+
+
+def _git_identity() -> tuple:
+    """The name and email the person commits with, so work done through Hands is theirs."""
+    git = shutil.which("git")
+    if not git:
+        return "", ""
+    return (_run_quiet([git, "config", "--global", "user.name"]), _run_quiet([git, "config", "--global", "user.email"]))
+
+
+def _git_value(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
 def home() -> Path:
     return Path(os.environ.get("TENUO_HANDS_HOME") or "~/.hermes-tenuo/hands").expanduser()
 
@@ -239,6 +293,9 @@ class Device:
                              "share another folder, or set TENUO_HANDS_HOME to a folder outside it")
         self.tmp = os.path.join(self.state, "tmp")
         os.makedirs(self.tmp, mode=0o700, exist_ok=True)
+        self._tools = _developer_tools()
+        self._identity = _git_identity()
+        self._prepare_home(self.tmp)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed)  # fail before pairing
         self.say = say
         self.key = device_key()
@@ -368,7 +425,43 @@ class Device:
         env.setdefault("PATH", os.defpath)
         env["HOME"] = tmp  # a login shell must not source the user's real dotfiles
         env["TMPDIR"] = tmp
+        real_home = os.path.expanduser("~")
+        for name, folder in TOOL_HOMES.items():
+            where = os.environ.get(name) or os.path.join(real_home, folder)
+            if os.path.isdir(where):
+                env[name] = where
+        for name in TOOL_PATHS:
+            if os.environ.get(name):
+                env[name] = os.environ[name]
+        dirs, sdk = self._tools
+        if dirs:
+            env["PATH"] = _before_usr_bin(env["PATH"], dirs)
+        if sdk:
+            env["SDKROOT"] = sdk
         return env
+
+    def _prepare_home(self, tmp: str) -> None:
+        """What a command's stand-in home folder starts with: the person's git name and
+        email (nothing else of their git settings), and a profile that keeps the developer
+        tools first on the path in login shells. Files a command has since changed are left."""
+        name, email = self._identity
+        config = os.path.join(tmp, ".gitconfig")
+        if (name or email) and not os.path.exists(config):
+            lines = ["[user]"] + [f"\t{key} = {_git_value(value)}" for key, value in (("name", name), ("email", email)) if value]
+            _private_write(Path(config), "\n".join(lines) + "\n")
+        dirs, _ = self._tools
+        if dirs:
+            # The same placement as in _env(), redone after a login shell has rebuilt the path.
+            _private_write(Path(tmp) / PROFILE, "\n".join([
+                "d=" + shlex.quote(os.pathsep.join(dirs)),
+                'p=":$PATH:"',
+                'case "$p" in *":/usr/bin:"*) p="${p/:\\/usr\\/bin:/:$d:/usr/bin:}";; *) p="$p$d:";; esac',
+                'p="${p#:}"; PATH="${p%:}"; export PATH; unset p d', ""]))
+            source = f'[ -f "$HOME/{PROFILE}" ] && . "$HOME/{PROFILE}"\n'
+            profile = Path(tmp) / ".bash_profile"
+            had = profile.read_text() if profile.is_file() else ""
+            if source not in had:
+                _private_write(profile, had + ("" if had.endswith("\n") or not had else "\n") + source)
 
     def run(self, job: Dict[str, Any], folder: str, timeout: Optional[int] = None) -> tuple:
         shell = ["/bin/bash", "-lc" if job.get("login") else "-c", job["cmd"]]
@@ -378,6 +471,8 @@ class Device:
         # a narrower command must not be able to change them.
         own = folder != self.folder
         tmp = tempfile.mkdtemp(prefix="narrow-", dir=self.state) if own else self.tmp
+        if own:
+            self._prepare_home(tmp)
         # The command writes its output to this file. It is read back through the handle
         # opened here, never by name: the name is in a folder the command can change.
         fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=tmp)
