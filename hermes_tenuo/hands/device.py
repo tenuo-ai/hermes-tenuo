@@ -216,6 +216,59 @@ def _read_plain(path: str, limit: int = 1024 * 1024) -> Optional[str]:
         os.close(fd)
 
 
+def _own_folder(path: str) -> bool:
+    """Make `path` a folder of its own; True if it had to be made again. Commands may write
+    in their temp folder, so one can remove it or leave a link in its place. The device is
+    not in the sandbox and must never write through such a link."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        info = None
+    if info is not None and stat.S_ISDIR(info.st_mode):
+        return False
+    if info is not None:
+        os.unlink(path)  # a link or a file: removed, never followed
+    os.mkdir(path, 0o700)
+    return True
+
+
+def _in_sandbox(tmp: str, state: str) -> list:
+    """On macOS, the processes running in the sandbox whose temp folder is `tmp`, whatever
+    session or group they have moved to. The system is asked what each of this user's
+    processes is allowed to do: one of ours is sandboxed, may write in `tmp`, and may not
+    write in `state`, the folder above it. A process cannot change the sandbox it is in,
+    so this finds what a process group or session cannot. Both folders must exist. Empty on
+    other systems and where the system cannot be asked."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        import ctypes
+        check = ctypes.CDLL(None).sandbox_check
+        check.restype = ctypes.c_int
+        check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]  # then the path, as a variable argument
+        listing = subprocess.run(["/bin/ps", "-axo", "pid=,uid="], capture_output=True, text=True, timeout=10,
+                                 env={"LC_ALL": "C", "PATH": os.defpath}).stdout
+    except (OSError, AttributeError, subprocess.SubprocessError):
+        return []
+    by_path, quiet = 1, 0x40000000  # the question is about a path; do not log the answer
+
+    def may_write(pid: int, path: str) -> bool:
+        return check(pid, b"file-write-data", by_path | quiet, ctypes.c_char_p(os.fsencode(path))) == 0
+
+    found = []
+    for line in listing.splitlines():
+        parts = line.split()
+        try:
+            pid, owner = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            continue
+        if owner != os.getuid() or pid == os.getpid():
+            continue
+        if check(pid, None, 0) == 1 and may_write(pid, tmp) and not may_write(pid, state):
+            found.append(pid)
+    return found
+
+
 def _run_quiet(argv: list) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
@@ -315,7 +368,8 @@ class Device:
             raise HandsError(f"the shared folder and Hands's own folder ({self.state}) must be separate: "
                              "share another folder, or set TENUO_HANDS_HOME to a folder outside it")
         self.tmp = os.path.join(self.state, "tmp")
-        os.makedirs(self.tmp, mode=0o700, exist_ok=True)
+        os.makedirs(self.state, mode=0o700, exist_ok=True)
+        _own_folder(self.tmp)  # an earlier command may have left a link here
         self._tools = _developer_tools()
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
@@ -498,8 +552,9 @@ class Device:
         # a narrower command must not be able to change them.
         own = folder != self.folder
         tmp = tempfile.mkdtemp(prefix="narrow-", dir=self.state) if own else self.tmp
-        if own:
+        if own or _own_folder(tmp):
             self._prepare_home(tmp)
+        lost = False
         # The command writes its output to this file. It is read back through the handle
         # opened here, never by name: the name is in a folder the command can change.
         fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=tmp)
@@ -517,10 +572,18 @@ class Device:
             if runner is None:
                 return "hands: this machine could not start its sandbox, so the command was not run\n", 126
             code = self._ask(runner, shell, folder, job.get("stdin"), timeout, out_path)
+            if code is None:
+                try:
+                    lost = runner.wait(1) is not None  # gone, not just slow to answer
+                except subprocess.TimeoutExpired:
+                    lost = False
             if own:
                 self._close(runner)  # stops whatever the command left behind
+                self._reap(tmp)
             elif code is None:
                 self._stop_runner()
+            if lost:
+                self.say("  A command stopped Hands's own supervisor. What it had left running was stopped.")
             os.lseek(fd, 0, os.SEEK_SET)
             data = b""
             while len(data) <= MAX_OUTPUT:
@@ -538,6 +601,9 @@ class Device:
                 except OSError:
                     pass
         text = data[:MAX_OUTPUT].decode("utf-8", errors="replace")
+        if code is None and lost:
+            text += "\nhands: this command stopped Hands's supervisor on the device; what it left running was stopped\n"
+            code = 137
         if code is None:
             code = 124
         if code == 124:
@@ -611,6 +677,31 @@ class Device:
         runner, self._runner = self._runner, None
         self._close(runner)
         self._sweep()
+        if runner is not None:
+            self._reap(self.tmp)
+
+    def _reap(self, tmp: str) -> None:
+        """Stop whatever still runs in the sandbox that used `tmp`. Its supervisor does this
+        from inside when it ends, but a command can stop the supervisor first and leave a
+        process in a session of its own, which no process group leads back to. macOS only:
+        on Linux the sandbox's process list ends with it."""
+        if sys.platform != "darwin":
+            return
+        try:
+            if _own_folder(tmp) and tmp == self.tmp:
+                self._prepare_home(tmp)
+        except OSError:
+            return
+        for _ in range(5):  # a process may start another while this looks
+            pids = _in_sandbox(tmp, self.state)
+            if not pids:
+                return
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            time.sleep(0.1)
 
     def _sweep(self) -> None:
         """Stop what commands left behind when their sandbox could not do it itself (a

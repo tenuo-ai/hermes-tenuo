@@ -653,6 +653,93 @@ def test_leftovers_are_cleared_when_a_command_ends_the_runner(hub, folder, monke
     device.stop()
 
 
+@sandboxed
+def test_a_process_in_its_own_session_does_not_outlive_a_stopped_runner(hub, folder, monkeypatch):
+    """No process group leads back to it, and the runner that would stop it is gone."""
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    out, code = run(hub, "python3 -c \"import os, time\nos.setsid()\nwhile True:\n"
+                         "    open('stray.txt', 'w').write(str(time.time()))\n    time.sleep(0.2)\" >/dev/null 2>&1 &"
+                         " sleep 1; kill -KILL $PPID", timeout=8)
+    assert code == 137 and "supervisor" in out, (out, code)
+    assert any("supervisor" in line for line in device.lines)
+    time.sleep(0.5)
+    seen = (folder / "stray.txt").read_text()
+    time.sleep(1)
+    assert (folder / "stray.txt").read_text() == seen  # stopped at once, not only when the device stops
+    assert run(hub, "echo again")[0].strip() == "again"
+    device.stop()
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or sandbox.available() is None, reason="asks the macOS sandbox")
+def test_only_processes_in_this_sandbox_are_found(tmp_path):
+    from hermes_tenuo.hands.device import _in_sandbox
+    state, shared = tmp_path / "state", tmp_path / "shared"
+    for path in (state / "tmp", state / "other", shared):
+        path.mkdir(parents=True)
+    tmp = str(state / "tmp")
+    detach = "nohup /usr/bin/perl -e 'use POSIX; POSIX::setsid(); sleep 30' >/dev/null 2>&1 & exec sleep 30"
+    ours = [subprocess.Popen(sandbox.wrap(str(shared), tmp, ["/bin/sleep", "30"], hidden=[str(state)])),
+            subprocess.Popen(sandbox.wrap(str(shared), tmp, ["/bin/bash", "-c", detach], hidden=[str(state)]))]
+    others = [subprocess.Popen(["/bin/sleep", "30"]),  # not in any sandbox
+              subprocess.Popen(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/bin/sleep", "30"]),
+              subprocess.Popen(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny file-write*)",
+                                "/bin/sleep", "30"]),
+              # a narrower Hands sandbox of the same device has a temp folder of its own
+              subprocess.Popen(sandbox.wrap(str(shared), str(state / "other"), ["/bin/sleep", "30"],
+                                            hidden=[str(state)]))]
+    try:
+        time.sleep(1)
+        found = set(_in_sandbox(tmp, str(state)))
+        assert {p.pid for p in ours} <= found
+        assert len(found) == 3  # the two started here and the one that moved to its own session
+        assert not found & {p.pid for p in others} and os.getpid() not in found
+    finally:
+        for pid in set(_in_sandbox(tmp, str(state))) | {p.pid for p in ours + others}:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        for p in ours + others:
+            p.wait(5)
+
+
+@sandboxed
+def test_the_device_never_writes_through_a_link_left_as_its_temp_folder(hub, folder, tmp_path, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    device = up(hub, folder)
+    tmp = tmp_path / "device-state" / "tmp"
+    out, _ = run(hub, f'cd /; rm -rf "$TMPDIR"; ln -s {elsewhere} "$TMPDIR"; echo swapped=$?')
+    if tmp.is_symlink():  # where the sandbox lets a command do this at all
+        assert run(hub, "echo next")[0].strip() == "next"  # the device made its folder again
+        assert tmp.is_dir() and not tmp.is_symlink()
+        run(hub, f'cd /; rm -rf "$TMPDIR"; ln -s {elsewhere} "$TMPDIR"')
+    device.stop()
+    device.thread.join(30)
+    again = up(hub, folder, invite=False)  # `hands up` again sets the stand-in home up
+    assert run(hub, "echo back")[0].strip() == "back"
+    assert tmp.is_dir() and not tmp.is_symlink()
+    assert list(elsewhere.iterdir()) == []
+    again.stop()
+
+
+def test_own_folder_replaces_a_link_or_a_file_and_keeps_a_folder(tmp_path):
+    from hermes_tenuo.hands.device import _own_folder
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "keep").write_text("x")
+    for make in (lambda p: p.symlink_to(target), lambda p: p.write_text("a file"), lambda p: None):
+        path = tmp_path / "t"
+        make(path)
+        assert _own_folder(str(path)) is True
+        assert path.is_dir() and not path.is_symlink() and list(path.iterdir()) == []
+        assert _own_folder(str(path)) is False  # already a folder: left as it is
+        path.rmdir()
+    assert (target / "keep").read_text() == "x"
+
+
 # --- the listener and protected paths ----------------------------------------------------------
 
 def test_connection_that_stops_sending_is_dropped(tmp_path, monkeypatch):
