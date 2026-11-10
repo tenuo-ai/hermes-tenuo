@@ -220,6 +220,172 @@ def test_task_shared_by_two_live_sessions_is_ambiguous(keys):
     assert g.pre_tool_call("web_search", {"query": "q"}, task_id="shared") is None
 
 
+def _web_only(keys, ttl=600):
+    root, agent = keys
+    return Warrant.mint_builder().holder(agent.public_key).capability("web_search", query=Wildcard()).ttl(ttl).mint(root)
+
+
+def test_child_keeps_its_grant_when_it_runs_another_turn(keys):
+    # Hermes fires on_session_end after every turn and may run a child again
+    # under the same session id (its output-schema correction turn).
+    g = _guard(keys, _web_only(keys))
+    _delegate(g, {"goal": "research"}, [("c", "research")])
+    assert _allowed(g, "web_search", {"query": "q"}, "c")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "c")
+    g.on_session_end("c")
+    g.on_session_start("c")
+    assert _allowed(g, "web_search", {"query": "q"}, "c")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "c")
+    assert _allowed(g, "read_file", {"path": "/data/x"}, "p")  # the parent still holds it
+
+
+def test_grandchild_chain_survives_the_child_turn_end(keys):
+    g = _guard(keys)
+    _delegate(g, {"goal": "a"}, [("c", "a")])
+    depth = len(g._chain_for("c"))
+    assert depth == 1
+    g.on_session_end("c")
+    assert len(g._chain_for("c")) == depth
+
+
+def test_expired_child_grant_is_denied_not_widened(keys):
+    import time
+
+    g = _guard(keys, _web_only(keys, ttl=1))
+    _delegate(g, {"goal": "a"}, [("old", "a")])
+    time.sleep(1.2)
+    g._child_warrant = _web_only(keys)  # a fresh template for the next delegation
+    # Attaching the next child retires children whose grant has expired.
+    assert g.pre_tool_call("delegate_task", {"goal": "b"}, session_id="p", tool_call_id="second") is None
+    g.on_subagent_start("p", "new", child_goal="b")
+    blocked = g.pre_tool_call("read_file", {"path": "/data/x"}, session_id="old")
+    assert blocked and "holds no authority" in blocked["message"]
+    assert "old" not in g._child_sessions and "old" not in g._session_warrant_chains
+
+
+def test_expired_child_sweep_is_bounded_per_attach(keys):
+    class Stub:
+        checks = 0
+
+        def __init__(self, expired):
+            self.expired = expired
+
+        def is_expired(self):
+            Stub.checks += 1
+            return self.expired
+
+    g = _guard(keys)
+    g._CHILD_SWEEP = 4
+    with g._session_lock:
+        for n in range(10):
+            g._session_warrants[f"old-{n}"] = (Stub(expired=n % 2 == 0), None)
+            g._child_sessions[f"old-{n}"] = None
+    _delegate(g, {"goal": "g0"}, [("c0", "g0")])
+    assert Stub.checks == 4  # not all ten
+    for n in range(1, 4):
+        _delegate(g, {"goal": f"g{n}"}, [(f"c{n}", f"g{n}")])
+    # Four attaches, four checks each at most; the rotation has reached every old child.
+    assert 10 <= Stub.checks <= 16
+    for n in range(10):
+        retired = f"old-{n}" not in g._child_sessions
+        assert retired == (n % 2 == 0)
+        assert (not _allowed(g, "web_search", {"query": "q"}, f"old-{n}"))
+    for n in range(4):
+        assert _allowed(g, "web_search", {"query": "q"}, f"c{n}")
+
+
+def test_denied_session_markers_are_bounded_and_overflow_fails_closed(keys):
+    root, agent = keys
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 3
+    g.set_session_warrant("own", _web_only(keys), agent)
+    for n in range(3):
+        g.on_subagent_start("p", f"stray-{n}")
+    assert _allowed(g, "web_search", {"query": "q"}, "p")  # not yet overflowed
+    for n in range(3, 5):
+        g.on_subagent_start("p", f"stray-{n}")
+    assert len(g._denied_sessions) == 3
+    assert sum(1 for s in g._session_warrants if s.startswith("stray-")) == 3
+    # The oldest markers were evicted; those sessions must stay denied.
+    for n in range(5):
+        assert not _allowed(g, "web_search", {"query": "q"}, f"stray-{n}")
+    # So is any other session with no warrant of its own, sessionless calls included.
+    blocked = g.pre_tool_call("web_search", {"query": "q"}, session_id="p")
+    assert blocked and "until Hermes restarts" in blocked["message"]
+    assert g.pre_tool_call("web_search", {"query": "q"}) is not None
+    assert g.pre_tool_call("delegate_task", {"goal": "x"}, session_id="p") is not None
+    # A session that holds its own warrant is unaffected.
+    assert _allowed(g, "web_search", {"query": "q"}, "own")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "own")
+
+
+def test_marker_overflow_fails_closed_without_a_config_warrant(keys):
+    # A gateway with no config warrant that lets unknown sessions pass through.
+    root, agent = keys
+    g = HermesGuard(trusted_roots=[root.public_key], require_session_warrant=False)
+    g._MAX_DENIED_SESSIONS = 2
+    for n in range(2):
+        g.set_session_warrant(f"user-{n}", _web_only(keys), agent)
+        g.clear_session_warrant(f"user-{n}")
+    assert _allowed(g, "terminal", {"command": "ls"}, "unknown")  # not yet overflowed
+    assert not _allowed(g, "terminal", {"command": "ls"}, "user-0")
+    g.set_session_warrant("user-2", _web_only(keys), agent)
+    g.clear_session_warrant("user-2")  # evicts user-0's marker
+    assert "user-0" not in g._session_warrants
+    for session in ("user-0", "user-1", "user-2", "unknown"):
+        blocked = g.pre_tool_call("terminal", {"command": "ls"}, session_id=session)
+        assert blocked and "holds no authority" in blocked["message"]
+    g.set_session_warrant("user-3", _web_only(keys), agent)
+    assert _allowed(g, "web_search", {"query": "q"}, "user-3")
+
+
+def test_marker_overflow_blocks_the_staged_grant_fallback(keys):
+    # A Hermes build that never fires subagent_start: a new session id claims
+    # the next staged grant. After overflow, an untracked session must not.
+    root, agent = keys
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 2
+    g.set_session_warrant("own", _parent(root, agent), agent)
+    assert _allowed(g, "web_search", {"query": "q"}, "own")  # becomes the primary session
+    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
+    for n in range(3):
+        g.set_session_warrant(f"user-{n}", _web_only(keys), agent)
+        g.clear_session_warrant(f"user-{n}")
+    assert g._denied_sessions_saturated and "user-0" not in g._session_warrants
+    assert not g._saw_subagent_start and len(g._planned_children["own"]) == 1
+    blocked = g.pre_tool_call("web_search", {"query": "q"}, session_id="user-0")
+    assert blocked and "holds no authority" in blocked["message"]
+    assert len(g._planned_children["own"]) == 1  # the grant was not consumed
+    assert "user-0" not in g._session_warrants
+
+
+def test_marker_overflow_blocks_a_replayed_child_start(keys):
+    # A denied child whose marker was evicted replays subagent_start. It must
+    # not take a grant staged for another child, with or without a goal match.
+    root, agent = keys
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 2
+    g.set_session_warrant("own", _parent(root, agent), agent)
+    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
+    for n in range(3):
+        g.on_subagent_start("own", f"stray-{n}", child_goal="other")
+    assert g._denied_sessions_saturated and "stray-0" not in g._session_warrants
+    for goal in ("g", None):
+        g.on_subagent_start("own", "stray-0", child_goal=goal)
+        assert len(g._planned_children["own"]) == 1
+        assert not _allowed(g, "web_search", {"query": "q"}, "stray-0")
+    # New delegation is refused outright until restart, instead of spawning a child with nothing.
+    refused = g.pre_tool_call("delegate_task", {"goal": "h"}, session_id="own", tool_call_id="e")
+    assert refused and "restart Hermes" in refused["message"]
+    assert _allowed(g, "web_search", {"query": "q"}, "own")
+
+
+def test_marker_overflow_leaves_an_unconfigured_guard_a_no_op():
+    g = HermesGuard()
+    g._denied_sessions_saturated = True
+    assert g.pre_tool_call("terminal", {"command": "ls"}, session_id="s1") is None
+
+
 @pytest.mark.parametrize('result', ['{"error":"spawn failed"}', '{"results":[]}'])
 def test_completed_invocation_cannot_supply_a_retry_grant(keys, result):
     g = _guard(keys)

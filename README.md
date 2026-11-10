@@ -216,7 +216,7 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Attenuate the parent's warrant for each child | Every child gets a fresh holder key and a verified chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
+| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts and `guard.clear_session_warrant(session_id)` when it ends | That user's tools follow that warrant on every turn until you clear it. A cleared session is denied; it never falls back to the config warrant. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
@@ -344,7 +344,7 @@ plugins:
 | `pre_tool_call` | Verifies the tool name and arguments against the session's warrant. On denial, returns `{"action": "block", "message": ...}`; the handler never runs. |
 | `post_tool_call` | Adds timing to the recorded decision and writes the audit record. |
 | `subagent_start` | Attaches the one-time child grant staged by the authorised `delegate_task` call. An unexpected child gets no authority. |
-| `on_session_end` | Clears any per-session warrant set with `guard.set_session_warrant()`, so gateway users never share one. |
+| `on_session_end` | Hermes fires this after every turn. Drops per-turn delegation state and flushes receipts. A session's own warrant stays attached until `guard.clear_session_warrant()` or its expiry. |
 
 The decision itself runs in Tenuo's Rust core: signature, expiry, holder
 proof-of-possession, and every argument constraint. The plugin holds only the

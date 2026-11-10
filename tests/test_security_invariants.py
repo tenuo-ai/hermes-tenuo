@@ -190,6 +190,31 @@ class TestFailClosed:
         guard.set_session_warrant("alice", parent_warrant, agent_key)
         assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve") is None
 
+    def test_narrower_session_keeps_its_warrant_across_turns(
+        self, parent_warrant, agent_key, cloud_key
+    ):
+        """A per-session warrant narrower than the config warrant must not widen on a later turn."""
+        from tenuo import Warrant, Wildcard
+
+        viewer = (
+            Warrant.mint_builder().holder(agent_key.public_key)
+            .capability("tool:web_search", query=Wildcard()).ttl(600).mint(cloud_key)
+        )
+        guard = HermesGuard(
+            warrant=parent_warrant, signing_key=agent_key, trusted_roots=[cloud_key.public_key],
+        )
+        guard.set_session_warrant("viewer", viewer, agent_key)
+        for _turn in range(3):
+            assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="viewer") is None
+            denied = guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="viewer")
+            assert denied and denied["action"] == "block"
+            guard.on_session_end("viewer")
+        # The config warrant itself allows read_file; the viewer never reaches it.
+        assert guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="other") is None
+        guard.clear_session_warrant("viewer")
+        assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="viewer")
+        assert guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="viewer")
+
     def test_unconfigured_guard_still_passes_through(self):
         """No warrant and no session registry remains the documented no-op."""
         guard = HermesGuard()

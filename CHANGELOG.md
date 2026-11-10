@@ -20,6 +20,18 @@
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 
+### Session warrants
+
+- Keep a session's own warrant attached across turns. `on_session_end`, which
+  Hermes fires after every turn, no longer removes it; a `delegate_task` child
+  keeps its grant for as long as it runs.
+- A session whose warrant was cleared with `clear_session_warrant`, or a child
+  whose grant has expired, is denied. It does not use the config warrant. Call
+  `set_session_warrant` again to give the session authority.
+- The record of denied sessions is bounded at 65,536 per process. Past that,
+  sessions with no warrant of their own are blocked and `delegate_task` is
+  refused until Hermes restarts.
+
 ## 0.3.0 - 2026-11-09
 
 This minor release hardens every subagent delegation boundary, fails closed on
