@@ -512,7 +512,12 @@ class HermesGuard:
                 self._attach_child(session_id, grant)
                 return grant.warrant, grant.key
 
-        if self._denied_sessions_saturated and self._static_warrant is not None:
+        # Applies with or without a config warrant: where unknown sessions pass
+        # through (require_session_warrant off), an evicted session would too.
+        # A guard that never used a warrant cannot be saturated and stays a no-op.
+        if self._denied_sessions_saturated and (
+            self._static_warrant is not None or self._uses_session_warrants
+        ):
             return _UNTRACKED, None
         return self._static_warrant, self._static_signing_key
 

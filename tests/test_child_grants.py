@@ -288,6 +288,26 @@ def test_denied_session_markers_are_bounded_and_overflow_fails_closed(keys):
     assert not _allowed(g, "read_file", {"path": "/data/x"}, "own")
 
 
+def test_marker_overflow_fails_closed_without_a_config_warrant(keys):
+    # A gateway with no config warrant that lets unknown sessions pass through.
+    root, agent = keys
+    g = HermesGuard(trusted_roots=[root.public_key], require_session_warrant=False)
+    g._MAX_DENIED_SESSIONS = 2
+    for n in range(2):
+        g.set_session_warrant(f"user-{n}", _web_only(keys), agent)
+        g.clear_session_warrant(f"user-{n}")
+    assert _allowed(g, "terminal", {"command": "ls"}, "unknown")  # not yet overflowed
+    assert not _allowed(g, "terminal", {"command": "ls"}, "user-0")
+    g.set_session_warrant("user-2", _web_only(keys), agent)
+    g.clear_session_warrant("user-2")  # evicts user-0's marker
+    assert "user-0" not in g._session_warrants
+    for session in ("user-0", "user-1", "user-2", "unknown"):
+        blocked = g.pre_tool_call("terminal", {"command": "ls"}, session_id=session)
+        assert blocked and "holds no authority" in blocked["message"]
+    g.set_session_warrant("user-3", _web_only(keys), agent)
+    assert _allowed(g, "web_search", {"query": "q"}, "user-3")
+
+
 def test_marker_overflow_leaves_an_unconfigured_guard_a_no_op():
     g = HermesGuard()
     g._denied_sessions_saturated = True
