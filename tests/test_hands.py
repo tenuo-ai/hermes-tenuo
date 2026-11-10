@@ -755,6 +755,12 @@ def test_results_say_which_machine_they_ran_on():
     assert "shares only /work/app" in refused["hands_note"]
     error = json.loads(chat._marked(json.dumps({"error": "Permission denied: /etc/x"}), "write_file", _Where()))
     assert "hands_note" in error
+    linux = json.loads(chat._marked(json.dumps({"output": "bash: /usr/x: Read-only file system", "exit_code": 1}),
+                                    "terminal", _Where()))
+    assert "hands_note" in linux
+    missing = json.loads(chat._marked(json.dumps({"output": "cat: nope: No such file or directory", "exit_code": 1}),
+                                      "terminal", _Where()))
+    assert "hands_note" not in missing  # an ordinary failure is not explained as a refusal
 
 
 def test_only_device_tools_and_plain_results_are_marked():

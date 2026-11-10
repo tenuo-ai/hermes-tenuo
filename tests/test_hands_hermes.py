@@ -83,6 +83,8 @@ SCRIPT = textwrap.dedent('''
     tool("read", "read_file", {"path": "../README.md"})
     tool("write", "write_file", {"path": "made.txt", "content": "through Hermes\\n"})
     tool("escape", "terminal", {"command": f"echo x > {server_dir}/escape.txt"})
+    # A system folder: the sandbox refuses this in words on macOS and on Linux alike.
+    tool("refused", "terminal", {"command": "echo x > /usr/hands-refusal-probe"})
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
@@ -163,7 +165,8 @@ def _on_the_device(out, project, server_dir):
     # Each result says which machine it ran on; a refusal there also says what it shares.
     for key in ("first", "pwd", "read", "write", "escape"):
         assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
-    assert out["escape"]["note"] and "shares only" in out["escape"]["note"], out["escape"]
+    assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
+    assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
     assert out["pwd"]["note"] is None
     log = (project.parent / "device-state" / "log.jsonl").read_text()
     assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log

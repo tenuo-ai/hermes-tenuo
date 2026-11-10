@@ -218,6 +218,11 @@ def _inside(path: Any, folder: str) -> bool:
 ON_DEVICE = {"terminal", "process", "read_file", "write_file", "patch", "search_files"}
 
 
+# How a sandbox's refusal reads in a command's output: macOS denies the call, Linux shows
+# everything outside the folder as a read-only file system.
+REFUSALS = ("Operation not permitted", "Permission denied", "Read-only file system")
+
+
 def _marked(result: Any, tool_name: str, session: Any) -> Any:
     """The tool's result, saying which machine it ran on. A refusal by that machine's
     sandbox also says what the machine shares, since the bare system message does not."""
@@ -231,7 +236,7 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
         return result
     data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
     text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
-    if "Operation not permitted" in text or "Permission denied" in text:
+    if any(refusal in text for refusal in REFUSALS):
         data["hands_note"] = (f"'{session.name}' shares only {session.folder}: commands there cannot change "
                               "anything outside it, and the user's keys, credentials and browser data cannot be read.")
     return json.dumps(data, ensure_ascii=False)
