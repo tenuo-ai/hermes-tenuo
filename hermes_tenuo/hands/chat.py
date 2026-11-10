@@ -173,8 +173,23 @@ def _drop_shell(task: str) -> None:
     """Forget the shell a task had on a device, so its next command starts fresh where the
     conversation now points: another machine, or the server."""
     try:
+        from hermes_tenuo.hands.backend import HandsEnvironment
+        from tools import terminal_tool
         from tools.terminal_tool_lifecycle import cleanup_vm
-        cleanup_vm(task)
+        # Hermes removes exactly the key it is given, and the key it caches under carries
+        # the routed profile. Try the ways it may have keyed this task, and only ever
+        # remove a shell that is on a device.
+        keys = []
+        for find in (lambda: terminal_tool._resolve_container_task_id(task), lambda: _scoped(task), lambda: task):
+            try:
+                key = find()
+            except Exception:
+                continue
+            if key and key not in keys:
+                keys.append(key)
+        for key in keys:
+            if isinstance(terminal_tool._active_environments.get(key), HandsEnvironment):
+                cleanup_vm(key)
     except Exception as e:
         logger.debug("hermes-tenuo hands: could not drop the device shell for %s (%s)", task, e)
 

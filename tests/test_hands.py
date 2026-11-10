@@ -808,3 +808,30 @@ def test_narrower_command_cannot_touch_the_sessions_temp_folder(hub, folder):
     assert not os.path.exists(planted)
     assert out.strip().endswith("own") and code == 0, out  # it has a temp folder of its own
     assert not [name for name in os.listdir(device.state) if name.startswith("narrow-")]
+
+
+def test_switching_drops_the_device_shell_under_the_key_hermes_uses(monkeypatch):
+    """On a host serving several profiles Hermes keys a task's shell with the profile."""
+    import types
+    from hermes_tenuo.hands import chat
+
+    class HandsEnvironment:
+        pass
+
+    server_shell, cache = object(), {}
+    cache.update({"profile-a:task-1": HandsEnvironment(), "default": server_shell, "task-1": server_shell})
+    terminal_tool = types.SimpleNamespace(
+        _active_environments=cache,
+        _qualify_task_key=lambda key: f"profile-a:{key}",
+        _resolve_container_task_id=lambda task: f"profile-a:{task}")
+    lifecycle = types.SimpleNamespace(cleanup_vm=lambda key: cache.pop(key, None))
+    tools = types.ModuleType("tools")
+    tools.terminal_tool, tools.terminal_tool_lifecycle = terminal_tool, lifecycle
+    monkeypatch.setitem(sys.modules, "tools", tools)
+    monkeypatch.setitem(sys.modules, "tools.terminal_tool", terminal_tool)
+    monkeypatch.setitem(sys.modules, "tools.terminal_tool_lifecycle", lifecycle)
+    monkeypatch.setitem(sys.modules, "hermes_tenuo.hands.backend",
+                        types.SimpleNamespace(HandsEnvironment=HandsEnvironment, NAME="hands"))
+    chat._drop_shell("task-1")
+    assert "profile-a:task-1" not in cache  # the device shell is gone
+    assert cache == {"default": server_shell, "task-1": server_shell}  # shells on the server are untouched
