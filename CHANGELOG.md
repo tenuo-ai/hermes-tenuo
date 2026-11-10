@@ -20,6 +20,13 @@
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 
+## 0.3.1 - 2026-11-10
+
+This patch release keeps a session's own warrant in force for as long as the
+session runs, and makes `doctor`, `status`, the audit log, and task minting
+agree with what the plugin does at runtime. Upgrading is recommended for every
+0.3.0 install.
+
 ### Session warrants
 
 - Keep a session's own warrant attached across turns. `on_session_end`, which
@@ -44,6 +51,12 @@
   that are paths are refused.
 - Calls blocked for a missing signing key, a session without a warrant, or an
   internal error are written to the audit log as denials.
+
+### Documentation
+
+- Correct the argument rules: once a tool has any constraint, an argument the
+  warrant does not name is denied. Examples now name `content` for
+  `write_file` and show `_allow_unknown=True` for optional arguments.
 
 ## 0.3.0 - 2026-11-09
 
