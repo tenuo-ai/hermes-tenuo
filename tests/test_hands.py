@@ -1107,3 +1107,33 @@ def test_profile_left_as_a_link_is_replaced_not_followed(hub, folder, tmp_path, 
     assert profile.read_text().startswith("export MINE=1\n") and device_module.PROFILE in profile.read_text()
     assert device_module._read_plain(str(tmp_path / "nothing-here")) == ""
     assert device_module._read_plain(str(tmp_path)) is None
+
+
+@sandboxed
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux network namespaces")
+@pytest.mark.parametrize("abstract", [True, False])
+def test_linux_commands_cannot_reach_host_sockets(tmp_path, abstract):
+    import socket
+    import uuid
+
+    family = socket.AF_UNIX if abstract else socket.AF_INET
+    address = "\0hands-test-" + uuid.uuid4().hex if abstract else ("127.0.0.1", 0)
+    with socket.socket(family, socket.SOCK_STREAM) as server:
+        server.bind(address)
+        server.listen(1)
+        address = server.getsockname()
+        # Prove the host service is accessible before testing its isolation.
+        with socket.socket(family, socket.SOCK_STREAM) as client:
+            client.connect(address)
+        connection, _ = server.accept()
+        connection.close()
+        project, temp = tmp_path / "project", tmp_path / "temp"
+        project.mkdir()
+        temp.mkdir()
+        script = (f"import socket; s = socket.socket({int(family)}, socket.SOCK_STREAM); "
+                  f"s.settimeout(2); s.connect({address!r})")
+        result = subprocess.run(sandbox.wrap(str(project), str(temp),
+                                [sys.executable, "-I", "-S", "-c", script]),
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode != 0
+        assert "ConnectionRefusedError" in result.stderr or "Network is unreachable" in result.stderr

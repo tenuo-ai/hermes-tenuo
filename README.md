@@ -281,7 +281,9 @@ What your machine enforces, whatever the server asks:
   bubblewrap on Linux) that can write only to the shared folder and a private
   temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials,
   keychains, browser profiles and shell history are unreadable. Other files
-  stay readable, and the network stays on.
+  stay readable. On macOS the network stays on; Linux commands have an isolated
+  loopback network with no host or internet access. The device itself can still
+  connect to the Hermes server.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -315,9 +317,9 @@ leaves running (a dev server started with
 `hands up` stops. To stop it earlier, kill it by name or port from a later
 command.
 
-Limits today: macOS and Linux machines only; on Linux, commands share your
-machine's network, including local sockets that are not files, so run Hands
-on a desktop Linux session only for a server you trust; a machine with no sandbox refuses
+Limits today: macOS and Linux machines only; Linux commands cannot download
+dependencies or reach host services, and dev servers are reachable only from
+other commands in the same Hands sandbox; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not

@@ -104,7 +104,10 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
-            "--die-with-parent"]
+            "--die-with-parent", "--unshare-net"]
+    # A private network namespace also hides abstract Unix sockets, which cannot be
+    # masked with filesystem mounts. Commands have loopback only; the device keeps
+    # its host network connection outside the sandbox.
     masked: List[str] = []
     for path in [*_private_paths(), *hidden]:
         path = os.path.realpath(path)  # bubblewrap cannot mount onto a path through a link
@@ -146,7 +149,7 @@ def available() -> Optional[str]:
             kind = "sandbox-exec"
         elif sys.platform.startswith("linux") and shutil.which("bwrap"):
             try:
-                ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--", "true"], capture_output=True,
+                ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--unshare-net", "--", "true"], capture_output=True,
                                     timeout=10).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 ok = False
