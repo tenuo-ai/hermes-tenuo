@@ -399,8 +399,9 @@ after cancellation. Concurrent
 invocations with overlapping child goals are rejected because Hermes does not
 include the originating call ID in its child-start hook. Use distinct goals for
 concurrent delegations. Control actions (`list`, `steer`, `stop`) create no grants.
-A delegation denied by the warrant creates no child authority even under
-`on_denial: log`; its children remain blocked.
+A spawn denied by the warrant is blocked even under `on_denial: log`. Letting
+it run could attach its child to another invocation’s pending grant. Ordinary
+non-spawn calls retain log-only behavior.
 
 ## Things to know
 

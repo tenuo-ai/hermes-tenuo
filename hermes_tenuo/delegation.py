@@ -156,6 +156,14 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
                 raise DelegationPlanError(f"{where}: {tool}.{arg} range must be [min, max] with min <= max")
             if not patterns and not binaries and rng is None:
                 raise DelegationPlanError(f"{where}: {tool}.{arg} has no constraints")
+            # Validate even specs omitted by all descendants. Composition alone
+            # never constructs constraints on tools/arguments dropped later.
+            try:
+                _members(spec)
+            except Exception as exc:
+                raise DelegationPlanError(
+                    f"{where}: {tool}.{arg} invalid constraint ({type(exc).__name__})"
+                ) from exc
     return Level(ttl, {t: dict(a) for t, a in raw["tools"].items()})
 
 

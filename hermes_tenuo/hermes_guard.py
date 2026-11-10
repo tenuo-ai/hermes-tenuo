@@ -124,6 +124,11 @@ def _toolset_list(value: Any) -> Optional[List[str]]:
     return []
 
 
+def _is_delegation_spawn(tool_name: str, args: Dict[str, Any]) -> bool:
+    action = str(args.get("action") or "").strip().lower()
+    return tool_name.removeprefix("tool:") == "delegate_task" and action in {"", "spawn"}
+
+
 def _delegated_tasks(args: Dict[str, Any]) -> List[Tuple[Optional[str], Optional[List[str]]]]:
     """(goal, toolsets) for each child a delegate_task call spawns, in Hermes's order.
 
@@ -952,8 +957,7 @@ class HermesGuard:
         # Grant validation is part of the effective delegation decision. Do it
         # before publishing any ALLOW, and never issue authority for log-only denials.
         grant_rejected = False
-        if (result.allowed and tool_name.removeprefix("tool:") == "delegate_task"
-                and str(args.get("action") or "spawn").strip().lower() == "spawn"):
+        if result.allowed and _is_delegation_spawn(tool_name, args):
             tasks = _delegated_tasks(args)
             if self._delegation_plan is not None:
                 blocked = self._register_planned_children(session_id, tasks, tool_call_id)
@@ -980,7 +984,7 @@ class HermesGuard:
             # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
             # so the post record must carry this decision, not "post-dispatch".
             self._remember_decision(tool_call_id, False, reason)
-            if self._on_denial == "log" and not grant_rejected:
+            if self._on_denial == "log" and not grant_rejected and not _is_delegation_spawn(tool_name, args):
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 return None, False
             return {"action": "block", "message": reason}, False
@@ -1019,8 +1023,7 @@ class HermesGuard:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
         if not session_id and task_id:
             session_id, _ = self._attribute_session(session_id, task_id)
-        if (tool_name.removeprefix("tool:") == "delegate_task"
-                and str(args.get("action") or "spawn").strip().lower() == "spawn"):
+        if _is_delegation_spawn(tool_name, args):
             self._finish_delegation(session_id, tool_call_id, status, args)
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.

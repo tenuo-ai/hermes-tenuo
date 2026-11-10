@@ -179,3 +179,61 @@ def test_exact_capability_is_not_bypassed_by_a_broader_prefixed_alias():
     g = HermesGuard(warrant=warrant, signing_key=holder, trusted_roots=[issuer.public_key])
     assert g.pre_tool_call('read_file', {'path': '/secret'}, session_id='p')
     assert g.pre_tool_call('read_file', {'path': '/public/x'}, session_id='p') is None
+
+
+def test_log_only_denied_spawn_cannot_compete_for_pending_authority():
+    from tenuo import Exact
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    warrant = (Warrant.mint_builder().holder(holder.public_key)
+               .capability('delegate_task', goal=Wildcard(), context=Exact('approved'))
+               .capability('read_file', path=Subpath('/data')).ttl(600).mint(issuer))
+    g = HermesGuard(warrant=warrant, signing_key=holder, trusted_roots=[issuer.public_key], on_denial='log')
+    assert g.pre_tool_call('delegate_task', {'goal': 'same', 'context': 'approved'},
+                           session_id='p', tool_call_id='good') is None
+    denied = g.pre_tool_call('delegate_task', {'goal': 'same', 'context': 'unapproved'},
+                            session_id='p', tool_call_id='bad')
+    assert denied and denied['action'] == 'block'
+    g.post_tool_call('delegate_task', {'goal': 'same', 'context': 'unapproved'}, '{}',
+                    session_id='p', tool_call_id='bad')
+    g.on_subagent_start('p', 'authorized-child', child_goal='same')
+    assert g.pre_tool_call('read_file', {'path': '/data/x'}, session_id='authorized-child') is None
+
+
+@pytest.mark.parametrize('action', ['', '   ', '\t\n', ' SpAwN '])
+def test_spawn_action_normalization_matches_hermes(action):
+    g, _ = guard()
+    args = {'action': action, 'goal': 'first'}
+    assert g.pre_tool_call('delegate_task', args, session_id='p', tool_call_id='first') is None
+    g.on_subagent_start('p', 'c', child_goal='first')
+    assert g.pre_tool_call('read_file', {'path': '/data/x'}, session_id='c') is None
+    args = {'action': action, 'goal': 'unused'}
+    assert g.pre_tool_call('delegate_task', args, session_id='p', tool_call_id='second') is None
+    g.post_tool_call('delegate_task', args, '{}', session_id='p', tool_call_id='second')
+    g.on_subagent_start('p', 'late', child_goal='unused')
+    assert g.pre_tool_call('read_file', {'path': '/data/x'}, session_id='late')
+
+
+@pytest.mark.parametrize('dropped', ['tool', 'argument'])
+def test_unused_invalid_plan_specs_fail_closed(tmp_path, dropped):
+    import base64
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from hermes_tenuo import register
+    g, _ = guard()
+    root_tools = {'read_file': {'path': {'patterns': ['^[$']}}}
+    child_tools = {} if dropped == 'tool' else {'read_file': {}}
+    plan = {'version': 1, 'root': {'tools': root_tools},
+            'levels': [{'ttl_seconds': 60, 'tools': child_tools}]}
+    path = tmp_path / 'plan.json'
+    path.write_text(json.dumps(plan))
+    path.chmod(0o600)
+    hooks = {}
+    ctx = SimpleNamespace(register_skill=lambda *a, **kw: None,
+                          register_hook=lambda name, fn: hooks.setdefault(name, fn))
+    with patch('hermes_tenuo._config._get_plugin_entry', return_value={
+        'warrant': base64.b64encode(g._static_warrant.to_bytes()).decode(),
+        'delegation_plan': str(path),
+    }):
+        register(ctx)
+    assert hooks['pre_tool_call'](tool_name='read_file', args={})['action'] == 'block'

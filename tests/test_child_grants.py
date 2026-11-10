@@ -267,7 +267,8 @@ def test_log_only_denial_does_not_create_delegation_authority(keys):
     parent = (Warrant.mint_builder().holder(agent.public_key)
               .capability('read_file', path=Subpath('/data')).ttl(600).mint(root))
     g = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key], on_denial='log')
-    assert g.pre_tool_call('delegate_task', {'goal': 'r'}, session_id='p') is None
+    denied = g.pre_tool_call('delegate_task', {'goal': 'r'}, session_id='p')
+    assert denied and denied['action'] == 'block'
     assert not g._planned_children
     g.on_subagent_start('p', 'c', child_goal='r')
     assert not _allowed(g, 'read_file', {'path': '/data/file'}, 'c')
