@@ -331,10 +331,15 @@ class Hub:
             session.nonces = (session.nonces + [nonce])[-256:]
             session.gone = True
             waiting, session.waiting = dict(session.waiting), {}
-        for answer in waiting.values():
+            handed, session.handed = set(session.handed), {}
+        for job_id, answer in waiting.items():
+            # Only a command the device never received is known not to have run.
+            reply = ((f"hands: device '{session.name}' went down while it had this command; "
+                      "it is not known whether it ran\n", 125) if job_id in handed else
+                     (f"hands: device '{session.name}' went down before running this command, "
+                      "so it was not run\n", 127))
             try:
-                answer.put_nowait((f"hands: device '{session.name}' went down before running this command, "
-                                   "so it was not run\n", 127))
+                answer.put_nowait(reply)
             except queue.Full:
                 pass
         return {"ok": True}

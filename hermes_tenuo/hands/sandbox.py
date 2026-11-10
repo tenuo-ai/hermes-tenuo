@@ -53,17 +53,17 @@ def _ancestors(path: str) -> List[str]:
     return out
 
 
-def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = ()) -> str:
+def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-    hidden = " ".join(f"(subpath {q(p)})" for p in _private_paths())
+    private = [*_private_paths(), *hidden]
+    hidden_rule = " ".join(f"(subpath {q(p)})" for p in private)
     own = f"(subpath {q(folder)}) (subpath {q(tmp)})"
     extra = " ".join(f"(subpath {q(p)})" for p in readable)
     # Folders on the way to an allowed one stay visible by name (not listable), so
     # `mkdir -p` and path lookups work when the allowed folder sits under a hidden one.
-    private = _private_paths()
     above = sorted({a for p in (folder, tmp, *readable) for a in _ancestors(p)
                     if any(a == h or a.startswith(h + os.sep) for h in private)})
     on_the_way = " ".join(f"(literal {q(a)})" for a in above)
@@ -82,7 +82,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = ()) -> str:
         "(allow system-socket)", "(allow network-bind (local ip))", "(allow network-inbound (local ip))",
         "(allow network-outbound (remote ip))",
         '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
-        "(allow file-read*)", f"(deny file-read* {hidden})", f"(allow file-read* {own} {extra})",
+        "(allow file-read*)", f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
         *([f"(allow file-read-metadata {on_the_way})"] if on_the_way else []),
         f"(allow file-write* {own}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
@@ -92,12 +92,12 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = ()) -> str:
 
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
-           readable: Sequence[str] = ()) -> List[str]:
+           readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
             "--die-with-parent"]
-    for path in _private_paths():
+    for path in [*_private_paths(), *hidden]:
         if os.path.isdir(path):
             argv += ["--tmpfs", path]
         elif os.path.exists(path):
@@ -143,15 +143,16 @@ def available() -> Optional[str]:
 
 
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
-         shared: bool = False, readable: Sequence[str] = ()) -> List[str]:
+         shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
-    names folders that stay readable even under a hidden path (the Python that runs it)."""
+    names folders that stay readable even under a hidden path (the Python that runs it);
+    `hidden` names more folders a command must not read (the device's own state)."""
     kind = available()
     if kind == "sandbox-exec":
-        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable), *command]
+        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable, hidden), *command]
     if kind == "bwrap":
-        return _bwrap(folder, tmp, command, shared, readable)
+        return _bwrap(folder, tmp, command, shared, readable, hidden)
     if allow_unsandboxed:
         return command
     raise SandboxUnavailable(

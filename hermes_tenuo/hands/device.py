@@ -27,18 +27,37 @@ from hermes_tenuo.hands import sandbox, wire
 
 MAX_OUTPUT = 8 * 1024 * 1024
 
-# Runs inside the sandbox for as long as the device is up and starts every command, so
-# commands share one sandbox: a later command can stop a server an earlier one started,
-# and nothing can signal a process outside it. Standard library only; it must start with
-# no site packages. When the device goes away it stops whatever it started.
+# Runs inside a sandbox and starts the commands, so they share it: a later command can stop
+# a server an earlier one started, and nothing can signal a process outside. Standard
+# library only; it must start with no site packages. When the device closes it, it stops
+# everything that runs in the sandbox, including what detached itself or ignores a polite
+# request to stop.
 RUNNER = r"""
-import json, os, signal, subprocess, sys
+import json, os, signal, subprocess, sys, time
+outside = os.getppid()
 groups = []
-def stop(group, sig=signal.SIGKILL):
+def stop(group, sig):
     try:
         os.killpg(group, sig)
+        return True
+    except OSError:
+        return False
+def confined():
+    # True only when this process provably cannot touch anything outside the sandbox.
+    try:
+        os.kill(outside, 0)
+        return False  # it can signal the device, so it is not confined
     except OSError:
         pass
+    probe = "/private/tmp/.hands-probe-%d" % os.getpid()
+    try:
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        os.unlink(probe)
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 sys.stdout.write("ready\n"); sys.stdout.flush()
 for line in sys.stdin:
     job = json.loads(line)
@@ -54,7 +73,7 @@ for line in sys.stdin:
                 p.communicate(text.encode() if text is not None else None, timeout=job["timeout"])
                 code = p.returncode
             except subprocess.TimeoutExpired:
-                stop(p.pid)
+                stop(p.pid, signal.SIGKILL)
                 p.wait()
                 code = 124
     except Exception as e:
@@ -64,8 +83,21 @@ for line in sys.stdin:
         except OSError:
             pass
     sys.stdout.write(json.dumps({"id": job["id"], "code": code}) + "\n"); sys.stdout.flush()
-for group in groups:
-    stop(group, signal.SIGTERM)
+alive = [g for g in groups if stop(g, signal.SIGTERM)]
+end = time.time() + 2
+while alive and time.time() < end:
+    time.sleep(0.1)
+    alive = [g for g in alive if stop(g, 0)]
+for g in groups:
+    stop(g, signal.SIGKILL)
+if sys.platform == "darwin" and confined():
+    # In the macOS sandbox a signal reaches only processes in the same sandbox, so this
+    # ends whatever is left in it and nothing else. (On Linux the sandbox has its own
+    # process list, which ends with this process.)
+    try:
+        os.kill(-1, signal.SIGKILL)
+    except OSError:
+        pass
 """
 
 
@@ -79,6 +111,10 @@ class _Stopped(Exception):
 
 def say(text: str) -> None:
     print(text, flush=True)  # visible at once, also when the output goes to a file or a service log
+
+
+def _within(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
 def home() -> Path:
@@ -131,7 +167,13 @@ class Device:
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
         self.allow_unsandboxed = allow_unsandboxed
-        self.tmp = os.path.realpath(home() / "tmp")
+        # Where this device keeps its key, its log and the commands' temp folder. Commands
+        # never see it (only the temp folder inside), so it cannot overlap what is shared.
+        self.state = os.path.realpath(home())
+        if _within(self.state, self.folder) or _within(self.folder, self.state):
+            raise HandsError(f"the shared folder and Hands's own folder ({self.state}) must be separate: "
+                             "share another folder, or set TENUO_HANDS_HOME to a folder outside it")
+        self.tmp = os.path.join(self.state, "tmp")
         os.makedirs(self.tmp, mode=0o700, exist_ok=True)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed)  # fail before pairing
         self.say = say
@@ -179,7 +221,7 @@ class Device:
         self._polled_at = time.time()
         reply = _post(self.url + wire.API + "/poll", {
             "device": self.me, "nonce": nonce, "sig": self._signed(wire.TOOL_POLL, {"nonce": nonce}),
-        }, timeout=wire.POLL_SECONDS + 15)
+        }, timeout=min(wire.POLL_SECONDS + 15, max(1.0, self.expires - time.time() + 1)))
         return reply.get("job")
 
     def bye(self) -> None:
@@ -222,14 +264,18 @@ class Device:
         """Seconds this command may still run. The server signs how long it will wait and
         how long this device's request had been open when it handed the command over, so
         the device can tell, with its own clock only, that a command reached it too late
-        (the machine slept, the network stalled) and must not run."""
+        (the machine slept, the network stalled) and must not run. Nothing runs past the
+        end of this device's own time window either."""
         timeout = max(1, min(int(job["timeout"]), 24 * 3600))
-        if self._polled_at is None:
-            return timeout
-        late = (time.time() - self._polled_at) - int(job.get("waited_ms") or 0) / 1000.0
-        if late >= timeout:
-            raise HandsError("it reached this machine too late to run (asleep or offline), so it was not run")
-        return max(1, math.ceil(timeout - max(0.0, late)))
+        window = self.expires - time.time()
+        if window <= 0:
+            raise HandsError("the time window has ended")
+        if self._polled_at is not None:
+            late = (time.time() - self._polled_at) - int(job.get("waited_ms") or 0) / 1000.0
+            if late >= timeout:
+                raise HandsError("it reached this machine too late to run (asleep or offline), so it was not run")
+            timeout = math.ceil(timeout - max(0.0, late))
+        return max(1, min(timeout, math.ceil(window)))
 
     def _env(self) -> Dict[str, str]:
         env = dict(os.environ, TMPDIR=self.tmp)
@@ -240,69 +286,70 @@ class Device:
     def run(self, job: Dict[str, Any], folder: str, timeout: Optional[int] = None) -> tuple:
         shell = ["/bin/bash", "-lc" if job.get("login") else "-c", job["cmd"]]
         timeout = timeout or max(1, min(int(job["timeout"]), 24 * 3600))
+        # The command writes its output to this file. It is read back through the handle
+        # opened here, never by name: the name is in a folder the command can change.
         fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=self.tmp)
-        os.close(fd)
         try:
-            # A narrower warrant gets its own, narrower sandbox for the one command.
-            code = self._in_runner(shell, folder, job.get("stdin"), timeout, out_path) if folder == self.folder else None
-            if code is None:
-                code = self._alone(shell, folder, job.get("stdin"), timeout, out_path)
-            with open(out_path, "rb") as f:
-                data = f.read(MAX_OUTPUT + 1)
+            if folder == self.folder:
+                if self._runner is None or self._runner.poll() is not None:
+                    self._runner = self._start_runner(self.folder, shared=True)
+                runner, own = self._runner, False
+            else:
+                # A narrower warrant gets its own, narrower sandbox for the one command.
+                runner, own = self._start_runner(folder, shared=False), True
+            if runner is None:
+                return "hands: this machine could not start its sandbox, so the command was not run\n", 126
+            code = self._ask(runner, shell, folder, job.get("stdin"), timeout, out_path)
+            if own or code is None:
+                self._close(runner)  # stops whatever the command left behind
+                if not own:
+                    self._runner = None
+            os.lseek(fd, 0, os.SEEK_SET)
+            data = b""
+            while len(data) <= MAX_OUTPUT:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                data += chunk
         finally:
+            os.close(fd)
             try:
                 os.unlink(out_path)
             except OSError:
                 pass
         text = data[:MAX_OUTPUT].decode("utf-8", errors="replace")
+        if code is None:
+            code = 124
         if code == 124:
             text += f"\nhands: stopped after {timeout} seconds\n"
         if len(data) > MAX_OUTPUT:
             text += "\nhands: output cut at 8 MB\n"
         return text, code
 
-    def _alone(self, shell: list, folder: str, stdin: Optional[str], timeout: int, out_path: str) -> int:
-        """One command in a sandbox of its own. Output goes to a file, so a process the
-        command leaves running does not hold the result back."""
-        argv = sandbox.wrap(folder, self.tmp, shell, allow_unsandboxed=self.allow_unsandboxed)
-        with open(out_path, "wb") as out:
-            process = subprocess.Popen(argv, cwd=folder, stdout=out, stderr=subprocess.STDOUT,
-                                       stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                                       start_new_session=True, env=self._env())
-            try:
-                process.communicate(stdin.encode() if stdin is not None else None, timeout=timeout)
-                return process.returncode
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except OSError:
-                    process.kill()
-                process.wait()
-                return 124
+    # -- the sandbox the commands run in ---------------------------------------------
 
-    # -- the shared sandbox ---------------------------------------------------------
-
-    def _start_runner(self) -> bool:
+    def _start_runner(self, folder: str, shared: bool) -> Optional[subprocess.Popen]:
         python = os.path.realpath(getattr(sys, "_base_executable", None) or sys.executable)
         # The interpreter and its standard library, wherever they are installed.
         own = sorted({os.path.realpath(p) for p in (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
         try:
-            argv = sandbox.wrap(self.folder, self.tmp, [python, "-I", "-S", "-c", RUNNER],
-                                allow_unsandboxed=self.allow_unsandboxed, shared=True, readable=own)
-            runner = subprocess.Popen(argv, cwd=self.folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            argv = sandbox.wrap(folder, self.tmp, [python, "-I", "-S", "-c", RUNNER],
+                                allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
+                                hidden=[self.state])
+            runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
-            return False
-        self._runner = runner
-        if self._line(15) != "ready":
-            self._stop_runner()
-            return False
-        return True
+            return None
+        if self._line(runner, 15) != "ready":
+            self._close(runner)
+            return None
+        return runner
 
-    def _line(self, seconds: float) -> Optional[str]:
+    @staticmethod
+    def _line(runner: subprocess.Popen, seconds: float) -> Optional[str]:
         """One line from the runner, or None if it does not come in time."""
-        runner, data, end = self._runner, b"", time.time() + seconds
-        while runner is not None and not data.endswith(b"\n"):
+        data, end = b"", time.time() + seconds
+        while not data.endswith(b"\n"):
             left = end - time.time()
             if left <= 0 or not select.select([runner.stdout], [], [], left)[0]:
                 return None
@@ -310,40 +357,46 @@ class Device:
             if not chunk:
                 return None
             data += chunk
-        return data.decode("utf-8", errors="replace").strip() if data else None
+        return data.decode("utf-8", errors="replace").strip()
 
-    def _stop_runner(self) -> None:
-        runner, self._runner = self._runner, None
+    @staticmethod
+    def _close(runner: Optional[subprocess.Popen]) -> None:
+        """End a sandbox. The runner stops everything in it, then exits."""
         if runner is None:
             return
         try:
-            runner.stdin.close()  # the runner stops what it started, then exits
-            runner.wait(5)
+            runner.stdin.close()
+            runner.wait(8)
         except (OSError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(runner.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            pass
+        try:
+            os.killpg(runner.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            runner.wait(2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
-    def _in_runner(self, shell: list, folder: str, stdin: Optional[str], timeout: int, out_path: str) -> Optional[int]:
-        """Run in the shared sandbox; None if it is not available (then the command runs alone)."""
-        if self._runner is None or self._runner.poll() is not None:
-            self._runner = None
-            if not self._start_runner():
-                return None
+    def _stop_runner(self) -> None:
+        runner, self._runner = self._runner, None
+        self._close(runner)
+
+    def _ask(self, runner: subprocess.Popen, shell: list, folder: str, stdin: Optional[str], timeout: int,
+             out_path: str) -> Optional[int]:
+        """Run one command in a sandbox; None if the sandbox hung or died."""
         job_id = secrets.token_hex(8)
         line = json.dumps({"id": job_id, "argv": shell, "cwd": folder, "stdin": stdin, "timeout": timeout,
                            "out": out_path}) + "\n"
         try:
-            self._runner.stdin.write(line.encode())
-            self._runner.stdin.flush()
-            reply = self._line(timeout + 20)
+            runner.stdin.write(line.encode())
+            runner.stdin.flush()
+            reply = self._line(runner, timeout + 20)
             answer = json.loads(reply) if reply else {}
         except (OSError, ValueError):
             answer = {}
         if answer.get("id") != job_id:
-            self._stop_runner()  # it hung or died: start clean for the next command
-            return 124
+            return None
         return int(answer.get("code", 127))
 
     def handle(self, job: Dict[str, Any]) -> None:
@@ -396,6 +449,8 @@ class Device:
                 self.say(f"The server ended this session: {e}")
                 return 1
             except ConnectionError as e:
+                if time.time() >= self.expires:
+                    break
                 failures += 1
                 if failures == 1:
                     self.say(f"Can't reach the server ({e}); retrying.")

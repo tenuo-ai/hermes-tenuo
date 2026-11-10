@@ -454,3 +454,71 @@ def test_command_a_restarted_device_had_is_reported_as_unknown(hub, folder, pair
     Device(None, str(folder), 600, allow_unsandboxed=True).pair()
     waiter.join(5)
     assert result["r"][1] == 125 and "not known whether it ran" in result["r"][0]
+
+
+# --- what a command cannot do to the device itself ------------------------------------------
+
+@sandboxed
+def test_device_state_is_hidden_wherever_it_is_kept(hub, folder, tmp_path):
+    up(hub, folder)
+    key = tmp_path / "device-state" / "device.key"
+    assert key.exists()
+    out, code = run(hub, f"cat {key}; ls {key.parent}")
+    assert code != 0 and key.read_text().strip() not in out
+
+
+def test_shared_folder_and_state_folder_must_be_separate(hub, folder, monkeypatch):
+    monkeypatch.setenv("TENUO_HANDS_HOME", str(folder / ".hands"))
+    with pytest.raises(HandsError, match="must be separate"):
+        Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    monkeypatch.setenv("TENUO_HANDS_HOME", str(folder.parent))
+    with pytest.raises(HandsError, match="must be separate"):
+        Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+
+
+@sandboxed
+def test_output_is_not_read_through_a_swapped_file(hub, folder, tmp_path):
+    up(hub, folder)
+    secret = tmp_path / "device-state" / "device.key"
+    out, code = run(hub, f'for f in "$TMPDIR"/.hands-out-*; do rm -f "$f"; ln -s {secret} "$f"; done; echo swapped')
+    assert secret.read_text().strip() not in out
+    assert run(hub, "echo fine")[0].strip() == "fine"
+
+
+@sandboxed
+def test_everything_left_running_stops_with_the_device(hub, folder, monkeypatch):
+    """Also what ignores a request to stop, and what moved to a session of its own."""
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    run(hub, "(trap '' TERM; while true; do date +%s%N > stubborn.txt; sleep 0.2; done) >/dev/null 2>&1 &")
+    run(hub, "python3 -c \"import os, time\nos.setsid()\nwhile True:\n    open('detached.txt', 'w').write(str(time.time()))\n"
+             "    time.sleep(0.2)\" >/dev/null 2>&1 &")
+    time.sleep(1.5)
+    assert (folder / "stubborn.txt").exists() and (folder / "detached.txt").exists()
+    device.stop()
+    device.thread.join(30)
+    time.sleep(1)
+    seen = [(folder / name).read_text() for name in ("stubborn.txt", "detached.txt")]
+    time.sleep(1)
+    assert [(folder / name).read_text() for name in ("stubborn.txt", "detached.txt")] == seen
+
+
+def test_command_never_runs_past_the_time_window(hub, paired):
+    job = _job(hub, paired)  # asks for 30 seconds
+    paired.expires = time.time() + 5
+    assert paired.budget(job) <= 5
+    paired.expires = time.time() - 1
+    with pytest.raises(HandsError, match="window has ended"):
+        paired.budget(job)
+
+
+def test_goodbye_reports_unknown_for_a_command_the_device_had(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(
+        r=hub.run(hub.pick(paired.name), "echo x", login=False, timeout=30, stdin=None)))
+    waiter.start()
+    assert paired.poll() is not None  # handed over; its result never arrives
+    paired.bye()
+    waiter.join(5)
+    assert result["r"][1] == 125 and "not known whether it ran" in result["r"][0]
