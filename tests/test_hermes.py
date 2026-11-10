@@ -310,16 +310,34 @@ class TestSessionWarrantRegistry:
         )
         guard.set_session_warrant("alice", basic_warrant, agent_key)
         guard.clear_session_warrant("alice")
-        warrant, _ = guard._resolve_warrant("alice")
-        # Falls back to static warrant
+        warrant, key = guard._resolve_warrant("alice")
+        # A cleared session is denied; it never falls back to the static warrant.
+        assert warrant is not basic_warrant and key is None
+        blocked = guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="alice")
+        assert blocked and "holds no authority" in blocked["message"]
+
+    def test_cleared_session_can_be_given_a_warrant_again(self, basic_warrant, agent_key, root_key):
+        guard = HermesGuard(warrant=basic_warrant, signing_key=agent_key, trusted_roots=[root_key.public_key])
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        guard.clear_session_warrant("alice")
+        guard.set_session_warrant("alice", basic_warrant, agent_key)
+        assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="alice") is None
+
+    def test_clearing_an_unknown_session_leaves_it_on_the_static_warrant(
+        self, basic_warrant, agent_key, root_key
+    ):
+        guard = HermesGuard(warrant=basic_warrant, signing_key=agent_key, trusted_roots=[root_key.public_key])
+        guard.clear_session_warrant("never-registered")
+        warrant, _ = guard._resolve_warrant("never-registered")
         assert warrant is basic_warrant
 
-    def test_on_session_end_clears_warrant(self, basic_warrant, agent_key, root_key):
+    def test_session_warrant_survives_on_session_end(self, basic_warrant, agent_key, root_key):
+        # Hermes fires on_session_end after every turn, not at the end of a session.
         guard = HermesGuard(trusted_roots=[root_key.public_key])
         guard.set_session_warrant("alice", basic_warrant, agent_key)
         guard.on_session_end("alice")
-        with guard._session_lock:
-            assert "alice" not in guard._session_warrants
+        warrant, key = guard._resolve_warrant("alice")
+        assert warrant is basic_warrant and key is agent_key
 
     def test_set_session_warrant_stores_parent_for_chain(
         self, basic_warrant, child_warrant, agent_key, root_key
@@ -570,5 +588,6 @@ class TestPluginGuardGatewayProxy:
         pg = PluginGuard(inner)
         pg.set_session_warrant("alice", warrant, agent_key)
         pg.clear_session_warrant("alice")
-        with inner._session_lock:
-            assert "alice" not in inner._session_warrants
+        w, k = inner._resolve_warrant("alice")
+        assert w is not warrant and k is None
+        assert pg.pre_tool_call_hook(tool_name="web_search", args={"query": "x"}, session_id="alice")

@@ -38,6 +38,22 @@ logger = logging.getLogger("hermes_tenuo")
 
 # Session marker: a subagent that a delegation plan did not authorise.
 _NO_AUTHORITY = object()
+# Session marker: a session whose own warrant was cleared or has expired. It
+# stays denied; it must never fall back to the config warrant.
+_RETIRED = object()
+
+_MARKER_REASONS = {
+    _NO_AUTHORITY: "tenuo: this subagent was not started by an authorised delegation and holds no authority",
+    _RETIRED: "tenuo: this session's warrant was cleared or has expired; it holds no authority",
+}
+
+
+def _marker_reason(warrant: Any) -> Optional[str]:
+    """The denial reason when *warrant* is a no-authority session marker, else None."""
+    for marker, reason in _MARKER_REASONS.items():
+        if warrant is marker:
+            return reason
+    return None
 
 # Bounded waits for signed receipts still in the deferred emitter's queue.
 _SESSION_END_FLUSH_SECS = 2.0
@@ -265,6 +281,11 @@ class HermesGuard:
         ``clear_session_warrant`` when it ends. After any session warrant
         exists, calls from a session with none are blocked
         (``require_session_warrant``, on by default).
+
+    A session's own warrant lasts until it is replaced, cleared, or expires.
+    Hermes fires ``on_session_end`` after every turn, so that hook does not
+    remove it. A session that once held its own warrant never falls back to
+    the config warrant.
     """
 
     def __init__(
@@ -298,11 +319,16 @@ class HermesGuard:
         self._cancelled_goals: Dict[str, set] = {}
         self._cancelled_invocations: set = set()
         self._audit_only_warned = False  # warn once when running without a warrant
-        self._uses_session_warrants = False  # set by set_session_warrant (gateway)
+        # More than one warrant is in play (a gateway session or a delegated child).
+        self._uses_session_warrants = False
 
         # Session warrant registry: session_id → (warrant, signing_key)
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
         self._session_lock = threading.Lock()
+        # Delegated children that still hold a live grant, oldest first.
+        self._child_sessions: Dict[str, None] = {}
+        # Sessions holding a no-authority marker, oldest first (bounded).
+        self._denied_sessions: Dict[str, None] = {}
 
         # Session warrant chains: session_id → parent_warrant for chain verification
         # session_id → ancestor warrants, root first (the holder presents them all)
@@ -358,20 +384,55 @@ class HermesGuard:
         Pass *parent_warrant* when *warrant* is a ``grant_builder`` child so
         ``enforce_tool_call`` verifies the delegation chain. Omit it for
         independently minted session warrants (gateway roles).
+
+        The warrant stays attached across turns until it is replaced or
+        ``clear_session_warrant`` is called.
         """
         with self._session_lock:
-            self._session_warrants[session_id] = (warrant, signing_key)
-            self._uses_session_warrants = True
-            if parent_warrant is not None:
-                self._session_warrant_chains[session_id] = (
-                    list(parent_warrant) if isinstance(parent_warrant, (list, tuple)) else [parent_warrant]
-                )
+            self._bind_session(session_id, warrant, signing_key, parent_warrant)
         logger.debug("hermes-tenuo: registered warrant for session %s", session_id)
 
     def clear_session_warrant(self, session_id: str) -> None:
+        """Remove *session_id*'s own warrant. The session is denied from then on.
+
+        It does not fall back to the config warrant: a session that was given
+        a narrower warrant must not gain a wider one by losing it. Call
+        ``set_session_warrant`` again to give the session authority.
+        """
         with self._session_lock:
-            self._session_warrants.pop(session_id, None)
+            if session_id in self._session_warrants:
+                self._deny_session(session_id, _RETIRED)
+
+    # Bounded so a long-lived process does not keep a marker per session for ever.
+    _MAX_DENIED_SESSIONS = 65536
+
+    def _bind_session(
+        self, session_id: str, warrant: Any, signing_key: Optional[Any], parent_warrant: Optional[Any] = None,
+    ) -> None:
+        """Give *session_id* its own warrant. Caller holds ``_session_lock``."""
+        self._session_warrants[session_id] = (warrant, signing_key)
+        self._uses_session_warrants = True
+        self._denied_sessions.pop(session_id, None)
+        self._child_sessions.pop(session_id, None)
+        if parent_warrant is not None:
+            self._session_warrant_chains[session_id] = (
+                list(parent_warrant) if isinstance(parent_warrant, (list, tuple)) else [parent_warrant]
+            )
+        else:
             self._session_warrant_chains.pop(session_id, None)
+
+    def _deny_session(self, session_id: str, marker: Any) -> None:
+        """Replace *session_id*'s warrant with a no-authority marker. Caller holds ``_session_lock``."""
+        self._session_warrants[session_id] = (marker, None)
+        self._uses_session_warrants = True
+        self._session_warrant_chains.pop(session_id, None)
+        self._child_sessions.pop(session_id, None)
+        self._denied_sessions.pop(session_id, None)
+        self._denied_sessions[session_id] = None
+        while len(self._denied_sessions) > self._MAX_DENIED_SESSIONS:
+            oldest = next(iter(self._denied_sessions))
+            del self._denied_sessions[oldest]
+            self._session_warrants.pop(oldest, None)
 
     def _chain_for(self, session_id: str) -> List[Any]:
         """Ancestor warrants for *session_id*, root first; empty for a root session."""
@@ -515,7 +576,7 @@ class HermesGuard:
         from tenuo import SigningKey
 
         parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
-        if parent_warrant is None or parent_warrant is _NO_AUTHORITY or parent_key is None:
+        if parent_warrant is None or _marker_reason(parent_warrant) or parent_key is None:
             return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
         chain = self._chain_for(parent_session_id) + [parent_warrant]
         parent_tools = list(parent_warrant.tools or [])
@@ -592,7 +653,7 @@ class HermesGuard:
             return {"action": "block",
                     "message": f"tenuo: delegation depth {depth} is beyond the delegation plan (max {plan.max_depth})"}
         parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
-        if parent_warrant is None or parent_warrant is _NO_AUTHORITY or parent_key is None:
+        if parent_warrant is None or _marker_reason(parent_warrant) or parent_key is None:
             return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
         chain = self._chain_for(parent_session_id) + [parent_warrant]
         try:
@@ -730,7 +791,20 @@ class HermesGuard:
         return None
 
     def _attach_child(self, child_session_id: str, grant: "_ChildGrant") -> None:
-        self.set_session_warrant(child_session_id, grant.warrant, grant.key, parent_warrant=grant.chain)
+        with self._session_lock:
+            # A child keeps its grant for as long as it runs, across turns.
+            # Drop the key material of children whose grant has expired; they
+            # stay denied instead of falling back to the config warrant.
+            for session_id in list(self._child_sessions):
+                warrant, _ = self._session_warrants.get(session_id, (None, None))
+                try:
+                    expired = warrant is None or warrant.is_expired()
+                except Exception:
+                    expired = True
+                if expired:
+                    self._deny_session(session_id, _RETIRED)
+            self._bind_session(child_session_id, grant.warrant, grant.key, grant.chain)
+            self._child_sessions[child_session_id] = None
 
     # ------------------------------------------------------------------
     # Hook: on_session_start / on_session_end
@@ -752,14 +826,17 @@ class HermesGuard:
             self.on_subagent_start(parent_session_id, session_id)
 
     def on_session_end(self, session_id: str) -> None:
-        self.clear_session_warrant(session_id)
+        """Called when Hermes fires on_session_end, which is after every turn.
+
+        The session may run again (a gateway user's next message, a child's
+        correction turn), so its own warrant and chain stay attached. Only
+        per-turn state is dropped here.
+        """
         # Reset primary if this was the primary session, so the next session
         # is correctly identified as a new primary rather than a child.
         with self._primary_lock:
             if self._primary_session_id == session_id:
                 self._primary_session_id = None
-        with self._session_lock:
-            self._session_warrant_chains.pop(session_id, None)
         with self._pending_lock:
             abandoned = self._planned_children.pop(session_id, ())
             if abandoned:
@@ -822,7 +899,8 @@ class HermesGuard:
             "hermes-tenuo: subagent %s (parent %s) does not match an authorised "
             "delegate_task call; it holds no authority", child_session_id, parent_session_id,
         )
-        self.set_session_warrant(child_session_id, _NO_AUTHORITY, None)
+        with self._session_lock:
+            self._deny_session(child_session_id, _NO_AUTHORITY)
 
     # ------------------------------------------------------------------
     # Sessionless calls (execute_code): attribute by task id
@@ -892,8 +970,8 @@ class HermesGuard:
             self._remember_decision(tool_call_id, False, unattributed)
             return {"action": "block", "message": unattributed}
         warrant, signing_key = self._resolve_warrant(session_id)
-        if warrant is _NO_AUTHORITY:
-            reason = "tenuo: this subagent was not started by an authorised delegation and holds no authority"
+        reason = _marker_reason(warrant)
+        if reason is not None:
             self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
             self._remember_decision(tool_call_id, False, reason)
             return {"action": "block", "message": reason}
@@ -1082,8 +1160,9 @@ class HermesGuard:
             self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
             return
         warrant, _ = self._resolve_warrant(session_id)
-        if warrant is _NO_AUTHORITY:
-            self._emit_audit(tool_name, args, False, "tenuo: this subagent holds no authority",
+        marker_reason = _marker_reason(warrant)
+        if marker_reason is not None:
+            self._emit_audit(tool_name, args, False, marker_reason,
                              session_id, task_id, tool_call_id, duration_ms)
             return
 

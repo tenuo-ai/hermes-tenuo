@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Session warrants
+
+- Keep a session's own warrant attached across turns. `on_session_end`, which
+  Hermes fires after every turn, no longer removes it; a `delegate_task` child
+  keeps its grant for as long as it runs.
+- A session whose warrant was cleared with `clear_session_warrant`, or a child
+  whose grant has expired, is denied. It does not use the config warrant. Call
+  `set_session_warrant` again to give the session authority.
+
 ## 0.3.0 - 2026-11-09
 
 This minor release hardens every subagent delegation boundary, fails closed on

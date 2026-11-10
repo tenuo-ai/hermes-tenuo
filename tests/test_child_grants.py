@@ -220,6 +220,59 @@ def test_task_shared_by_two_live_sessions_is_ambiguous(keys):
     assert g.pre_tool_call("web_search", {"query": "q"}, task_id="shared") is None
 
 
+def _web_only(keys, ttl=600):
+    root, agent = keys
+    return Warrant.mint_builder().holder(agent.public_key).capability("web_search", query=Wildcard()).ttl(ttl).mint(root)
+
+
+def test_child_keeps_its_grant_when_it_runs_another_turn(keys):
+    # Hermes fires on_session_end after every turn and may run a child again
+    # under the same session id (its output-schema correction turn).
+    g = _guard(keys, _web_only(keys))
+    _delegate(g, {"goal": "research"}, [("c", "research")])
+    assert _allowed(g, "web_search", {"query": "q"}, "c")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "c")
+    g.on_session_end("c")
+    g.on_session_start("c")
+    assert _allowed(g, "web_search", {"query": "q"}, "c")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "c")
+    assert _allowed(g, "read_file", {"path": "/data/x"}, "p")  # the parent still holds it
+
+
+def test_grandchild_chain_survives_the_child_turn_end(keys):
+    g = _guard(keys)
+    _delegate(g, {"goal": "a"}, [("c", "a")])
+    depth = len(g._chain_for("c"))
+    assert depth == 1
+    g.on_session_end("c")
+    assert len(g._chain_for("c")) == depth
+
+
+def test_expired_child_grant_is_denied_not_widened(keys):
+    import time
+
+    g = _guard(keys, _web_only(keys, ttl=1))
+    _delegate(g, {"goal": "a"}, [("old", "a")])
+    time.sleep(1.2)
+    g._child_warrant = _web_only(keys)  # a fresh template for the next delegation
+    # Attaching the next child retires children whose grant has expired.
+    assert g.pre_tool_call("delegate_task", {"goal": "b"}, session_id="p", tool_call_id="second") is None
+    g.on_subagent_start("p", "new", child_goal="b")
+    blocked = g.pre_tool_call("read_file", {"path": "/data/x"}, session_id="old")
+    assert blocked and "holds no authority" in blocked["message"]
+    assert "old" not in g._child_sessions and "old" not in g._session_warrant_chains
+
+
+def test_denied_session_markers_are_bounded(keys):
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 3
+    for n in range(5):
+        g.on_subagent_start("p", f"stray-{n}")
+    assert len(g._denied_sessions) == 3
+    assert sum(1 for s in g._session_warrants if s.startswith("stray-")) == 3
+    assert not _allowed(g, "web_search", {"query": "q"}, "stray-4")
+
+
 @pytest.mark.parametrize('result', ['{"error":"spawn failed"}', '{"results":[]}'])
 def test_completed_invocation_cannot_supply_a_retry_grant(keys, result):
     g = _guard(keys)
