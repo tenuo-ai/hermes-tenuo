@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from tenuo import SigningKey, Subpath, Warrant, Wildcard
 
@@ -27,6 +29,21 @@ def _guard(events, **kwargs):
 
 def _decisions(events):
     return [(e.decision, e.reason) for e in events]
+
+
+def _concurrently(count, fn):
+    """Run *fn* on *count* threads that are all alive at once, so their ids differ."""
+    barrier = threading.Barrier(count)
+
+    def run():
+        fn()
+        barrier.wait(timeout=10)
+
+    workers = [threading.Thread(target=run) for _ in range(count)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
 
 
 @pytest.mark.parametrize("tool_call_id", ["call-1", ""])
@@ -109,8 +126,9 @@ def test_policy_denial_without_an_id_stays_denied(setup):
     events: list = []
     g = _guard(events, warrant=warrant, signing_key=agent, trusted_roots=[root.public_key])
     call = ("terminal", {"command": "id"})
-    # Two identical calls in flight, then their post hooks.
-    assert g.pre_tool_call(*call, session_id="s") and g.pre_tool_call(*call, session_id="s")
+    # Two identical calls in flight on two threads, then their post hooks.
+    _concurrently(2, lambda: g.pre_tool_call(*call, session_id="s"))
+    assert len(g._unkeyed_decisions) == 1 and len(next(iter(g._unkeyed_decisions.values()))) == 2
     g.post_tool_call(*call, "{}", session_id="s")
     g.post_tool_call(*call, "{}", session_id="s")
     assert [d for d, _ in _decisions(events)] == ["DENY"] * 4
@@ -118,6 +136,58 @@ def test_policy_denial_without_an_id_stays_denied(setup):
     # A different call by the same session is still an unobserved post event.
     g.post_tool_call("read_file", {"path": "/data/y"}, "{}", session_id="s")
     assert _decisions(events)[-1] == ("ALLOW", "post-dispatch")
+
+
+def test_a_call_checked_twice_leaves_no_decision_behind(setup):
+    # With a registry enforcement hook, Hermes checks one invocation twice:
+    # once from pre_tool_call and once inside dispatch.
+    root, agent, warrant = setup
+    events: list = []
+    g = _guard(events, warrant=warrant, signing_key=agent, trusted_roots=[root.public_key])
+    call = ("read_file", {"path": "/data/x"})
+    assert g.pre_tool_call(*call, session_id="s") is None
+    assert g.pre_tool_call(*call, session_id="s") is None
+    g.post_tool_call(*call, "{}", session_id="s")
+    assert not g._unkeyed_decisions
+    # The identical call is later denied (here: a warrant without the tool).
+    g._static_warrant = (
+        Warrant.mint_builder().holder(agent.public_key)
+        .capability("web_search", query=Wildcard()).ttl(600).mint(root)
+    )
+    events.clear()
+    assert g.pre_tool_call(*call, session_id="s")
+    assert g.pre_tool_call(*call, session_id="s")
+    g.post_tool_call(*call, "{}", session_id="s", status="blocked")
+    assert [d for d, _ in _decisions(events)] == ["DENY"] * 3
+    assert not g._unkeyed_decisions
+
+
+def test_stale_allow_from_another_thread_does_not_mask_a_denial(setup):
+    root, agent, warrant = setup
+    events: list = []
+    g = _guard(events, warrant=warrant, signing_key=agent, trusted_roots=[root.public_key])
+    call = ("read_file", {"path": "/data/x"})
+    # An allowed call on another thread whose post hook never arrives.
+    worker = threading.Thread(target=lambda: g.pre_tool_call(*call, session_id="s"))
+    worker.start()
+    worker.join()
+    g._static_warrant = (
+        Warrant.mint_builder().holder(agent.public_key)
+        .capability("web_search", query=Wildcard()).ttl(600).mint(root)
+    )
+    events.clear()
+    assert g.pre_tool_call(*call, session_id="s")
+    g.post_tool_call(*call, "{}", session_id="s", status="blocked")
+    assert [d for d, _ in _decisions(events)] == ["DENY", "DENY"]
+    # And when the post hook runs on a thread other than the one that decided.
+    worker = threading.Thread(target=lambda: g.pre_tool_call(*call, session_id="s"))
+    worker.start()
+    worker.join()
+    events.clear()
+    poster = threading.Thread(target=lambda: g.post_tool_call(*call, "{}", session_id="s", status="blocked"))
+    poster.start()
+    poster.join()
+    assert [d for d, _ in _decisions(events)] == ["DENY"]
 
 
 def test_post_reported_as_blocked_is_never_recorded_as_allowed(setup):
@@ -134,6 +204,8 @@ def test_decisions_without_an_id_are_bounded(setup):
     for n in range(g._MAX_PENDING_DECISIONS + 50):
         g.pre_tool_call("terminal", {"command": f"x{n}"}, session_id="s")
     assert len(g._unkeyed_decisions) == g._MAX_PENDING_DECISIONS
+    # Repeats on one thread keep one entry; concurrent ones are capped per call.
     for _ in range(200):
         g.pre_tool_call("terminal", {"command": "same"}, session_id="s")
-    assert max(len(d) for d in g._unkeyed_decisions.values()) == 64
+    assert max(len(d) for d in g._unkeyed_decisions.values()) == 1
+    assert all(d.maxlen == 64 for d in g._unkeyed_decisions.values())

@@ -365,7 +365,8 @@ class HermesGuard:
         self._pre_decisions: Dict[str, Tuple[bool, str]] = {}
         self._pre_decisions_lock = threading.Lock()
         # The same, for calls Hermes sends without a tool-call id: keyed by the
-        # call itself, oldest first, since identical calls may be in flight.
+        # call itself. Each entry is (thread id, allowed, reason), one per
+        # invocation in flight, since identical calls may run concurrently.
         self._unkeyed_decisions: "OrderedDict[str, deque]" = OrderedDict()
 
         # Connect to control plane (auto-discovers from env if not already connected);
@@ -1230,14 +1231,27 @@ class HermesGuard:
             elif call is not None:
                 key = self._call_key(call)
                 pending = self._unkeyed_decisions.setdefault(key, deque(maxlen=64))
-                pending.append((allowed, reason))
+                # One thread runs one invocation at a time. An earlier entry
+                # from this thread is the same invocation checked again (hook,
+                # then registry) or one whose post never came: replace it.
+                thread_id = threading.get_ident()
+                for index in range(len(pending) - 1, -1, -1):
+                    if pending[index][0] == thread_id:
+                        del pending[index]
+                        break
+                pending.append((thread_id, allowed, reason))
                 self._unkeyed_decisions.move_to_end(key)
                 while len(self._unkeyed_decisions) > self._MAX_PENDING_DECISIONS:
                     self._unkeyed_decisions.popitem(last=False)
 
     def _take_decision(
-        self, tool_call_id: str, call: Tuple[str, Dict[str, Any], str, str],
+        self, tool_call_id: str, call: Tuple[str, Dict[str, Any], str, str], blocked: bool = False,
     ) -> Optional[Tuple[bool, str]]:
+        """The pre-hook decision for this post event, removed from the pending set.
+
+        Without a tool-call id: this thread's own decision; failing that, for
+        a call Hermes reports as *blocked*, the newest denial; else the oldest.
+        """
         with self._pre_decisions_lock:
             if tool_call_id:
                 return self._pre_decisions.pop(tool_call_id, None)
@@ -1245,10 +1259,18 @@ class HermesGuard:
             pending = self._unkeyed_decisions.get(key)
             if not pending:
                 return None
-            decision = pending.popleft()
+            newest_first = range(len(pending) - 1, -1, -1)
+            thread_id = threading.get_ident()
+            index = next((i for i in newest_first if pending[i][0] == thread_id), None)
+            if index is None and blocked:
+                index = next((i for i in newest_first if not pending[i][1]), None)
+            if index is None:
+                index = 0
+            _, allowed, reason = pending[index]
+            del pending[index]
             if not pending:
                 del self._unkeyed_decisions[key]
-            return decision
+            return allowed, reason
 
     # ------------------------------------------------------------------
     # Hook: post_tool_call
@@ -1271,7 +1293,9 @@ class HermesGuard:
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
         session_id, unattributed = self._attribute_session(session_id, task_id)
-        pre = self._take_decision(tool_call_id, (tool_name, args, session_id, task_id))
+        pre = self._take_decision(
+            tool_call_id, (tool_name, args, session_id, task_id), blocked=status == "blocked",
+        )
         if pre is None and unattributed is not None:
             self._emit_audit(
                 tool_name, args, False, unattributed,
