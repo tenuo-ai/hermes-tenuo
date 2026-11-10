@@ -1085,7 +1085,7 @@ class Device:
                 failures += 1
                 if failures == 1:
                     self.say(f"Can't reach the server ({e}); retrying.")
-                time.sleep(min(30, 2 ** min(failures, 5)))
+                self._pause(min(30, 2 ** min(failures, 5)))  # a request to stop is not kept waiting
                 continue
             if job:
                 try:

@@ -1144,6 +1144,20 @@ def test_folders_shown_in_the_home_folder(tmp_path, monkeypatch):
             shown_in_home([bad])
 
 
+def test_stopping_does_not_wait_out_a_retry_when_the_server_is_gone(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder, allow_unsandboxed=True)
+    hub.close()                      # the server goes away; the device starts retrying, slower each time
+    deadline = time.time() + 20
+    while time.time() < deadline and not any("retrying" in line for line in device.lines):
+        time.sleep(0.1)
+    time.sleep(7)                    # by now it is waiting 8 seconds or more between tries
+    asked = time.time()
+    device.stop()
+    device.thread.join(20)
+    assert not device.thread.is_alive() and time.time() - asked < 3, time.time() - asked
+
+
 def test_why_there_is_no_sandbox(monkeypatch):
     monkeypatch.setattr(sandbox, "_probe", [None])
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
