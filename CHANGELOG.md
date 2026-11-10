@@ -13,6 +13,12 @@
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 
+### Fixed
+
+- `hermes plugins install` no longer fails on Hermes's Python 3.14 environment.
+  The `cloud` extra now applies on Python 3.13 and earlier only, because
+  `tenuo-cloud` has no 3.14 build yet.
+
 ## 0.2.0 - 2026-10-31
 
 This minor release adds explicit issuer/holder separation and signed Cloud

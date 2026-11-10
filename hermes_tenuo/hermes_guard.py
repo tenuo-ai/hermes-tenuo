@@ -22,6 +22,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,7 +67,9 @@ def _connect_control_plane() -> Any:
         logger.warning(
             "hermes-tenuo: TENUO_CONNECT_TOKEN is set but tenuo[cloud] is not "
             "installed; decisions stream to the control plane without signed "
-            "receipts. Install it with: pip install 'hermes-tenuo[cloud]'"
+            "receipts. %s",
+            "Signed receipts need Python 3.13 or earlier until tenuo-cloud supports 3.14."
+            if sys.version_info >= (3, 14) else "Install it with: pip install 'hermes-tenuo[cloud]'",
         )
         return get_or_create()
     try:

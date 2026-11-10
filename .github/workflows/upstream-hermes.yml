@@ -57,5 +57,24 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Lock dependencies the way Hermes's plugin installer does
+        # Hermes puts each plugin in a uv workspace, locks for Python 3.14 only, and
+        # includes every extra. An extra that cannot install on 3.14 fails the install.
+        run: |
+          mkdir -p "$RUNNER_TEMP/ws/plugin-sources"
+          git archive HEAD --prefix=hermes-tenuo/ | tar -x -C "$RUNNER_TEMP/ws/plugin-sources"
+          cat > "$RUNNER_TEMP/ws/pyproject.toml" <<'TOML'
+          [project]
+          name = "host"
+          version = "0.0.0"
+          requires-python = ">=3.11,<3.15"
+
+          [tool.uv]
+          environments = ["python_version >= '3.14'"]
+
+          [tool.uv.workspace]
+          members = ["plugin-sources/hermes-tenuo"]
+          TOML
+          uv lock --project "$RUNNER_TEMP/ws" --python 3.14
       - name: Load through Hermes's plugin loader
         run: hermes-agent/.venv/bin/python -m pytest tests/test_upstream_hermes.py tests/test_hands_hermes.py -q -rs --tb=short
