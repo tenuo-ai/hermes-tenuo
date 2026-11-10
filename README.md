@@ -274,7 +274,9 @@ What your machine enforces, whatever the server asks:
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
-  Linux they do not get your session's sockets.
+  Linux they do not get your session's sockets. Commands receive a small shell
+  environment, not credentials or other variables exported by the process that
+  started Hands.
 - **A time window.** When it ends, your machine stops answering. Run `hands up`
   again to continue; the conversation picks the machine up again by itself.
 - **No late runs.** A command that reaches your machine after the server
@@ -298,10 +300,8 @@ A process a command leaves running (a dev server started with
 command.
 
 Limits today: macOS and Linux machines only; a machine with no sandbox refuses
-to start unless you pass `--no-sandbox`; tools that keep a cache in your home
-folder need it pointed into the project or `$TMPDIR` (for example
-`npm_config_cache`, `UV_CACHE_DIR`, `GOCACHE`), and on macOS `mktemp` needs an
-explicit template under `$TMPDIR`; Hands lives in one Hermes process
+to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
+template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
 see the machines; `/hands on` needs a Hermes version with tool-execution
 middleware, and on older versions `terminal.backend: hands` switches a whole
