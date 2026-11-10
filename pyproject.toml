@@ -28,7 +28,11 @@ dependencies = [
 
 [project.optional-dependencies]
 cloud = [
-    "tenuo[cloud]>=0.3.5,<0.4",
+    # tenuo-cloud publishes builds for Python 3.9-3.13 only. Hermes locks plugin
+    # dependencies for Python 3.14 with every extra included, so an extra that
+    # cannot install there fails the whole plugin install. Drop the marker once
+    # tenuo-cloud ships a 3.14 build.
+    "tenuo[cloud]>=0.3.5,<0.4; python_version < '3.14'",
 ]
 dev = [
     "pytest>=7.0",

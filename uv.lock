@@ -83,7 +83,7 @@ dependencies = [
 
 [package.optional-dependencies]
 cloud = [
-    { name = "tenuo", extra = ["cloud"] },
+    { name = "tenuo", extra = ["cloud"], marker = "python_full_version < '3.14'" },
 ]
 dev = [
     { name = "pytest" },
@@ -97,7 +97,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "tenuo", specifier = ">=0.3.5,<0.4" },
-    { name = "tenuo", extras = ["cloud"], marker = "extra == 'cloud'", specifier = ">=0.3.5,<0.4" },
+    { name = "tenuo", extras = ["cloud"], marker = "python_full_version < '3.14' and extra == 'cloud'", specifier = ">=0.3.5,<0.4" },
 ]
 provides-extras = ["cloud", "dev"]
 
