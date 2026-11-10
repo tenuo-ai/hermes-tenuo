@@ -1144,6 +1144,44 @@ def test_folders_shown_in_the_home_folder(tmp_path, monkeypatch):
             shown_in_home([bad])
 
 
+def test_why_there_is_no_sandbox(monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    assert "not installed" in sandbox.why_not() and "apt install bubblewrap" in sandbox.why_not()
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_refusal", ["bwrap: setting up uid map: Permission denied"])
+    said = sandbox.why_not()
+    assert "is installed, but" in said and "uid map: Permission denied" in said and "Hands on Ubuntu" in said
+    with pytest.raises(sandbox.SandboxUnavailable, match="is installed, but"):
+        sandbox.wrap("/x", "/y", ["true"])
+    monkeypatch.setattr(sandbox, "_probe", ["bwrap"])
+    assert sandbox.why_not() == ""
+
+
+@pytest.mark.skipif(not sandbox.scopes_sockets() or sandbox.available() != "bwrap",
+                    reason="needs Linux 6.12 or later and bubblewrap")
+def test_commands_cannot_reach_another_programs_named_socket(hub, folder):
+    import socket
+    name = f"hands-test-{os.getpid()}"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind("\0" + name)
+    listener.listen(1)
+    try:
+        device = up(hub, folder)
+        out, _ = run(hub, "python3 -c \"import socket\ns = socket.socket(socket.AF_UNIX)\n"
+                          f"try:\n    s.connect('\\0{name}'); print('reached')\n"
+                          "except OSError as e:\n    print('refused')\"")
+        assert "refused" in out and "reached" not in out, out
+        # Sockets made inside the sandbox still work between its own processes.
+        out, _ = run(hub, "python3 -c \"import socket\na = socket.socket(socket.AF_UNIX); a.bind('\\0inside'); a.listen(1)\n"
+                          "b = socket.socket(socket.AF_UNIX); b.connect('\\0inside'); print('own-ok')\"")
+        assert "own-ok" in out, out
+        device.stop()
+    finally:
+        listener.close()
+
+
 # --- the listener and protected paths ----------------------------------------------------------
 
 def test_connection_that_stops_sending_is_dropped(tmp_path, monkeypatch):

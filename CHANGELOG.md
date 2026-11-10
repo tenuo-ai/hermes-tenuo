@@ -31,6 +31,10 @@
   the person who invited it: others cannot see, use or forget it.
 - A machine refuses an unencrypted server that is not on a private network,
   unless started with `--plain-http`.
+- On Linux 6.12 and later, commands cannot connect to other programs' local
+  sockets that are not files. A folder hidden from commands is read-only.
+  `hands check` explains when bubblewrap is installed but not allowed to run,
+  as on Ubuntu 24.04.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 

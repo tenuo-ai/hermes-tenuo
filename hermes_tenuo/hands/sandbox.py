@@ -174,7 +174,35 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     return argv + ["--chdir", folder, "--", *command]
 
 
+def scopes_sockets() -> bool:
+    """True if this Linux kernel can keep commands from other programs' named local
+    sockets (Landlock, 6.12 and later). Asking changes nothing."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        return libc.syscall(ctypes.c_long(444), None, ctypes.c_size_t(0), ctypes.c_uint32(1)) >= 6
+    except Exception:
+        return False
+
+
 _probe: List[Optional[str]] = []
+_refusal: List[str] = []  # what bubblewrap said when the system would not let it start
+
+
+def why_not() -> str:
+    """Why this machine has no sandbox, for the person at it. Empty if it has one."""
+    if available() is not None:
+        return ""
+    if sys.platform.startswith("linux"):
+        if not shutil.which("bwrap"):
+            return "bubblewrap is not installed (on Debian and Ubuntu: sudo apt install bubblewrap)"
+        said = f" ({_refusal[0]})" if _refusal and _refusal[0] else ""
+        return ("bubblewrap is installed, but this system does not let it start a sandbox for your user" + said
+                + ". Ubuntu 24.04 and later need one rule that allows it: see \"Hands on Ubuntu\" in the README")
+    return "this system has no sandbox Hands can use (macOS sandbox-exec or Linux bubblewrap)"
 
 
 def available() -> Optional[str]:
@@ -186,8 +214,11 @@ def available() -> Optional[str]:
             kind = "sandbox-exec"
         elif sys.platform.startswith("linux") and shutil.which("bwrap"):
             try:
-                ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--", "true"], capture_output=True,
-                                    timeout=10).returncode == 0
+                tried = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--", "true"], capture_output=True,
+                                       text=True, timeout=10)
+                ok = tried.returncode == 0
+                if not ok:
+                    _refusal.append((tried.stderr or "").strip().splitlines()[-1][:200] if tried.stderr.strip() else "")
             except (OSError, subprocess.SubprocessError):
                 ok = False
             kind = "bwrap" if ok else None
@@ -215,6 +246,5 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
         if not writable:
             raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")
         return command
-    raise SandboxUnavailable(
-        "no sandbox on this machine (macOS sandbox-exec or Linux bubblewrap). "
-        "Install bubblewrap, or pass --no-sandbox to run commands with your full access.")
+    raise SandboxUnavailable(f"no sandbox on this machine: {why_not()}. "
+                             "Or pass --no-sandbox to run commands with your full access.")

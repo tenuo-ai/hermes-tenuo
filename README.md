@@ -331,10 +331,22 @@ leaves running (a dev server started with
 `hands up` stops. To stop it earlier, kill it by name or port from a later
 command.
 
-Limits today: macOS and Linux machines only; on Linux, commands share your
-machine's network, including local sockets that are not files, so run Hands
-on a desktop Linux session only for a server you trust; a machine with no sandbox refuses
-to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
+**Hands on Ubuntu.** Ubuntu 24.04 and later do not let bubblewrap start a
+sandbox for an ordinary user until one rule allows it. `hands check` says so.
+Install bubblewrap and add the rule once:
+
+```bash
+sudo apt install bubblewrap
+printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n  include if exists <local/bwrap>\n}\n' | sudo tee /etc/apparmor.d/bwrap
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+Limits today: macOS and Linux machines only; commands share your machine's
+network, so they can reach services that listen on the machine itself
+(`localhost`); on Linux before kernel 6.12 they can also reach other
+programs' local sockets that are not files, so share such a desktop machine
+only with a server you trust (from 6.12 on they cannot); a machine with no
+sandbox refuses to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
 see the machines; `/hands on` needs a Hermes version with tool-execution

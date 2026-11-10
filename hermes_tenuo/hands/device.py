@@ -120,6 +120,29 @@ def confined():
         return True
     except OSError:
         return False
+def keep_to_own_sockets():
+    # Linux 6.12 and later: everything started from here can connect only to local sockets
+    # made inside this sandbox. A socket that is a file is already out of reach; one that
+    # is only a name (the kind desktop services use) is not, because commands share the
+    # machine's network. Older kernels do not have this and are left as they are.
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        create, restrict = ctypes.c_long(444), ctypes.c_long(446)
+        if libc.syscall(create, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 6:
+            return
+        attr = (ctypes.c_uint64 * 3)(0, 0, 1)  # no file or network rules; scope: named local sockets
+        fd = libc.syscall(create, ctypes.byref(attr), ctypes.c_size_t(24), ctypes.c_uint32(0))
+        if fd < 0:
+            return
+        libc.prctl(38, 1, 0, 0, 0)  # required first: no process here can gain privileges
+        libc.syscall(restrict, ctypes.c_int(fd), ctypes.c_uint32(0))
+        os.close(fd)
+    except Exception:
+        pass
+if sys.platform.startswith("linux"):
+    keep_to_own_sockets()
 sys.stdout.write("ready\n"); sys.stdout.flush()
 while True:
     while not inbox and not closed:
@@ -408,8 +431,8 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
     if kind:
         found.append((True, f"sandbox: {kind}" + (" (read-only)" if read_only else "")))
     else:
-        found.append((False, "no sandbox on this machine: install bubblewrap (Linux), or use --no-sandbox to "
-                             "give commands your full access"))
+        found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
+                             "commands your full access"))
     url = ""
     saved = home() / "server.json"
     if invite:
@@ -998,6 +1021,9 @@ class Device:
         lines.append("They can read system files and use the network.")
         if kind == "sandbox-exec":
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        elif not sandbox.scopes_sockets():
+            lines.append("On this Linux kernel (before 6.12) they can reach other programs' local sockets that are "
+                         "not files; share this machine only with a server you trust.")
         return lines
 
     def stop(self, *from_signal: Any) -> None:
