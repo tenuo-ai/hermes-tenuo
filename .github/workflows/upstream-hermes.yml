@@ -53,5 +53,9 @@ jobs:
       - name: Install only tenuo (directory route)
         if: matrix.route == 'directory'
         run: uv pip install --python hermes-agent/.venv/bin/python "tenuo>=0.3.5,<0.4" pytest
+      - name: Install bubblewrap (the Hands sandbox on Linux)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Load through Hermes's plugin loader
         run: hermes-agent/.venv/bin/python -m pytest tests/test_upstream_hermes.py tests/test_hands_hermes.py -q -rs --tb=short
