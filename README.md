@@ -272,7 +272,8 @@ scheduled jobs are not affected.
 | `/hands off` | chat | This conversation runs on the server again. |
 | `/hands status` | chat | Which machines are up, and for how long. |
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
-| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. Add `--read-only` to let commands look at the folder without changing it. |
+| `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
 
 What your machine enforces, whatever the server asks:
@@ -301,6 +302,12 @@ What your machine enforces, whatever the server asks:
   before it runs. A changed, replayed or forged command is refused.
 - **A record.** Each command and its exit code is printed where `hands up` runs
   and kept in `hermes-tenuo hands log`.
+- **You can tell where it ran.** Every result of a command or file tool that ran
+  on your machine names the machine and the folder. When the sandbox refuses
+  something, the result says what the machine shares.
+- **It survives a restart of Hermes.** A machine that is up pairs again by
+  itself when the server comes back, with the same folder and the time it had
+  left. A machine you revoked does not.
 
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted
@@ -416,7 +423,8 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME]   # on your own machine
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only]   # on your own machine
+hermes-tenuo hands check [INVITE] [--dir FOLDER]
 hermes-tenuo hands log [--last N]
 ```
 

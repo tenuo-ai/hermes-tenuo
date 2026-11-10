@@ -50,7 +50,8 @@ SCRIPT = textwrap.dedent('''
         except ValueError:
             data = {"output": raw}
         out[key] = {"exit": data.get("exit_code"), "text": str(data.get("output", data.get("content", data))),
-                    "pid": data.get("pid"), "session": data.get("session_id")}
+                    "pid": data.get("pid"), "session": data.get("session_id"),
+                    "ran_on": data.get("ran_on"), "note": data.get("hands_note")}
 
     def up(folder, name="laptop", invite=None, state=None):
         if state:
@@ -159,6 +160,11 @@ def _on_the_device(out, project, server_dir):
     assert (project / "src" / "made.txt").read_text() == "through Hermes\n"
     assert out["escape"]["exit"] != 0
     assert not list(Path(server_dir).iterdir())
+    # Each result says which machine it ran on; a refusal there also says what it shares.
+    for key in ("first", "pwd", "read", "write", "escape"):
+        assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
+    assert out["escape"]["note"] and "shares only" in out["escape"]["note"], out["escape"]
+    assert out["pwd"]["note"] is None
     log = (project.parent / "device-state" / "log.jsonl").read_text()
     assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log
     assert out["bg"]["pid"], out["bg"]
@@ -172,6 +178,8 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     out, project, server_dir = _run(tmp_path, "chat")
     here = os.path.realpath(server_dir)
     assert out["before"]["text"].strip() == here
+    assert out["before"]["ran_on"] is None and out["after"]["ran_on"] is None  # on the server: not marked
+    assert "desktop" in out["other"]["ran_on"], out["other"]
     assert "no device is up" in out["on_without_device"]
     assert "laptop" in out["on"]
     _on_the_device(out, project, server_dir)

@@ -740,6 +740,102 @@ def test_own_folder_replaces_a_link_or_a_file_and_keeps_a_folder(tmp_path):
     assert (target / "keep").read_text() == "x"
 
 
+# --- easier to use -----------------------------------------------------------------------------
+
+class _Where:
+    name, folder = "laptop", "/work/app"
+
+
+def test_results_say_which_machine_they_ran_on():
+    marked = json.loads(chat._marked(json.dumps({"output": "ok", "exit_code": 0}), "terminal", _Where()))
+    assert marked["output"] == "ok" and marked["exit_code"] == 0
+    assert "laptop" in marked["ran_on"] and "/work/app" in marked["ran_on"] and "hands_note" not in marked
+    refused = json.loads(chat._marked(json.dumps({"output": "sh: x: Operation not permitted", "exit_code": 1}),
+                                      "terminal", _Where()))
+    assert "shares only /work/app" in refused["hands_note"]
+    error = json.loads(chat._marked(json.dumps({"error": "Permission denied: /etc/x"}), "write_file", _Where()))
+    assert "hands_note" in error
+
+
+def test_only_device_tools_and_plain_results_are_marked():
+    result = json.dumps({"results": []})
+    assert chat._marked(result, "web_search", _Where()) == result      # runs on the server
+    assert chat._marked(result, "terminal", None) == result           # no device took the call
+    assert chat._marked("not json", "terminal", _Where()) == "not json"
+    assert chat._marked(json.dumps([1, 2]), "terminal", _Where()) == "[1, 2]"
+    once = chat._marked(json.dumps({"output": "x"}), "terminal", _Where())
+    assert chat._marked(once, "terminal", _Where()) == once           # never marked twice
+
+
+@sandboxed
+def test_read_only_lets_commands_look_and_not_change(hub, folder):
+    device = up(hub, folder, read_only=True)
+    out, code = run(hub, "cat README.md && echo x > new.txt; echo write=$?; echo t > \"$TMPDIR/scratch\" && echo tmp-ok")
+    assert "device readme" in out and "write=0" not in out and "tmp-ok" in out, out
+    assert not (folder / "new.txt").exists()
+    out, _ = run(hub, "rm README.md; echo rm=$?")
+    assert "rm=0" not in out and (folder / "README.md").exists()
+    assert any("--read-only" in line for line in device.lines)
+    device.stop()
+
+
+def test_read_only_needs_a_sandbox(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    with pytest.raises(sandbox.SandboxUnavailable, match="read-only"):
+        Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, read_only=True)
+
+
+@sandboxed
+def test_hands_up_says_what_commands_can_do(hub, folder):
+    device = up(hub, folder)
+    said = " ".join(device.lines)
+    assert "change files only in this folder" in said and "network" in said and "keys, credentials" in said
+    device.stop()
+
+
+@sandboxed
+def test_device_pairs_again_when_the_server_forgot_it(hub, folder, monkeypatch):
+    """What a restart of Hermes looks like to a device that is up."""
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    assert run(hub, "echo before")[0].strip() == "before"
+    with hub._lock:
+        hub._sessions.clear()  # the hub's memory is gone; its list of known devices is on disk
+        hub._paired.clear()
+    deadline = time.time() + 15
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert run(hub, "echo after")[0].strip() == "after"
+    assert any("paired with it again" in line for line in device.lines)
+    device.stop()
+
+
+@sandboxed
+def test_a_revoked_device_does_not_pair_again(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    assert hub.revoke("laptop")
+    device.thread.join(20)
+    assert not device.thread.is_alive()
+    assert not hub.sessions()
+    assert any("ended this session" in line for line in device.lines)
+
+
+def test_check_reports_what_is_missing_without_pairing(hub, folder, tmp_path):
+    from hermes_tenuo.hands.device import check
+    found = check(hub.invite(), str(folder))
+    assert all(ok is not False for ok, _ in found), found
+    assert any(ok and "server reachable" in text for ok, text in found)
+    assert not hub.sessions() and not (tmp_path / "device-state" / "device.key").exists()  # nothing was paired or made
+    missing = check(None, str(folder))
+    assert any(ok is False and "/hands invite" in text for ok, text in missing)
+    assert any(ok is False and "not a folder" in text for ok, text in check(hub.invite(), str(folder / "nope")))
+    assert any(ok is False and "home folder" in text for ok, text in check(hub.invite(), "~"))
+    assert any(ok is False and "damaged" in text for ok, text in check("hands://127.0.0.1:1/x#nope", str(folder)))
+    port_closed = hub.invite().replace(hub.public_url.split("//")[1], "127.0.0.1:1")
+    assert any(ok is False and "cannot reach" in text for ok, text in check(port_closed, str(folder)))
+
+
 # --- the listener and protected paths ----------------------------------------------------------
 
 def test_connection_that_stops_sending_is_dropped(tmp_path, monkeypatch):

@@ -61,7 +61,8 @@ def _ancestors(path: str) -> List[str]:
     return out
 
 
-def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> str:
+def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
+                 writable: bool = True) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -69,6 +70,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
     private = [*_private_paths(), *hidden]
     hidden_rule = " ".join(f"(subpath {q(p)})" for p in private)
     own = f"(subpath {q(folder)}) (subpath {q(tmp)})"
+    may_change = own if writable else f"(subpath {q(tmp)})"  # look, don't touch: only its temp folder
     extra = " ".join(f"(subpath {q(p)})" for p in readable)
     # Folders on the way to an allowed one stay visible by name (not listable), so
     # `mkdir -p` and path lookups work when the allowed folder sits under a hidden one.
@@ -92,7 +94,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
         "(allow file-read*)", f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
         *([f"(allow file-read-metadata {on_the_way})"] if on_the_way else []),
-        f"(allow file-write* {own}"
+        f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
         ' (regex #"^/dev/tty") (regex #"^/dev/fd/"))',
         '(allow file-ioctl (literal "/dev/null") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))',
@@ -100,7 +102,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
 
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
-           readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
+           readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
@@ -130,7 +132,7 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     argv += ["--bind", tmp, "/tmp"]
     for path in readable:
         argv += ["--ro-bind", path, path]
-    argv += ["--bind", folder, folder, "--bind", tmp, tmp]
+    argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
     return argv + ["--chdir", folder, "--", *command]
 
 
@@ -156,17 +158,21 @@ def available() -> Optional[str]:
 
 
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
-         shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
+         shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
+         writable: bool = True) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
-    `hidden` names more folders a command must not read (the device's own state)."""
+    `hidden` names more folders a command must not read (the device's own state). With
+    `writable` off the command can read `folder` and change only its temp folder."""
     kind = available()
     if kind == "sandbox-exec":
-        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable, hidden), *command]
+        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable, hidden, writable), *command]
     if kind == "bwrap":
-        return _bwrap(folder, tmp, command, shared, readable, hidden)
+        return _bwrap(folder, tmp, command, shared, readable, hidden, writable)
     if allow_unsandboxed:
+        if not writable:
+            raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")
         return command
     raise SandboxUnavailable(
         "no sandbox on this machine (macOS sandbox-exec or Linux bubblewrap). "

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import threading
 import time
@@ -212,6 +213,30 @@ def _inside(path: Any, folder: str) -> bool:
     return isinstance(path, str) and (path == folder or path.startswith(folder.rstrip("/") + "/"))
 
 
+# The tools whose work happens on the device once a conversation is switched. Others
+# (search, memory, delegation) still run on the server and are not marked.
+ON_DEVICE = {"terminal", "process", "read_file", "write_file", "patch", "search_files"}
+
+
+def _marked(result: Any, tool_name: str, session: Any) -> Any:
+    """The tool's result, saying which machine it ran on. A refusal by that machine's
+    sandbox also says what the machine shares, since the bare system message does not."""
+    if session is None or tool_name not in ON_DEVICE or not isinstance(result, str):
+        return result
+    try:
+        data = json.loads(result)
+    except ValueError:
+        return result
+    if not isinstance(data, dict) or "ran_on" in data:
+        return result
+    data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
+    text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
+    if "Operation not permitted" in text or "Permission denied" in text:
+        data["hands_note"] = (f"'{session.name}' shares only {session.folder}: commands there cannot change "
+                              "anything outside it, and the user's keys, credentials and browser data cannot be read.")
+    return json.dumps(data, ensure_ascii=False)
+
+
 def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
                 **_: Any) -> Any:
     """tool_execution middleware: run this tool call on the device when the conversation is
@@ -248,9 +273,10 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
 
     hub = get_hub()
     try:
-        folder = hub.pick(wanted or "").folder if hub is not None else ""
+        session = hub.pick(wanted or "") if hub is not None else None
     except HandsUnavailable:
-        folder = ""  # the backend reports the missing device when the call runs
+        session = None  # the backend reports the missing device when the call runs
+    folder = session.folder if session is not None else ""
     if not whole_profile:
         key = _scoped(task)
         with _lock:
@@ -275,11 +301,11 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
     if folder and not _inside(get_session_cwd(task), folder):
         record_session_cwd(task, folder)
     if whole_profile:
-        return next_call()
+        return _marked(next_call(), tool_name, session)
     token = set_terminal_scope(_policy_with_hands())
     chosen = _route.set(wanted)
     try:
-        return next_call()
+        return _marked(next_call(), tool_name, session)
     finally:
         _route.reset(chosen)
         reset_terminal_scope(token)

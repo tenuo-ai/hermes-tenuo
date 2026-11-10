@@ -350,9 +350,65 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         raise ConnectionError(str(getattr(e, "reason", e))) from e
 
 
+def check(invite: Optional[str], folder: str, read_only: bool = False) -> list:
+    """What `hands up` needs, looked at without pairing or running anything. A list of
+    (ok, text): ok is True, False, or None for a line that is only information."""
+    found: list = []
+    real = os.path.realpath(os.path.expanduser(folder))
+    if not os.path.isdir(real):
+        found.append((False, f"{folder} is not a folder"))
+    elif real in ("/", os.path.realpath(os.path.expanduser("~"))):
+        found.append((False, "point Hands at a project folder, not your home folder or /"))
+    else:
+        found.append((True, f"folder to share: {real}"))
+    state = os.path.realpath(home())
+    if _within(state, real) or _within(real, state):
+        found.append((False, f"the shared folder and Hands's own folder ({state}) must be separate"))
+    kind = sandbox.available()
+    if kind:
+        found.append((True, f"sandbox: {kind}" + (" (read-only)" if read_only else "")))
+    else:
+        found.append((False, "no sandbox on this machine: install bubblewrap (Linux), or use --no-sandbox to "
+                             "give commands your full access"))
+    url = ""
+    saved = home() / "server.json"
+    if invite:
+        try:
+            url = wire.Invite.parse(invite).url
+        except ValueError as e:
+            found.append((False, str(e)))
+    elif saved.is_file():
+        try:
+            url = json.loads(saved.read_text())["url"]
+        except (OSError, ValueError, KeyError):
+            found.append((False, f"{saved} is damaged: pair again with a new `/hands invite` line"))
+    else:
+        found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
+    if url:
+        try:
+            _post(url + wire.API + "/poll", {}, timeout=10)
+            reached = True
+        except HandsError:
+            reached = True   # it answered, and refused a request that was not from a device
+        except ConnectionError as e:
+            reached = False
+            found.append((False, f"cannot reach the server at {url} ({e}). If Hermes runs on another machine, "
+                                 "set hands.url there to an address this machine can reach"))
+        if reached:
+            found.append((True, f"server reachable: {url}"))
+    real_home = os.path.expanduser("~")
+    tools = sorted(sub.lstrip(".") for name, sub in TOOL_HOMES.items()
+                   if os.path.isdir(os.environ.get(name) or os.path.join(real_home, sub)))
+    found.append((None, "toolchains commands will be told about: " + (", ".join(tools) if tools else "none found")))
+    name, email = _git_identity()
+    found.append((None, f"git commits will be authored as: {name} <{email}>" if name or email else
+                  "no git name or email set: commits made through Hands will need one"))
+    return found
+
+
 class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
-                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say):
+                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False):
         self.folder = os.path.realpath(os.path.expanduser(folder))
         if not os.path.isdir(self.folder):
             raise HandsError(f"{folder} is not a folder")
@@ -361,6 +417,7 @@ class Device:
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
         self.allow_unsandboxed = allow_unsandboxed
+        self.read_only = read_only  # commands may look at the folder and not change it
         # Where this device keeps its key, its log and the commands' temp folder. Commands
         # never see it (only the temp folder inside), so it cannot overlap what is shared.
         self.state = os.path.realpath(home())
@@ -373,7 +430,8 @@ class Device:
         self._tools = _developer_tools()
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
-        sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed)  # fail before pairing
+        sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
+                     writable=not read_only)  # fail before pairing
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -622,7 +680,7 @@ class Device:
         try:
             argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
-                                hidden=[self.state])
+                                hidden=[self.state], writable=not self.read_only)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
@@ -851,6 +909,26 @@ class Device:
 
     # -- the loop ---------------------------------------------------------------
 
+    def _rejoin(self) -> bool:
+        try:
+            self.pair()
+            return True
+        except (HandsError, ConnectionError):
+            return False
+
+    def summary(self) -> list:
+        """What commands from the server can and cannot do here, in plain words."""
+        kind = sandbox.available()
+        if kind is None:
+            return ["No sandbox on this machine: commands run with your full access (--no-sandbox)."]
+        lines = ["Commands can read this folder and cannot change it (--read-only)." if self.read_only else
+                 "Commands can change files only in this folder.",
+                 "They can read other files on this machine, except your keys, credentials, browser data and shell history.",
+                 "They can use the network."]
+        if kind == "sandbox-exec":
+            lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        return lines
+
     def stop(self, *from_signal: Any) -> None:
         self._stop = True
         if from_signal and self._waiting:
@@ -860,8 +938,10 @@ class Device:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
+        for line in self.summary():
+            self.say("  " + line)
         self.say("Press Ctrl-C to stop. Commands appear below as they run.")
-        failures = 0
+        failures, rejoined = 0, 0.0
         while not self._stop and time.time() < self.expires:
             try:
                 self._waiting = True
@@ -873,6 +953,13 @@ class Device:
             except _Stopped:
                 break
             except HandsError as e:
+                # The server forgot this session, which is what a restart of Hermes looks
+                # like from here. A machine it still knows pairs again by itself, with the
+                # grant and time window it already has; a revoked one is refused and stops.
+                if time.time() - rejoined > 30 and time.time() < self.expires and self._rejoin():
+                    rejoined = time.time()
+                    self.say("The server restarted; this machine is paired with it again.")
+                    continue
                 self._stop_runner()
                 self.say(f"The server ended this session: {e}")
                 return 1

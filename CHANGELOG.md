@@ -17,6 +17,12 @@
 - A command that arrives after the server stopped waiting is refused instead
   of run late; a conversation follows its machine across restarts and new
   time windows, and `/hands on <name>` moves it to another machine.
+- Results of commands and file tools that ran on a machine name it and its
+  folder; a refusal by its sandbox says what the machine shares.
+- `hermes-tenuo hands check` says whether a machine is ready without pairing
+  it, and `hands up` prints what commands can and cannot do. `--read-only`
+  lets commands read the folder without changing it.
+- A machine that is up pairs again by itself when Hermes restarts.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 
