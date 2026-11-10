@@ -80,13 +80,30 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_task_id(task_id: str) -> str:
+    """A task id names one file in the warrants folder; refuse anything that is a path."""
+    if (
+        not task_id.strip()
+        or task_id in (".", "..")
+        or any(c in task_id for c in ("/", "\\", "\0"))
+        or os.sep in task_id
+    ):
+        raise ValueError(f"--task '{task_id}': expected a task id, not a path")
+    return task_id
+
+
 def _mint_separate(args: argparse.Namespace) -> int:
     from hermes_tenuo.issuance import mint_for_holder, read_public_key, read_signing_key, write_private_file
-    if not all(getattr(args, field, None) for field in ("issuer_key", "holder_public_key", "out")):
-        print("error: separate issuance requires --issuer-key, --holder-public-key and --out", file=sys.stderr)
+    task_id = getattr(args, "task", None)
+    out = getattr(args, "out", None)
+    if not all(getattr(args, field, None) for field in ("issuer_key", "holder_public_key")) or not (out or task_id):
+        print(
+            "error: separate issuance requires --issuer-key, --holder-public-key and --out (or --task)",
+            file=sys.stderr,
+        )
         return 1
-    if getattr(args, "task", None):
-        print("error: --task cannot be combined with separate issuance", file=sys.stderr)
+    if task_id and out:
+        print("error: --task writes the task warrant path; do not pass --out as well", file=sys.stderr)
         return 1
     try:
         capabilities = {}
@@ -97,13 +114,21 @@ def _mint_separate(args: argparse.Namespace) -> int:
             capabilities[tool] = constraints
         issuer = read_signing_key(args.issuer_key)
         holder = read_public_key(args.holder_public_key)
+        if task_id:
+            from hermes_tenuo.kanban import task_warrant_path
+            out = task_warrant_path(_check_task_id(task_id))
         warrant = mint_for_holder(issuer, holder, capabilities, _parse_ttl(args.ttl),
                                   getattr(args, "session_id", None))
-        write_private_file(args.out, warrant.to_base64())
+        if task_id:
+            # A task warrant is replaced when the task is re-issued.
+            out.parent.mkdir(parents=True, exist_ok=True)
+            write_private_file(out, warrant.to_base64(), overwrite=True)
+        else:
+            write_private_file(out, warrant.to_base64())
     except Exception as exc:
         print(f"error: issuance failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Warrant saved: {args.out}")
+    print(f"Warrant saved: {out}")
     print(f"Issuer public key: {base64.b64encode(issuer.public_key.to_bytes()).decode()}")
     return 0
 
@@ -209,6 +234,12 @@ def _mint_local(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+    if getattr(args, "task", None):
+        try:
+            _check_task_id(args.task)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
     # Generate keys. Reuse TENUO_SIGNING_KEY as the holder when set so a
     # kanban worker inherits a key that matches the file mint --task writes.
@@ -281,23 +312,32 @@ def _mint_local(args: argparse.Namespace) -> int:
 
     task_id = getattr(args, "task", None)
     if task_id:
+        from hermes_tenuo._config import get_trusted_roots
+        from hermes_tenuo.issuance import write_private_file
         from hermes_tenuo.kanban import task_warrant_path
 
         path = task_warrant_path(task_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(warrant_b64)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+        write_private_file(path, warrant_b64, overwrite=True)
         print(f"# Wrote task warrant: {path}")
+        print("# It is signed by the new issuer above, so the worker accepts it only when")
+        print("# its trusted_root is that value. To sign every task with one issuer, use")
+        print("#   hermes-tenuo mint --task ID --issuer-key ISSUER.key --holder-public-key HOLDER.pub ...")
+        if get_trusted_roots(None):
+            from hermes_tenuo._config import get_on_denial
+            print(
+                "warning: the trusted_root configured here did not sign this task warrant; "
+                f"for the worker, {_trust_failure_effect(get_on_denial(None))}",
+                file=sys.stderr,
+            )
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show what the plugin will load, and where each value comes from."""
-    from hermes_tenuo._config import _env_secret, _get_plugin_entry, _looks_like_path
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry, _looks_like_path, get_require_warrant
     from hermes_tenuo._home import config_path, hermes_cli_available
+    from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw, task_warrant_path
 
     cfg_path = config_path()
     entry = _get_plugin_entry(None)
@@ -312,9 +352,19 @@ def cmd_status(args: argparse.Namespace) -> int:
         ("Signing key", None, _env_secret(signing_env), None, signing_env),
         ("Trusted root", entry.get("trusted_root"), _env_secret("TENUO_TRUSTED_ROOT"), "trusted_root", "TENUO_TRUSTED_ROOT"),
     ]
-    all_required = True
+    # A kanban worker loads its task warrant and never the install-wide one.
+    task_id = current_task_id()
+    task_staged = bool(task_id and load_task_warrant_raw(task_id))
+    warrant_set = task_staged if task_id else bool(rows[0][1] or rows[0][2])
+    missing = []
     for label, cfg_val, env_val, cfg_key, env_name in rows:
-        if cfg_val:
+        if label == "Warrant" and task_id:
+            if task_staged:
+                print(f"  ✓  {label:14} set  (kanban task {task_id}, file)")
+            else:
+                print(f"  ✗  {label:14} not staged  (kanban task {task_id}: {task_warrant_path(task_id)})")
+                missing.append(label)
+        elif cfg_val:
             # Never echo the value: a warrant or root is credential material. Say only
             # whether the config points at a file or carries the value inline.
             kind = "file" if isinstance(cfg_val, str) and _looks_like_path(cfg_val) else "inline"
@@ -324,12 +374,20 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             hint = f"{cfg_key} or ${env_name}" if cfg_key else f"${env_name}"
             print(f"  ✗  {label:14} not set  ({hint})")
-            all_required = False
+            missing.append(label)
 
-    if all_required:
-        print("\n  Ready for enforcement.")
+    if not missing:
+        print("\n  Ready for enforcement. Run `hermes-tenuo doctor` to check the values.")
+    elif task_id and not task_staged:
+        print(f"\n  No warrant is staged for kanban task {task_id} — every tool call is blocked.")
+    elif warrant_set and "Signing key" in missing:
+        print("\n  A warrant is set but the signing key is not — every tool call is blocked until it is.")
+    elif warrant_set:
+        print(f"\n  A warrant is set but trusted_root is not — {_trust_failure_effect(entry.get('on_denial'))}.")
+    elif get_require_warrant(None):
+        print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
     else:
-        print("\n  Missing required config — enforcement will pass through.")
+        print("\n  No warrant — the plugin loads and enforces nothing.")
     return 0
 
 
@@ -340,6 +398,27 @@ def _warrant_holder(warrant: Any):
         if value is not None and hasattr(value, "to_bytes"):
             return value
     return None
+
+
+def _trust_failure_effect(on_denial: Any) -> str:
+    """What a trusted_root problem does at runtime, which depends on on_denial."""
+    if on_denial == "log":
+        return (
+            "every tool call fails the warrant check; with on_denial: log it is recorded "
+            "and still runs (delegate_task spawns are blocked)"
+        )
+    return "every tool call is blocked until this is fixed"
+
+
+def _signed_by(warrant: Any, roots: list) -> bool:
+    """Whether one of *roots* issued *warrant* (the check the plugin makes on every call)."""
+    for root in roots:
+        try:
+            if warrant.verify(root.to_bytes()):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -412,6 +491,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _b64_to_bytes,
         _env_secret,
         get_child_warrant_raw,
+        get_delegation_plan_path,
+        get_trusted_roots,
         load_warrant,
         resolve_warrant_text,
     )
@@ -507,14 +588,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
 
-        # 7. Trusted root (required for enforcement)
+        # 7. Trusted root: set, a public key, and the issuer of this warrant.
+        # Unlike an unusable warrant, a trust failure is a denial on each
+        # call, so on_denial decides whether those calls still run.
+        trust_effect = _trust_failure_effect(config_entry.get("on_denial", "block"))
         trusted = config_entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
-        check(
-            bool(trusted),
-            "trusted_root set",
-            "set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root",
-        )
-    # 8. Enforcement path
+        if not trusted:
+            check(
+                False,
+                "trusted_root set",
+                f"set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root — {trust_effect}",
+            )
+        else:
+            roots = get_trusted_roots(None)
+            if not roots:
+                check(False, "trusted_root is not a base64 public key", trust_effect)
+            else:
+                check(True, "trusted_root set")
+                signed = _signed_by(warrant, roots)
+                check(
+                    signed,
+                    "warrant is signed by trusted_root" if signed else "warrant is not signed by trusted_root",
+                    f"set trusted_root to the public key of the issuer that minted this warrant — {trust_effect}",
+                )
+
+        # 8. Delegation plan, when configured
+        plan_path = get_delegation_plan_path(None)
+        if plan_path:
+            from hermes_tenuo.delegation import DelegationPlanError, load_plan
+            try:
+                load_plan(plan_path)
+            except DelegationPlanError as exc:
+                check(False, f"delegation plan: {exc}", blocks)
+            else:
+                try:
+                    has_child = get_child_warrant_raw(None) is not None
+                except OSError:
+                    has_child = True
+                if has_child:
+                    check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
+                else:
+                    check(True, "delegation plan loads")
+
+    # 9. on_denial
+    on_denial = config_entry.get("on_denial", "block")
+    if on_denial == "log":
+        note("on_denial: log — denied calls are recorded, not blocked (delegate_task spawns still are)")
+    elif on_denial != "block":
+        check(False, f"on_denial is {on_denial!r}; expected block or log", "it is treated as block")
+    # 10. Enforcement path
     print()
     try:
         from tools.registry import registry as _tr
@@ -625,15 +747,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if not roots:
         print("Signature:   not checked (no trusted_root)")
     else:
-        valid = False
-        for root in roots:
-            try:
-                if warrant.verify(root.to_bytes()):
-                    valid = True
-                    break
-            except Exception:
-                continue
-        if valid:
+        if _signed_by(warrant, roots):
             print("Signature:   valid ✓")
         else:
             print("Signature:   INVALID ✗  (does not match trusted_root)")
@@ -703,7 +817,9 @@ def main() -> None:
                              "glob with '*'/'?', '/path' prefix, otherwise exact match.")
     mint_p.add_argument("--task", metavar="ID",
                         help="Write the warrant to $HERMES_HOME/tenuo/warrants/<ID>.warrant "
-                             "(kanban worker path). Reuses TENUO_SIGNING_KEY as the holder when set.")
+                             "(kanban worker path). With --issuer-key and --holder-public-key it is "
+                             "signed by that issuer; otherwise by a new one, with TENUO_SIGNING_KEY "
+                             "as the holder when set.")
     mint_p.add_argument("--output", choices=["full", "yaml", "env"], default="full",
                         help="Output format: full config (default), yaml keys only, or env exports")
 

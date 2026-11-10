@@ -78,3 +78,60 @@ def test_nonfinite_ttl_is_a_normal_cli_error(capsys):
         args = argparse.Namespace(ttl=ttl, allow=['web_search'], output='env')
         assert cmd_mint(args) == 1
     assert 'error:' in capsys.readouterr().err
+
+
+def _identity_files(tmp_path):
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    issuer_path, public_path = tmp_path / 'issuer.key', tmp_path / 'holder.pub'
+    issuer_path.write_text(base64.b64encode(issuer.secret_key_bytes()).decode())
+    public_path.write_text(base64.b64encode(holder.public_key.to_bytes()).decode())
+    return issuer, holder, issuer_path, public_path
+
+
+def test_task_warrant_can_be_signed_by_the_operator_issuer(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo.kanban import task_warrant_path
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'h'))
+    issuer, holder, issuer_path, public_path = _identity_files(tmp_path)
+    args = argparse.Namespace(ttl='2h', allow=['read_file:path=/data/card'], output='full', task='card-7',
+                              issuer_key=str(issuer_path), holder_public_key=str(public_path),
+                              out=None, session_id=None)
+    assert cmd_mint(args) == 0
+    path = task_warrant_path('card-7')
+    warrant = Warrant.from_base64(path.read_text().strip())
+    assert warrant.verify(issuer.public_key.to_bytes())
+    assert warrant.holder_key.to_bytes() == holder.public_key.to_bytes()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert f'Warrant saved: {path}' in capsys.readouterr().out
+    # Re-issuing a task replaces its warrant.
+    first = path.read_text()
+    assert cmd_mint(args) == 0
+    assert path.read_text() != first
+
+
+def test_task_and_out_together_are_refused(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'h'))
+    _issuer, _holder, issuer_path, public_path = _identity_files(tmp_path)
+    args = argparse.Namespace(ttl='2h', allow=['read_file'], output='full', task='card-7',
+                              issuer_key=str(issuer_path), holder_public_key=str(public_path),
+                              out=str(tmp_path / 'x.warrant'), session_id=None)
+    assert cmd_mint(args) == 1
+    assert 'do not pass --out' in capsys.readouterr().err
+    assert not (tmp_path / 'x.warrant').exists()
+
+
+def test_task_id_must_not_be_a_path(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo.kanban import task_warrant_path
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'h'))
+    _issuer, _holder, issuer_path, public_path = _identity_files(tmp_path)
+    for task in ('../../escaped', 'a/b', '..'):
+        local = argparse.Namespace(ttl='1h', allow=['read_file'], output='env', task=task)
+        assert cmd_mint(local) == 1
+        separate = argparse.Namespace(ttl='1h', allow=['read_file'], output='full', task=task,
+                                      issuer_key=str(issuer_path), holder_public_key=str(public_path),
+                                      out=None, session_id=None)
+        assert cmd_mint(separate) == 1
+        assert 'not a path' in capsys.readouterr().err
+    assert not (tmp_path / 'h' / 'escaped.warrant').exists()
+    assert not task_warrant_path('x').parent.exists()
