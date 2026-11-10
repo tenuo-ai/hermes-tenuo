@@ -19,22 +19,53 @@ NAME = "hands"
 
 
 class HandsEnvironment(BaseEnvironment):
-    def __init__(self, cwd: str, timeout: int, device: str = ""):
+    def __init__(self, cwd: str, timeout: int, device: str = "", task_id: str = ""):
         hub = get_hub()
         if hub is None:
             raise HandsUnavailable("hands: Hands isn't running in this Hermes process. Set hands.listen in the "
                                    "hermes-tenuo plugin config and restart Hermes.")
         self._hub = hub
+        self._task = task_id
+        self._device = device
         self._session = hub.pick(device)
         self._folder = self._session.folder
         self._wrapped: "collections.deque[tuple]" = collections.deque(maxlen=32)
         super().__init__(cwd=self._folder, timeout=timeout)
         self.init_session()
 
+    def get_temp_dir(self) -> str:
+        # Hermes keeps this session's small files (shell snapshot, background logs) in the
+        # device's own temp folder, the only place outside the shared folder it can write.
+        return self._session.tmp or "/tmp"
+
+    def _current(self):
+        """The device session to use now. A device that came back (new time window, restart)
+        has a new session; this conversation follows it instead of holding on to the old one."""
+        session = self._hub.pick(self._device)
+        if session is not self._session:
+            moved = session.device != self._session.device or session.tmp != self._session.tmp
+            self._session, self._folder = session, session.folder
+            if not self._inside(self.cwd):
+                self.cwd = self._folder
+            if moved:
+                # Another machine: this session's files are not there, so set it up again.
+                temp_dir = self.get_temp_dir().rstrip("/") or "/"
+                if hasattr(self, "_snapshot_path"):
+                    self._snapshot_path = f"{temp_dir}/hermes-snap-{self._session_id}.sh"
+                if hasattr(self, "_cwd_file"):
+                    self._cwd_file = f"{temp_dir}/hermes-cwd-{self._session_id}.txt"
+                self.cwd = self._folder
+                self.init_session()
+        return session
+
     def _inside(self, path: str) -> bool:
         return bool(path) and (path == self._folder or path.startswith(self._folder + "/"))
 
     def execute(self, command: str, cwd: str = "", **kwargs: Any) -> dict:
+        try:
+            self._current()
+        except HandsUnavailable:
+            pass  # the command itself reports the missing device
         # Hermes passes its own default directory until the session has one on the
         # device; anything outside the granted folder starts in the folder.
         if not self._inside(cwd):
@@ -53,7 +84,7 @@ class HandsEnvironment(BaseEnvironment):
 
         def run() -> tuple:
             try:
-                return self._hub.run(self._session, cmd_string, login=login, timeout=timeout,
+                return self._hub.run(self._hub.pick(self._device), cmd_string, login=login, timeout=timeout,
                                      stdin=stdin_data, shown=shown)
             except HandsUnavailable as e:
                 return f"{e}\n", 127
@@ -97,4 +128,4 @@ class HandsProvider(TerminalEnvironmentProvider):
 
     def create_environment(self, *, cwd: str, timeout: int, task_id: str = "default", **kwargs: Any):
         from hermes_tenuo.hands import chat
-        return HandsEnvironment(cwd, timeout, device=chat.device_for(task_id))
+        return HandsEnvironment(cwd, timeout, device=chat.device_for(task_id), task_id=task_id)

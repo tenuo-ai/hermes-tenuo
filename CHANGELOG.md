@@ -10,6 +10,13 @@
   `hermes-tenuo hands log` on the machine.
 - The machine signs a warrant for the server's key, checks every command
   against it before running, and runs it in a sandbox limited to the folder.
+  Commands share one sandbox per session, so a later command can stop a
+  process an earlier one started, and nothing outside it can be signalled or
+  launched.
+- Processes left running survive between commands and stop with `hands up`.
+- A command that arrives after the server stopped waiting is refused instead
+  of run late; a conversation follows its machine across restarts and new
+  time windows, and `/hands on <name>` moves it to another machine.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 

@@ -100,7 +100,18 @@ def _release(conversation: str) -> None:
             _applied.pop(task, None)
             _devices.pop(task, None)
     for task in tasks:
+        _drop_shell(task)  # while the task still has its own slot, so the server's shell is untouched
         clear_task_env_overrides(task)
+
+
+def _drop_shell(task: str) -> None:
+    """Forget the shell a task had on a device, so its next command starts fresh where the
+    conversation now points: another machine, or the server."""
+    try:
+        from tools.terminal_tool_lifecycle import cleanup_vm
+        cleanup_vm(task)
+    except Exception as e:
+        logger.debug("hermes-tenuo hands: could not drop the device shell for %s (%s)", task, e)
 
 
 def _policy_with_hands() -> Dict[str, str]:
@@ -160,10 +171,13 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
     if not whole_profile:
         with _lock:
             fresh = _applied.get(task) != conversation
+            switched = not fresh and _devices.get(task) != wanted
             _applied[task] = conversation
             _devices[task] = wanted
         if fresh:
             register_task_env_overrides(task, {"env_type": NAME})
+        elif switched:
+            _drop_shell(task)  # /hands on <another machine>: never keep running on the first one
     if folder and not _inside(get_session_cwd(task), folder):
         record_session_cwd(task, folder)
     if whole_profile:

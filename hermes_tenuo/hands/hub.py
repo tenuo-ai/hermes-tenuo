@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import secrets
@@ -27,6 +28,7 @@ logger = logging.getLogger("hermes_tenuo.hands")
 
 INVITE_SECONDS = 600
 ONLINE_SECONDS = wire.POLL_SECONDS + 20
+GRACE_SECONDS = 20  # how long past a command's own time the server waits for its result
 
 
 class HandsUnavailable(RuntimeError):
@@ -50,14 +52,22 @@ class Session:
     identity: Any
     device_key: Any
     expires: float
+    tmp: str = ""                # where the device keeps temp files for this session
+    running_until: float = 0.0   # a command is with the device until about then
+    gone: bool = False           # the device said it is going down
     last_seen: float = field(default_factory=time.time)
     jobs: "queue.Queue[Dict[str, Any]]" = field(default_factory=queue.Queue)
     waiting: Dict[str, "queue.Queue[Tuple[str, int]]"] = field(default_factory=dict)
+    handed: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # commands the device has, by id
     nonces: List[str] = field(default_factory=list)
 
     @property
     def online(self) -> bool:
-        return time.time() - self.last_seen < ONLINE_SECONDS and time.time() < self.expires
+        # A device does not ask for more work while it runs a command, so a long command
+        # counts as being up.
+        now = time.time()
+        return (not self.gone and now < self.expires
+                and (now - self.last_seen < ONLINE_SECONDS or now < self.running_until))
 
 
 class Hub:
@@ -145,27 +155,55 @@ class Hub:
 
     def run(self, session: Session, cmd: str, *, login: bool, timeout: int, stdin: Optional[str],
             shown: str = "") -> Tuple[str, int]:
-        """Queue one command for the device and wait for its checked result."""
+        """Queue one command for the device and wait for its checked result.
+
+        `timeout` covers the whole wait: a command the device has not started by then is
+        never handed over, and one it starts late runs only for the time that is left. So
+        when this returns "timed out", nothing is still waiting to run."""
         if not session.online:
             raise HandsUnavailable(f"hands: device '{session.name}' is not up any more. "
                                    "Run `hermes-tenuo hands up` on it again.")
         job_id = uuid.uuid4().hex
-        args = {"dir": session.folder,
-                "cmd": wire.digest(job_id, cmd, bool(login), stdin, int(timeout), shown)}
-        job = {"id": job_id, "cmd": cmd, "login": bool(login), "timeout": int(timeout), "stdin": stdin,
-               "shown": shown, "dir": session.folder, "chain": [session.grant.to_base64()],
-               "pop": wire.sign(session.grant, self.key, wire.TOOL, args)}
+        pending = {"id": job_id, "cmd": cmd, "login": bool(login), "stdin": stdin, "shown": shown,
+                   "deadline": time.monotonic() + int(timeout)}
         answer: "queue.Queue[Tuple[str, int]]" = queue.Queue(maxsize=1)
         with self._lock:
+            session = self._sessions.get(session.device, session)  # the device may just have come back
             session.waiting[job_id] = answer
-        session.jobs.put(job)
+            session.jobs.put(pending)
         try:
-            return answer.get(timeout=timeout + 60)
+            return answer.get(timeout=int(timeout) + GRACE_SECONDS)
         except queue.Empty:
             return f"hands: device '{session.name}' did not answer in time\n", 124
         finally:
             with self._lock:
+                self._sessions.get(session.device, session).waiting.pop(job_id, None)
                 session.waiting.pop(job_id, None)
+
+    def _hand_over(self, session: Session, pending: Dict[str, Any], poll_started: float) -> Optional[Dict[str, Any]]:
+        """Sign a waiting command for the device now, or drop it if nobody waits for it."""
+        with self._lock:
+            answer = session.waiting.get(pending["id"])
+        if answer is None:
+            return None  # the caller gave up: it must not run later
+        left = pending["deadline"] - time.monotonic()
+        if left < 1:
+            try:
+                answer.put_nowait((f"hands: device '{session.name}' could not start this command in time, "
+                                   "so it was not run\n", 124))
+            except queue.Full:
+                pass
+            return None
+        timeout, waited_ms = math.ceil(left), int((time.monotonic() - poll_started) * 1000)
+        args = {"dir": session.folder,
+                "cmd": wire.digest(pending["id"], pending["cmd"], pending["login"], pending["stdin"], timeout,
+                                   pending["shown"], waited_ms)}
+        session.running_until = time.time() + timeout + 30
+        session.handed[pending["id"]] = pending
+        return {"id": pending["id"], "cmd": pending["cmd"], "login": pending["login"], "timeout": timeout,
+                "stdin": pending["stdin"], "shown": pending["shown"], "waited_ms": waited_ms,
+                "dir": session.folder, "chain": [session.grant.to_base64()],
+                "pop": wire.sign(session.grant, self.key, wire.TOOL, args)}
 
     # -- what devices send -----------------------------------------------------------
 
@@ -177,13 +215,16 @@ class Hub:
             grant = Warrant.from_base64(str(body["grant"]))
             identity = Warrant.from_base64(str(body["identity"]))
             nonce, folder, name = str(body["nonce"]), str(body["folder"]), str(body["name"])[:64]
+            tmp = str(body.get("tmp") or "")
             wire.check([identity], device_key, wire.TOOL_POLL, {"nonce": nonce}, str(body["sig"]))
         except Refused:
             raise
         except Exception as e:
             raise Refused(f"this pairing request isn't valid ({type(e).__name__})") from e
-        if nonce != wire.digest(grant.to_base64(), folder, name):
+        if nonce != wire.digest(grant.to_base64(), folder, name, tmp):
             raise Refused("this pairing request doesn't match what was signed")
+        if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):
+            raise Refused("this device's temp folder has a path Hands can't use")
         if not wire.same_key(grant.issuer, device_key) or not wire.same_key(grant.authorized_holder, self.key.public_key):
             raise Refused("the grant is not from this device to this server")
         if grant.is_expired() or wire.TOOL not in grant.tools:
@@ -199,8 +240,32 @@ class Hub:
                 raise Refused(f"another device is already called '{name}': pass --name to choose a different one")
             known[device] = {"name": name, "paired": known.get(device, {}).get("paired") or time.strftime("%Y-%m-%d")}
             self._save_known(known)
-            self._sessions[device] = Session(device, name, folder, grant, identity, device_key,
-                                             time.time() + grant.ttl_remaining.total_seconds())
+            new = Session(device, name, folder, grant, identity, device_key,
+                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp)
+            old = self._sessions.get(device)
+            if old is not None:
+                # Commands still waiting for this device follow it to its new session; they
+                # are signed when handed over, so the new grant covers them.
+                new.waiting = old.waiting
+                for job_id in list(old.handed):
+                    # The device restarted while it had this command. Never send it again:
+                    # say that the outcome is not known.
+                    answer = new.waiting.pop(job_id, None)
+                    if answer is not None:
+                        try:
+                            answer.put_nowait((f"hands: device '{name}' restarted while it had this command; "
+                                               "it is not known whether it ran\n", 125))
+                        except queue.Full:
+                            pass
+                old.handed.clear()
+                while True:
+                    try:
+                        new.jobs.put(old.jobs.get_nowait())
+                    except queue.Empty:
+                        break
+            self._sessions[device] = new
+            if old is not None:
+                old.jobs.put(None)  # wake a request the old session still has open
         logger.info("hermes-tenuo hands: device '%s' is up for %s", name, folder)
         return {"ok": True, "name": name}
 
@@ -223,12 +288,56 @@ class Hub:
                 raise Refused("this request was already used")
             session.nonces = (session.nonces + [nonce])[-256:]
         session.last_seen = time.time()
-        try:
-            job = session.jobs.get(timeout=wire.POLL_SECONDS)
-        except queue.Empty:
-            job = None
+        started, job = time.monotonic(), None
+        while job is None:
+            try:
+                pending = session.jobs.get(timeout=max(0.0, started + wire.POLL_SECONDS - time.monotonic()))
+            except queue.Empty:
+                break
+            with self._lock:
+                current = self._sessions.get(session.device)
+            if current is not session:
+                # The device has a newer session: this request is from before, and its
+                # reply may go nowhere. The command waits for the new session instead.
+                if pending is not None and current is not None:
+                    current.jobs.put(pending)
+                break
+            if pending is not None:
+                job = self._hand_over(session, pending, started)
         session.last_seen = time.time()
         return {"job": job}
+
+    def undelivered(self, device: str, job_id: str) -> None:
+        """The reply carrying a command could not be sent: the device never got it, so it
+        goes back in line (for this session, or the one that replaced it)."""
+        with self._lock:
+            for session in self._sessions.values():
+                pending = session.handed.pop(job_id, None) if session.device == device else None
+                if pending is not None:
+                    session.running_until = 0.0
+                    session.jobs.put(pending)
+
+    def bye(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """The device is going down: say so at once to anyone waiting for it."""
+        session = self._session(body)
+        nonce = str(body.get("nonce", ""))
+        try:
+            wire.check([session.identity], session.device_key, wire.TOOL_POLL, {"nonce": nonce}, str(body.get("sig", "")))
+        except Exception as e:
+            raise Refused("this request isn't signed by the device") from e
+        with self._lock:
+            if nonce in session.nonces:
+                raise Refused("this request was already used")
+            session.nonces = (session.nonces + [nonce])[-256:]
+            session.gone = True
+            waiting, session.waiting = dict(session.waiting), {}
+        for answer in waiting.values():
+            try:
+                answer.put_nowait((f"hands: device '{session.name}' went down before running this command, "
+                                   "so it was not run\n", 127))
+            except queue.Full:
+                pass
+        return {"ok": True}
 
     def result(self, body: Dict[str, Any]) -> Dict[str, Any]:
         session = self._session(body)
@@ -243,8 +352,10 @@ class Hub:
             raise Refused("this result isn't signed by the device") from e
         with self._lock:
             answer = session.waiting.pop(job_id, None)
+            session.handed.pop(job_id, None)
         if answer is not None:
             answer.put((output, returncode))
+        session.running_until = 0.0
         session.last_seen = time.time()
         return {"ok": True}
 
@@ -261,7 +372,8 @@ class Hub:
                 pass
 
             def do_POST(self) -> None:
-                routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result}
+                routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
+                          wire.API + "/bye": hub.bye}
                 handler = routes.get(self.path)
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
@@ -272,7 +384,10 @@ class Hub:
                     body = json.loads(self.rfile.read(length))
                     if not isinstance(body, dict):
                         raise Refused("bad request", 400)
-                    self._send(200, handler(body))
+                    reply = handler(body)
+                    job = reply.get("job") if isinstance(reply, dict) else None
+                    if not self._send(200, reply) and isinstance(job, dict):
+                        hub.undelivered(str(body.get("device", "")), str(job.get("id", "")))
                 except Refused as e:
                     self._send(e.status, {"error": str(e)})
                 except ValueError:
@@ -281,13 +396,20 @@ class Hub:
                     logger.exception("hermes-tenuo hands: request failed")
                     self._send(500, {"error": "the server hit an error"})
 
-            def _send(self, status: int, payload: Dict[str, Any]) -> None:
+            def _send(self, status: int, payload: Dict[str, Any]) -> bool:
+                """False if the other side is gone."""
                 data = json.dumps(payload).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                    return True
+                except OSError:
+                    self.close_connection = True
+                    return False
 
         server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), Handler)
         server.daemon_threads = True

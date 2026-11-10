@@ -266,12 +266,21 @@ scheduled jobs are not affected.
 
 What your machine enforces, whatever the server asks:
 
-- **One folder.** Commands run in a sandbox (`sandbox-exec` on macOS,
+- **One folder.** Commands run in one sandbox (`sandbox-exec` on macOS,
   bubblewrap on Linux) that can write only to the shared folder and a private
-  temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials and
-  keychains are unreadable. Other files stay readable, and the network stays on.
+  temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials,
+  keychains, browser profiles and shell history are unreadable. Other files
+  stay readable, and the network stays on.
+- **Nothing outside it.** Commands can signal only processes started through
+  Hands. On macOS they cannot open apps, script other apps, start system jobs,
+  or use the clipboard, the keychain, the SSH agent or the Docker socket; on
+  Linux they do not get your session's sockets.
 - **A time window.** When it ends, your machine stops answering. Run `hands up`
-  again to continue.
+  again to continue; the conversation picks the machine up again by itself.
+- **No late runs.** A command that reaches your machine after the server
+  stopped waiting for it (the machine slept, the network stalled) is refused,
+  not run. If your machine restarts with a command in hand, the server reports
+  that the outcome is unknown rather than sending it again.
 - **Only your server.** Your machine signs a warrant for the server's key.
   Every command arrives signed by that key and is checked on your machine
   before it runs. A changed, replayed or forged command is refused.
@@ -283,8 +292,16 @@ router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
 network such as Tailscale or WireGuard.
 
+A process a command leaves running (a dev server started with
+`terminal(background=true)`) keeps running between commands and stops when
+`hands up` stops. To stop it earlier, kill it by name or port from a later
+command.
+
 Limits today: macOS and Linux machines only; a machine with no sandbox refuses
-to start unless you pass `--no-sandbox`; Hands lives in one Hermes process
+to start unless you pass `--no-sandbox`; tools that keep a cache in your home
+folder need it pointed into the project or `$TMPDIR` (for example
+`npm_config_cache`, `UV_CACHE_DIR`, `GOCACHE`), and on macOS `mktemp` needs an
+explicit template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
 see the machines; `/hands on` needs a Hermes version with tool-execution
 middleware, and on older versions `terminal.backend: hands` switches a whole

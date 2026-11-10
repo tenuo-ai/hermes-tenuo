@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -11,6 +12,7 @@ import pytest
 
 from hermes_tenuo.hands import sandbox, wire
 from hermes_tenuo.hands.device import Device, HandsError
+from hermes_tenuo.hands import hub as hub_module
 from hermes_tenuo.hands.hub import HandsUnavailable, Hub, Refused
 
 sandboxed = pytest.mark.skipif(sandbox.available() is None, reason="needs sandbox-exec or bubblewrap")
@@ -175,7 +177,7 @@ def _job(hub: Hub, device: Device, **changes):
     session = hub.pick(device.name)
     job_id = changes.pop("id", "job-1")
     cmd = "echo ok"
-    args = {"dir": session.folder, "cmd": wire.digest(job_id, cmd, False, None, 30, "")}
+    args = {"dir": session.folder, "cmd": wire.digest(job_id, cmd, False, None, 30, "", 0)}
     job = {"id": job_id, "cmd": cmd, "login": False, "timeout": 30, "stdin": None, "shown": "",
            "dir": session.folder, "chain": [session.grant.to_base64()],
            "pop": wire.sign(session.grant, hub.key, wire.TOOL, args)}
@@ -216,7 +218,7 @@ def test_device_refuses_another_folder(hub, paired, tmp_path):
 def test_device_refuses_a_command_signed_by_someone_else(hub, paired):
     from tenuo import SigningKey
     session = hub.pick(paired.name)
-    args = {"dir": session.folder, "cmd": wire.digest("job-9", "echo ok", False, None, 30, "")}
+    args = {"dir": session.folder, "cmd": wire.digest("job-9", "echo ok", False, None, 30, "", 0)}
     forged = wire.sign(session.grant, SigningKey.generate(), wire.TOOL, args)
     with pytest.raises(Exception):
         paired.verify(_job(hub, paired, id="job-9", pop=forged))
@@ -226,7 +228,7 @@ def test_device_refuses_a_grant_it_did_not_sign(hub, paired):
     from tenuo import SigningKey
     stranger = SigningKey.generate()
     grant = wire.mint_grant(stranger, hub.key.public_key, paired.folder, 600)
-    args = {"dir": paired.folder, "cmd": wire.digest("job-8", "echo ok", False, None, 30, "")}
+    args = {"dir": paired.folder, "cmd": wire.digest("job-8", "echo ok", False, None, 30, "", 0)}
     job = _job(hub, paired, id="job-8", chain=[grant.to_base64()], pop=wire.sign(grant, hub.key, wire.TOOL, args))
     with pytest.raises(Exception):
         paired.verify(job)
@@ -250,14 +252,14 @@ def test_subfolder_grant_limits_writes_to_the_subfolder(hub, folder):
     builder.with_capability(wire.TOOL, {"dir": Subpath(sub), "cmd": Wildcard()})
     child = builder.delegate(hub.key)
     cmd = "echo in > inside.txt; echo out > ../outside.txt; true"
-    args = {"dir": sub, "cmd": wire.digest("job-sub", cmd, False, None, 30, "")}
+    args = {"dir": sub, "cmd": wire.digest("job-sub", cmd, False, None, 30, "", 0)}
     job = {"id": "job-sub", "cmd": cmd, "login": False, "timeout": 30, "stdin": None, "shown": "", "dir": sub,
            "chain": [session.grant.to_base64(), child.to_base64()], "pop": wire.sign(child, hub.key, wire.TOOL, args)}
     where = device.verify(job)
     device.run(job, where)
     assert (folder / "src" / "inside.txt").exists() and not (folder / "outside.txt").exists()
     # The narrowed warrant cannot be used for the parent folder.
-    args = {"dir": session.folder, "cmd": wire.digest("job-up", cmd, False, None, 30, "")}
+    args = {"dir": session.folder, "cmd": wire.digest("job-up", cmd, False, None, 30, "", 0)}
     wider = dict(job, id="job-up", dir=session.folder, pop=wire.sign(child, hub.key, wire.TOOL, args))
     with pytest.raises(Exception):
         device.verify(wider)
@@ -293,3 +295,162 @@ def test_invite_round_trips():
     for bad in ("http://x/y#z", "hands://host:1/", "hands://host:1/secret", "hands://host:1/secret#not-a-key"):
         with pytest.raises(Exception):
             wire.Invite.parse(bad)
+
+
+# --- one sandbox for the whole session ----------------------------------------------------
+
+@sandboxed
+def test_background_process_outlives_its_command_and_a_later_one_can_stop_it(hub, folder):
+    up(hub, folder)
+    started = time.time()
+    out, code = run(hub, "(sleep 1; echo late > late.txt) >/dev/null 2>&1 & sleep 300 >/dev/null 2>&1 & echo $!")
+    assert code == 0 and time.time() - started < 10, "a command that leaves a process running must still return"
+    pid = out.strip().splitlines()[-1]
+    deadline = time.time() + 10
+    while time.time() < deadline and not (folder / "late.txt").exists():
+        time.sleep(0.1)
+    assert (folder / "late.txt").exists()
+    assert run(hub, f"kill {pid} && echo stopped")[0].strip() == "stopped"
+    assert run(hub, f"kill -0 {pid} 2>/dev/null; echo $?")[0].strip() != "0"
+
+
+@sandboxed
+def test_background_processes_stop_when_the_device_goes_down(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    run(hub, "(while true; do date +%s%N > tick.txt; sleep 0.2; done) >/dev/null 2>&1 &")
+    time.sleep(1)
+    assert (folder / "tick.txt").exists()
+    device.stop()
+    device.thread.join(wire.POLL_SECONDS + 20)
+    time.sleep(1)
+    seen = (folder / "tick.txt").read_text()
+    time.sleep(1)
+    assert (folder / "tick.txt").read_text() == seen
+
+
+@sandboxed
+def test_command_cannot_signal_a_process_outside_the_sandbox(hub, folder):
+    up(hub, folder)
+    outside = subprocess.Popen(["sleep", "60"])
+    try:
+        run(hub, f"kill -9 {outside.pid}")
+        time.sleep(0.3)
+        assert outside.poll() is None
+    finally:
+        outside.kill()
+
+
+@sandboxed
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS services")
+def test_command_cannot_ask_macos_to_run_something_outside(hub, folder, tmp_path):
+    up(hub, folder)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    app = folder / "Run.app" / "Contents" / "MacOS"
+    app.mkdir(parents=True)
+    (app / "Run").write_text(f"#!/bin/sh\necho out > {outside}/launched.txt\n")
+    (app / "Run").chmod(0o755)
+    (folder / "Run.app" / "Contents" / "Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Run</string>'
+        "<key>CFBundleIdentifier</key><string>test.hands.run</string><key>LSUIElement</key><true/></dict></plist>")
+    run(hub, "open -g -j ./Run.app; sleep 2; pbpaste >/dev/null && echo clipboard")
+    assert not (outside / "launched.txt").exists()
+    assert "clipboard" not in run(hub, "pbpaste >/dev/null 2>&1 && echo clipboard")[0]
+
+
+@sandboxed
+def test_temp_files_work_with_the_default_state_folder(hub, tmp_path, monkeypatch):
+    """The default state folder is inside a path commands cannot read; their temp folder still works."""
+    monkeypatch.delenv("TENUO_HANDS_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    up(hub, project)
+    out, code = run(hub, 'mkdir -p "$TMPDIR" && f="$TMPDIR/probe.txt"; echo kept > "$f" && cat "$f"')
+    assert (out.strip(), code) == ("kept", 0)
+    key = tmp_path / "home" / ".hermes-tenuo" / "hands" / "device.key"
+    assert key.exists() and run(hub, f"cat {key}")[1] != 0
+
+
+# --- a command never runs after the caller was told it did not ------------------------------
+
+def test_command_that_reaches_the_device_too_late_is_refused(hub, paired):
+    job = _job(hub, paired)  # signed with a 30 second budget
+    paired._polled_at = time.time() - 10
+    assert 18 <= paired.budget(job) <= 20
+    paired._polled_at = time.time() - 31
+    with pytest.raises(HandsError, match="too late"):
+        paired.budget(job)
+
+
+def test_command_nobody_waits_for_is_never_handed_over(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    monkeypatch.setattr(hub_module, "GRACE_SECONDS", 0.2)
+    session = hub.pick(paired.name)
+    out, code = hub.run(session, "echo never", login=False, timeout=1, stdin=None)
+    assert code == 124 and "did not answer" in out
+    assert paired.poll() is None
+
+
+def test_command_not_started_in_time_is_reported_as_not_run(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    session = hub.pick(paired.name)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(session, "echo never", login=False, timeout=1, stdin=None)))
+    waiter.start()
+    time.sleep(1.3)
+    assert paired.poll() is None
+    waiter.join(5)
+    assert result["r"][1] == 124 and "was not run" in result["r"][0]
+
+
+def test_device_counts_as_up_while_it_runs_a_long_command(hub, paired):
+    session = hub.pick(paired.name)
+    session.last_seen = time.time() - 600
+    assert not session.online
+    session.running_until = time.time() + 60
+    assert session.online
+
+
+def test_device_going_down_is_known_at_once(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    session = hub.pick(paired.name)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(session, "echo x", login=False, timeout=60, stdin=None)))
+    waiter.start()
+    time.sleep(0.2)
+    paired.bye()
+    waiter.join(5)
+    assert result["r"][1] == 127 and "went down" in result["r"][0]
+    with pytest.raises(HandsUnavailable):
+        hub.pick(paired.name)
+
+
+def test_waiting_command_follows_a_device_that_comes_back(hub, folder, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    old = hub.pick(paired.name)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(old, "echo x", login=False, timeout=30, stdin=None)))
+    waiter.start()
+    time.sleep(0.2)
+    again = Device(None, str(folder), 600, allow_unsandboxed=True)  # the device restarted
+    again.pair()
+    job = again.poll()
+    assert job is not None and again.verify(job) == again.folder
+    again.report(job["id"], "x\n", 0)
+    waiter.join(5)
+    assert result["r"] == ("x\n", 0)
+
+
+def test_command_a_restarted_device_had_is_reported_as_unknown(hub, folder, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(
+        r=hub.run(hub.pick(paired.name), "echo x", login=False, timeout=30, stdin=None)))
+    waiter.start()
+    assert paired.poll() is not None  # the device took the command, then died
+    Device(None, str(folder), 600, allow_unsandboxed=True).pair()
+    waiter.join(5)
+    assert result["r"][1] == 125 and "not known whether it ran" in result["r"][0]
