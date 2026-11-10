@@ -3,7 +3,7 @@
     eval "$(hermes-tenuo mint --output env \
       --ttl 1h \
       --allow read_file:path=/data/reports \
-      --allow write_file:path=/tmp/nightly,content=* \
+      --allow 'write_file:path=/tmp/nightly,content=*' \
       --allow memory)"
 
     hermes cron create "0 2 * * *" \

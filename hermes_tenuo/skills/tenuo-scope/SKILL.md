@@ -88,7 +88,7 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly,content=* \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 
@@ -126,7 +126,7 @@ TTL matches the schedule. Tools are the job, not the interactive agent.
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly,content=* \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 

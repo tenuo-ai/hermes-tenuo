@@ -157,18 +157,19 @@ for a cron job, a `delegate_task` child, or a gateway session.
 ## Scoping arguments
 
 Each `--allow` names a tool and, optionally, constraints on its arguments.
-A tool with no constraints is allowed with any arguments.
+A tool with no constraints is allowed with any arguments. Quote a value that
+contains `*`, `?` or `|`, or the shell will interpret it.
 
 | Syntax | Meaning | Example |
 |---|---|---|
 | `tool` | any arguments | `--allow web_search` |
 | `tool:arg=/path` | argument must be that path or under it (traversal-safe) | `--allow read_file:path=/data` |
-| `tool:arg=glob*` | argument must match the glob | `--allow web_search:query=acme*` |
-| `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow git:action=status\|diff\|log` |
+| `tool:arg=glob*` | argument must match the glob | `--allow 'web_search:query=acme*'` |
+| `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow 'git:action=status\|diff\|log'` |
 | `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
 | `tool:arg=value` | argument must match exactly | `--allow deploy:env=staging` |
-| `tool:arg=*` | that argument must be present and may be anything | `--allow write_file:path=/tmp/out,content=*` |
-| `tool:a=..,b=..` | several constraints on one tool | `--allow deploy:env=staging,region=eu\|us` |
+| `tool:arg=*` | that argument must be present and may be anything | `--allow 'write_file:path=/tmp/out,content=*'` |
+| `tool:a=..,b=..` | several constraints on one tool | `--allow 'deploy:env=staging,region=eu\|us'` |
 
 A range only matches numbers: an amount sent as the string `"40.00"` is
 denied, so declare such arguments as numbers in the tool schema. Give both
@@ -182,7 +183,7 @@ Once a tool has any constraint, the warrant must name every argument the
 call sends: a call carrying an argument the warrant does not name is denied.
 `arg=*` accepts any value, and the argument must then be present. So Hermes's
 `write_file`, which always sends `content`, needs
-`--allow write_file:path=/tmp/out,content=*`. A tool with optional arguments,
+`--allow 'write_file:path=/tmp/out,content=*'`. A tool with optional arguments,
 such as `read_file` with `offset` and `limit`, is allowed only when the call
 sends exactly the named ones. To constrain some arguments and accept any
 others, mint in Python with `_allow_unknown=True` (below).
