@@ -316,16 +316,37 @@ def test_marker_overflow_blocks_the_staged_grant_fallback(keys):
     g._MAX_DENIED_SESSIONS = 2
     g.set_session_warrant("own", _parent(root, agent), agent)
     assert _allowed(g, "web_search", {"query": "q"}, "own")  # becomes the primary session
+    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
     for n in range(3):
         g.set_session_warrant(f"user-{n}", _web_only(keys), agent)
         g.clear_session_warrant(f"user-{n}")
     assert g._denied_sessions_saturated and "user-0" not in g._session_warrants
-    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
     assert not g._saw_subagent_start and len(g._planned_children["own"]) == 1
     blocked = g.pre_tool_call("web_search", {"query": "q"}, session_id="user-0")
     assert blocked and "holds no authority" in blocked["message"]
     assert len(g._planned_children["own"]) == 1  # the grant was not consumed
     assert "user-0" not in g._session_warrants
+
+
+def test_marker_overflow_blocks_a_replayed_child_start(keys):
+    # A denied child whose marker was evicted replays subagent_start. It must
+    # not take a grant staged for another child, with or without a goal match.
+    root, agent = keys
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 2
+    g.set_session_warrant("own", _parent(root, agent), agent)
+    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
+    for n in range(3):
+        g.on_subagent_start("own", f"stray-{n}", child_goal="other")
+    assert g._denied_sessions_saturated and "stray-0" not in g._session_warrants
+    for goal in ("g", None):
+        g.on_subagent_start("own", "stray-0", child_goal=goal)
+        assert len(g._planned_children["own"]) == 1
+        assert not _allowed(g, "web_search", {"query": "q"}, "stray-0")
+    # New delegation is refused outright until restart, instead of spawning a child with nothing.
+    refused = g.pre_tool_call("delegate_task", {"goal": "h"}, session_id="own", tool_call_id="e")
+    assert refused and "restart Hermes" in refused["message"]
+    assert _allowed(g, "web_search", {"query": "q"}, "own")
 
 
 def test_marker_overflow_leaves_an_unconfigured_guard_a_no_op():

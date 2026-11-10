@@ -449,9 +449,25 @@ class HermesGuard:
                 self._denied_sessions_saturated = True
                 logger.error(
                     "hermes-tenuo: more than %d sessions have been denied; sessions with no "
-                    "warrant of their own are blocked until Hermes restarts",
+                    "warrant of their own are blocked and delegate_task is refused until "
+                    "Hermes restarts",
                     self._MAX_DENIED_SESSIONS,
                 )
+
+    @property
+    def _overflowed(self) -> bool:
+        """Whether a denied session can no longer be told from an unknown one.
+
+        From then on no session gains authority implicitly: not the config
+        warrant, not a staged child grant. Only ``set_session_warrant`` does.
+        This holds with or without a config warrant, since where unknown
+        sessions pass through (require_session_warrant off) an evicted session
+        would too. A guard that never used a warrant cannot be saturated and
+        stays a no-op.
+        """
+        return self._denied_sessions_saturated and (
+            self._static_warrant is not None or self._uses_session_warrants
+        )
 
     def _chain_for(self, session_id: str) -> List[Any]:
         """Ancestor warrants for *session_id*, root first; empty for a root session."""
@@ -498,13 +514,8 @@ class HermesGuard:
 
         # Once a marker has been evicted, a session with no warrant of its own
         # may be one that was denied. It gets nothing: not a staged child grant
-        # below, and not the config warrant. This applies with or without a
-        # config warrant, since where unknown sessions pass through
-        # (require_session_warrant off) an evicted session would too. A guard
-        # that never used a warrant cannot be saturated and stays a no-op.
-        if self._denied_sessions_saturated and (
-            self._static_warrant is not None or self._uses_session_warrants
-        ):
+        # below, and not the config warrant.
+        if self._overflowed:
             return _UNTRACKED, None
 
         if self._planned_children and not self._saw_subagent_start:
@@ -742,6 +753,15 @@ class HermesGuard:
     def _stage_grants(
         self, parent_session_id: str, grants: List["_ChildGrant"]
     ) -> Optional[Dict[str, Any]]:
+        if self._overflowed:
+            # A child could not be told from a denied session replaying its start.
+            return {
+                "action": "block",
+                "message": (
+                    "tenuo: delegation rejected: too many sessions have been denied to "
+                    "attach a child safely; restart Hermes"
+                ),
+            }
         # subagent_start carries a goal, but no originating tool-call ID.
         # Never let two outstanding invocations compete for the same goal.
         with self._pending_lock:
@@ -913,6 +933,15 @@ class HermesGuard:
             # Hermes runs the child under this task id; execute_code calls made
             # by the child carry it without a session id.
             self._remember_task(child_task_id, child_session_id)
+
+        if self._overflowed:
+            # This may be a denied child whose marker was evicted, replaying
+            # its start. It must not take a grant staged for another child.
+            logger.warning(
+                "hermes-tenuo: subagent %s (parent %s) gets no grant: the denied-session "
+                "record has overflowed", child_session_id, parent_session_id,
+            )
+            return
 
         grant = self._claim_child_grant(parent_session_id, child_goal)
         if grant is not None:
