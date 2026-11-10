@@ -263,6 +263,37 @@ def test_expired_child_grant_is_denied_not_widened(keys):
     assert "old" not in g._child_sessions and "old" not in g._session_warrant_chains
 
 
+def test_expired_child_sweep_is_bounded_per_attach(keys):
+    class Stub:
+        checks = 0
+
+        def __init__(self, expired):
+            self.expired = expired
+
+        def is_expired(self):
+            Stub.checks += 1
+            return self.expired
+
+    g = _guard(keys)
+    g._CHILD_SWEEP = 4
+    with g._session_lock:
+        for n in range(10):
+            g._session_warrants[f"old-{n}"] = (Stub(expired=n % 2 == 0), None)
+            g._child_sessions[f"old-{n}"] = None
+    _delegate(g, {"goal": "g0"}, [("c0", "g0")])
+    assert Stub.checks == 4  # not all ten
+    for n in range(1, 4):
+        _delegate(g, {"goal": f"g{n}"}, [(f"c{n}", f"g{n}")])
+    # Four attaches, four checks each at most; the rotation has reached every old child.
+    assert 10 <= Stub.checks <= 16
+    for n in range(10):
+        retired = f"old-{n}" not in g._child_sessions
+        assert retired == (n % 2 == 0)
+        assert (not _allowed(g, "web_search", {"query": "q"}, f"old-{n}"))
+    for n in range(4):
+        assert _allowed(g, "web_search", {"query": "q"}, f"c{n}")
+
+
 def test_denied_session_markers_are_bounded_and_overflow_fails_closed(keys):
     root, agent = keys
     g = _guard(keys)

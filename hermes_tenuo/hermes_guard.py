@@ -842,19 +842,28 @@ class HermesGuard:
                     return grant
         return None
 
+    # Children examined for an expired grant on each attach. The scan rotates
+    # through the live children, so the work under the lock stays constant
+    # however many there are.
+    _CHILD_SWEEP = 32
+
     def _attach_child(self, child_session_id: str, grant: "_ChildGrant") -> None:
         with self._session_lock:
             # A child keeps its grant for as long as it runs, across turns.
             # Drop the key material of children whose grant has expired; they
             # stay denied instead of falling back to the config warrant.
-            for session_id in list(self._child_sessions):
-                warrant, _ = self._session_warrants.get(session_id, (None, None))
+            for _ in range(min(len(self._child_sessions), self._CHILD_SWEEP)):
+                session_id = next(iter(self._child_sessions))
+                del self._child_sessions[session_id]
+                warrant, _key = self._session_warrants.get(session_id, (None, None))
                 try:
                     expired = warrant is None or warrant.is_expired()
                 except Exception:
                     expired = True
                 if expired:
                     self._deny_session(session_id, _RETIRED)
+                else:
+                    self._child_sessions[session_id] = None  # back of the rotation
             self._bind_session(child_session_id, grant.warrant, grant.key, grant.chain)
             self._child_sessions[child_session_id] = None
 
