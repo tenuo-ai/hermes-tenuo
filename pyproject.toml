@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-tenuo"
-version = "0.2.0"
+version = "0.3.0"
 description = "Tenuo authorization plugin for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "tenuo>=0.3.5,<0.4",
+    "tenuo>=0.3.6,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +32,7 @@ cloud = [
     # dependencies for Python 3.14 with every extra included, so an extra that
     # cannot install there fails the whole plugin install. Drop the marker once
     # tenuo-cloud ships a 3.14 build.
-    "tenuo[cloud]>=0.3.5,<0.4; python_version < '3.14'",
+    "tenuo[cloud]>=0.3.6,<0.4; python_version < '3.14'",
 ]
 dev = [
     "pytest>=7.0",
