@@ -28,7 +28,8 @@ class HandsEnvironment(BaseEnvironment):
         self._hub = hub
         self._task = task_id
         self._device = device
-        self._session = hub.pick(device)
+        from hermes_tenuo.hands import chat
+        self._session = hub.pick(device, None if device else chat._owner())
         self._folder = self._session.folder
         self._wrapped: "collections.deque[tuple]" = collections.deque(maxlen=32)
         super().__init__(cwd=self._folder, timeout=timeout)
@@ -42,7 +43,8 @@ class HandsEnvironment(BaseEnvironment):
     def _current(self):
         """The device session to use now. A device that came back (new time window, restart)
         has a new session; this conversation follows it instead of holding on to the old one."""
-        session = self._hub.pick(self._device)
+        from hermes_tenuo.hands import chat
+        session = self._hub.pick(self._device, None if self._device else chat._owner())
         if session is not self._session:
             moved = session.device != self._session.device or session.tmp != self._session.tmp
             self._session, self._folder = session, session.folder
@@ -91,7 +93,7 @@ class HandsEnvironment(BaseEnvironment):
 
         def run() -> tuple:
             try:
-                session = self._hub.pick(self._device)
+                session = self._hub.pick(self._device, None if self._device else asking)
                 if session.owner and session.owner != asking:
                     return (f"hands: '{session.name}' belongs to the person who paired it; this command was "
                             "not run\n"), 126

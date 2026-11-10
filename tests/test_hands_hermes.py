@@ -97,7 +97,6 @@ SCRIPT = textwrap.dedent('''
     tool("back", "terminal", {"command": "pwd"})
     # Someone else's machine: neither the tool call nor the backend itself runs a stranger's command.
     from hermes_tenuo.hands.backend import HandsEnvironment
-    from tools import terminal_tool
     session, asking = get_hub().pick("laptop"), chat._owner
     session.owner = "telegram:alice"
     chat._owner = lambda: "telegram:bob"
@@ -105,10 +104,30 @@ SCRIPT = textwrap.dedent('''
     # A tool that only runs on the server is not theirs to lose.
     out["stranger_server_tool"] = chat.around_tool(tool_name="web_search", args={}, next_call=lambda: "on the server",
                                                    task_id="chat-1")
-    shell = next(e for e in terminal_tool._active_environments.values() if isinstance(e, HandsEnvironment))
+    shell = HandsEnvironment(cwd=str(device_dir), timeout=30, device="laptop")
     out["stranger_backend"] = str(shell.execute("echo x > stranger2.txt"))
     chat._owner = lambda: "telegram:alice"
     tool("owner", "terminal", {"command": "echo mine"})
+    if whole_profile:
+        # Each sender has exactly one usable default even with both machines online.
+        second, second_thread = up(base / "device-project-2", name="bobs-machine",
+                                   invite=get_hub().invite("telegram:bob"), state=base / "device-state-bob")
+        try:
+            default = HandsEnvironment(cwd=str(server_dir), timeout=30)
+            assert default._session.name == "laptop"
+            assert "alice-default" in str(default.execute("echo alice-default"))
+            chat._owner = lambda: "telegram:bob"
+            assert default._current().name == "bobs-machine"
+            assert "bob-default" in str(default.execute("echo bob-default"))
+            tool("bob_default", "terminal", {"command": "pwd"}, task="bob-chat")
+            assert "bobs-machine" in out["bob_default"]["ran_on"], out["bob_default"]
+            assert out["bob_default"]["text"].strip() == str(base / "device-project-2")
+            chat._owner = lambda: "telegram:alice"
+            assert default._current().name == "laptop"
+        finally:
+            second.stop(); second_thread.join(20)
+            get_hub().revoke("bobs-machine")
+            os.environ["TENUO_HANDS_HOME"] = str(base / "device-state")
     chat._owner, session.owner = asking, ""
     if not whole_profile:
         out["status"] = chat.command("status")

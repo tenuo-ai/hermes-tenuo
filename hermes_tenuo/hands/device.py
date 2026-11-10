@@ -52,7 +52,8 @@ TOOL_PATHS = ("JAVA_HOME", "ANDROID_HOME", "GOROOT")  # passed on only if set
 # Commands cannot read the home folder. These folders in it stay readable when they exist,
 # because programs and interpreters live there; so does every folder on PATH. Places that
 # hold programs, not secrets: the protected paths are still refused inside them.
-TOOL_FOLDERS = (".local/share/uv", ".local/share/mise", ".local/share/pnpm", "Library/pnpm", ".bun", ".deno",
+TOOL_FOLDERS = (".local/share/uv", ".local/share/mise", ".local/share/pnpm", ".local/share/pipx", ".local/pipx",
+                "Library/Application Support/pipx", "Library/pnpm", ".bun", ".deno",
                 "miniconda3", "anaconda3", "miniforge3", "mambaforge")
 
 PROFILE = ".hands_profile"  # in the stand-in home; keeps this device's settings in login shells too
@@ -312,6 +313,10 @@ def shown_in_home(extra: Any = ()) -> list:
     wanted = [os.environ.get(name) or os.path.join(real_home, sub) for name, sub in TOOL_HOMES.items()]
     wanted += [os.environ[name] for name in TOOL_PATHS if os.environ.get(name)]
     wanted += [os.path.join(real_home, sub) for sub in TOOL_FOLDERS]
+    if os.environ.get("PIPX_HOME"):
+        wanted.append(os.environ["PIPX_HOME"])
+    if os.environ.get("XDG_DATA_HOME"):
+        wanted.append(os.path.join(os.environ["XDG_DATA_HOME"], "pipx"))
     wanted += [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
     found: list = []
     for path in wanted:
@@ -324,6 +329,8 @@ def shown_in_home(extra: Any = ()) -> list:
             raise HandsError(f"--read {path}: not a folder")
         if real in ("/", real_home):
             raise HandsError(f"--read {path}: name a folder inside your home folder, or use --read-home for all of it")
+        if sandbox.socket_overlap(real):
+            raise HandsError(f"--read {path}: that folder overlaps protected host service sockets")
         if sandbox.protected(real, [os.path.realpath(home())]):
             raise HandsError(f"--read {path}: that folder holds keys or credentials and is never shown to commands")
         if real not in found:

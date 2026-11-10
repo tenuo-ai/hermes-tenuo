@@ -396,7 +396,7 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
 
     hub = get_hub()
     try:
-        session = hub.pick(wanted or "") if hub is not None else None
+        session = hub.pick(wanted or "", None if wanted else _owner()) if hub is not None else None
     except HandsUnavailable:
         session = None  # the backend reports the missing device when the call runs
     folder = session.folder if session is not None else ""
