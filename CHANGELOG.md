@@ -13,11 +13,39 @@
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 
-### Fixed
+## 0.3.0 - 2026-11-09
+
+This minor release hardens every subagent delegation boundary, fails closed on
+plugin enforcement errors, and moves the integration to Tenuo 0.3.6.
+
+### Delegation security
+
+- Give every authorized `delegate_task` child a one-time grant, a fresh holder
+  key, and the complete verified ancestor chain.
+- Require an authorized spawn before a child receives authority; reject
+  unstaged, ambiguous, cancelled, and mismatched child activity.
+- Attribute sessionless tool calls by task ID and fail closed when attribution
+  is missing, ambiguous, or capacity-limited.
+- Add strict operator-controlled delegation plans for per-depth tool, argument,
+  and TTL narrowing, with atomic parent TTL caps.
+- Preserve inherited constraints, terminal delegation semantics, and exact
+  capability restrictions across conventional `tool:` aliases.
+
+### Fail-closed operation
+
+- Convert escaped authorization-hook failures and malformed hook results into
+  explicit denials without exposing arguments or backend error details.
+- Keep denials effective even if secondary kanban bookkeeping fails.
+- Record final grant rejections, unauthorized children, and unattributed post
+  hooks as denials in local audit and control-plane output.
+
+### Compatibility and dependencies
 
 - `hermes plugins install` no longer fails on Hermes's Python 3.14 environment.
   The `cloud` extra now applies on Python 3.13 and earlier only, because
   `tenuo-cloud` has no 3.14 build yet.
+- Require Tenuo 0.3.6 for hardened negated and numeric policies, stricter URL
+  parsing, complete delegated Python chains, and current security remediations.
 
 ## 0.2.0 - 2026-10-31
 
