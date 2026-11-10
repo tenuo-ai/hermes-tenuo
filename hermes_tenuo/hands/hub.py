@@ -7,6 +7,7 @@ to it, so a laptop behind a home router needs no open port.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -33,6 +34,18 @@ WATCH_SECONDS = 20  # how long a device's "should I stop this command?" request 
 READ_SECONDS = 20   # how long a connection may take to send its request
 MAX_CONNECTIONS = 128
 MAX_PER_ADDRESS = 32  # one address cannot take every connection and lock other machines out
+
+
+def forwarded_for(peer: str, header: Optional[str]) -> str:
+    """The caller's address: `peer`, unless the request came through a proxy on this machine
+    that names who it is forwarding for (the last address in X-Forwarded-For is the one the
+    nearest proxy added). A caller that is not on this machine cannot choose its own address."""
+    try:
+        if not header or not ipaddress.ip_address(peer).is_loopback:
+            return peer
+        return str(ipaddress.ip_address(header.split(",")[-1].strip()))
+    except ValueError:
+        return peer
 
 
 class HandsUnavailable(RuntimeError):
@@ -83,7 +96,8 @@ class Hub:
         self.dir = Path(state_dir) if state_dir else hermes_home() / "tenuo" / "hands"
         self.public_url = public_url.rstrip("/")
         self._lock = threading.RLock()
-        self._invites: Dict[str, Tuple[float, str, str]] = {}  # secret -> (until, who asked, in which conversation)
+        # secret -> (until, who asked, in which conversation; None = not asked from a conversation)
+        self._invites: Dict[str, Tuple[float, str, Optional[str]]] = {}
         # Called with (conversation, machine name) when a machine comes up on an invite.
         self.joined: Optional[Callable[[str, str], None]] = None
         self._paired: Dict[str, float] = {}  # pairing requests already used -> when
@@ -201,6 +215,7 @@ class Hub:
             session.jobs.put(pending)
         give_up = time.monotonic() + int(timeout) + GRACE_SECONDS
         stop_by: Optional[float] = None
+        lost = False
         try:
             while True:
                 try:
@@ -227,15 +242,30 @@ class Hub:
                             session.waiting.pop(job_id, None)
                             return "hands: stopped before it started\n", 130
                         current.cancels.add(job_id)  # the device is told to stop it
-                    stop_by = now + 15
+                    # Hermes stops a command when its time is up. The device stops it at the same
+                    # moment and says so; if that does not arrive either, the result was lost on
+                    # the way, and Hermes waits only briefly for what is returned here.
+                    lost = now >= pending["deadline"] - 1
+                    stop_by = now + (1.5 if lost else 15)
                 if stop_by is not None and now > stop_by:
+                    if lost:
+                        return self._no_result(session.name), 125
                     return f"hands: asked device '{session.name}' to stop this command; it has not confirmed\n", 130
                 if now > give_up:
-                    return f"hands: device '{session.name}' did not answer in time\n", 124
+                    if had:
+                        return self._no_result(session.name), 125
+                    return (f"hands: device '{session.name}' did not take this command in time, so it was "
+                            "not run\n", 124)
         finally:
             with self._lock:
                 self._sessions.get(session.device, session).waiting.pop(job_id, None)
                 session.waiting.pop(job_id, None)
+
+    @staticmethod
+    def _no_result(name: str) -> str:
+        return (f"hands: device '{name}' was given this command, but no result came back in its time (the "
+                "connection may have dropped). It may have run, or still be running there: check before "
+                "running it again\n")
 
     def _hand_over(self, session: Session, pending: Dict[str, Any], poll_started: float,
                    poll: str = "") -> Optional[Dict[str, Any]]:
@@ -482,6 +512,29 @@ class Hub:
                 pass
 
             def do_POST(self) -> None:
+                # A reverse proxy on this machine makes every caller look like one address.
+                # While a request is being answered it is counted against the address the
+                # proxy reports, so one caller cannot use up everyone's connections.
+                peer = str(self.client_address[0]) if self.client_address else ""
+                caller = forwarded_for(peer, self.headers.get("X-Forwarded-For"))
+                if not self.server.recount(self.connection, caller):
+                    try:
+                        # Take what has already arrived, briefly, so the refusal is delivered
+                        # as an answer and not as a dropped connection.
+                        self.connection.settimeout(0.2)
+                        self.rfile.read(min(max(int(self.headers.get("Content-Length") or 0), 0), 65536))
+                    except (OSError, ValueError):
+                        pass
+                    self._send(503, {"error": "too many connections from this address"})
+                    self.close_connection = True
+                    return
+                try:
+                    self._answer()
+                finally:
+                    if caller != peer:
+                        self.server.recount(self.connection, None)
+
+            def _answer(self) -> None:
                 routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
                           wire.API + "/bye": hub.bye, wire.API + "/watch": hub.watch}
                 handler = routes.get(self.path)
@@ -500,7 +553,7 @@ class Hub:
                         hub.undelivered(str(body.get("device", "")), str(job.get("id", "")))
                 except Refused as e:
                     self._send(e.status, {"error": str(e)})
-                except ValueError:
+                except (ValueError, RecursionError):
                     self._send(400, {"error": "bad request"})
                 except Exception:
                     logger.exception("hermes-tenuo hands: request failed")
@@ -529,40 +582,63 @@ class Hub:
             counting = threading.Lock()
             total = 0
             per_address: Dict[str, int] = {}
+            counted: Dict[Any, Optional[str]] = {}
 
-            def _take(self, address: str) -> bool:
+            def _take(self, request: Any, address: str) -> bool:
                 with self.counting:
                     if self.total >= MAX_CONNECTIONS or self.per_address.get(address, 0) >= MAX_PER_ADDRESS:
                         return False
                     self.total += 1
+                    self.counted[request] = address
                     self.per_address[address] = self.per_address.get(address, 0) + 1
                     return True
 
-            def _give(self, address: str) -> None:
+            def _give(self, request: Any) -> None:
                 with self.counting:
                     self.total -= 1
-                    left = self.per_address.get(address, 1) - 1
-                    if left > 0:
-                        self.per_address[address] = left
-                    else:
-                        self.per_address.pop(address, None)
+                    address = self.counted.pop(request, None)
+                    if address is not None:
+                        self._uncount(address)
+
+            def _uncount(self, address: str) -> None:
+                left = self.per_address.get(address, 1) - 1
+                if left > 0:
+                    self.per_address[address] = left
+                else:
+                    self.per_address.pop(address, None)
+
+            def recount(self, request: Any, new: Optional[str]) -> bool:
+                """Idle forwarded connections count globally, but not against any caller.
+                New/incomplete connections still count against their peer until headers arrive."""
+                with self.counting:
+                    old = self.counted[request]
+                    if old == new:
+                        return True
+                    if new is not None and self.per_address.get(new, 0) >= MAX_PER_ADDRESS:
+                        return False
+                    if old is not None:
+                        self._uncount(old)
+                    if new is not None:
+                        self.per_address[new] = self.per_address.get(new, 0) + 1
+                    self.counted[request] = new
+                    return True
 
             def process_request(self, request: Any, client_address: Any) -> None:
                 address = str(client_address[0]) if client_address else ""
-                if not self._take(address):
+                if not self._take(request, address):
                     self.shutdown_request(request)
                     return
                 try:
                     super().process_request(request, client_address)
                 except Exception:
-                    self._give(address)
+                    self._give(request)
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    self._give(str(client_address[0]) if client_address else "")
+                    self._give(request)
 
         server = Listener((host or "127.0.0.1", int(port)), Handler)
         self._server = server

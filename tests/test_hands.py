@@ -5,7 +5,6 @@ from __future__ import annotations
 import builtins
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -446,7 +445,7 @@ def test_command_nobody_waits_for_is_never_handed_over(hub, paired, monkeypatch)
     monkeypatch.setattr(hub_module, "GRACE_SECONDS", 0.2)
     session = hub.pick(paired.name)
     out, code = hub.run(session, "echo never", login=False, timeout=1, stdin=None)
-    assert code == 124 and "did not answer" in out
+    assert code == 124 and "did not take this command in time" in out
     assert paired.poll() is None
 
 
@@ -1956,11 +1955,12 @@ def test_extra_read_does_not_expose_a_live_host_socket(tmp_path, monkeypatch):
         listener.bind(address)
         listener.listen(1)
         script = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({address!r})"
-        # The system's Python: the one running the tests may live in the home folder, which is hidden here.
-        python = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
         for exposed in (runtime, tmp_path):
+            python = os.path.realpath(sys.executable)
+            readable = sorted({os.path.realpath(path) for path in
+                               (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
             argv = sandbox.wrap(str(project), str(temp), [python, "-I", "-S", "-c", script],
-                                home_visible=False, tools=[str(exposed)])
+                                home_visible=False, tools=[str(exposed)], readable=readable)
             result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
             assert result.returncode != 0 and "FileNotFoundError" in result.stderr, result.stderr
 
@@ -1986,3 +1986,283 @@ def test_pipx_executable_links_work_with_hidden_home(home_base, monkeypatch, roo
                         home_visible=False, tools=device_module.shown_in_home())
     result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and result.stdout.strip() == "pipx-ok", result.stderr
+
+
+# --- a connection that comes and goes ---------------------------------------------------------
+
+@sandboxed
+def test_result_is_kept_and_sent_when_the_connection_returns(hub, folder, monkeypatch):
+    running = up(hub, folder)
+    real_post, down = device_module._post, threading.Event()
+
+    def post(url, body, timeout):
+        if down.is_set() and url.endswith("/result"):
+            raise ConnectionError("connection refused")
+        return real_post(url, body, timeout)
+
+    monkeypatch.setattr(device_module, "_post", post)
+    down.set()
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=run(hub, "echo kept-for-later", timeout=60)))
+    waiter.start()
+    deadline = time.time() + 10
+    while time.time() < deadline and not running.device._unsent:
+        time.sleep(0.05)
+    assert running.device._unsent and waiter.is_alive()  # ran, could not be reported, still waited for
+    down.clear()
+    waiter.join(20)
+    running.stop()
+    assert result["r"] == ("kept-for-later\n", 0)
+    assert any("kept and sent when the connection is back" in line for line in running.lines)
+
+
+def test_command_whose_time_is_up_with_no_result_is_reported_as_unknown(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    stopped, result = threading.Event(), {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(
+        hub.pick(paired.name), "echo x", login=False, timeout=3, stdin=None, cancelled=stopped)))
+    waiter.start()
+    assert paired.poll() is not None  # the device has it; its result never arrives
+    time.sleep(2.3)
+    stopped.set()                     # what Hermes does when the command's time is up
+    waiter.join(4)
+    assert not waiter.is_alive() and result["r"][1] == 125
+    assert "no result came back" in result["r"][0] and "check before running it again" in result["r"][0]
+
+
+def test_command_nobody_stops_with_no_result_is_reported_as_unknown(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    monkeypatch.setattr(hub_module, "GRACE_SECONDS", 0.3)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(
+        hub.pick(paired.name), "echo x", login=False, timeout=3, stdin=None)))
+    waiter.start()
+    assert paired.poll() is not None
+    waiter.join(8)
+    assert result["r"][1] == 125 and "no result came back" in result["r"][0]
+
+
+def test_untrusted_certificate_says_what_to_do(monkeypatch):
+    import ssl
+    import urllib.error
+
+    def refuse(*args, **kwargs):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", refuse)
+    with pytest.raises(ConnectionError, match="SSL_CERT_FILE"):
+        device_module._post("https://server.example/hands/v1/pair", {}, timeout=1)
+
+
+# --- which machine a conversation uses ---------------------------------------------------------
+
+def test_conversation_keeps_its_machine_across_a_restart(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "chat-a")
+    monkeypatch.setattr(chat, "_owner", lambda: "")
+    monkeypatch.setattr(chat, "_wanted", {})
+    hub.joined = chat.joined
+    Device(chat.command("invite").split("'")[1], str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    saved = hub.dir / "conversations.json"
+    assert json.loads(saved.read_text()) == {"chat-a": "laptop"} and saved.stat().st_mode & 0o077 == 0
+    monkeypatch.setattr(chat, "_wanted", {})   # Hermes restarted: nothing in memory
+    chat.restore()
+    assert chat._wanted == {"chat-a": "laptop"}
+    chat.command("off")
+    assert json.loads(saved.read_text()) == {}
+    chat.command("on laptop")
+    hub.revoke("laptop", "")
+    monkeypatch.setattr(chat, "_wanted", {})
+    chat.restore()
+    assert chat._wanted == {"chat-a": "laptop"}  # revoked routes fail closed until explicitly switched off
+
+
+def test_invite_switches_the_conversation_on_a_single_session_hermes(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "")   # the CLI: one conversation, no key
+    monkeypatch.setattr(chat, "_owner", lambda: "")
+    monkeypatch.setattr(chat, "_wanted", {})
+    hub.joined = chat.joined
+    line = chat.command("invite")
+    assert "starts using the machine as soon as it is up" in line
+    Device(line.split("'")[1], str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert chat._wanted == {"": "laptop"}
+
+
+def test_invite_made_outside_a_conversation_switches_nothing(hub, folder):
+    switched = []
+    hub.joined = lambda conversation, name: switched.append((conversation, name))
+    Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert switched == []
+
+
+# --- behind a reverse proxy --------------------------------------------------------------------
+
+def test_forwarded_address_is_believed_only_from_this_machine():
+    f = hub_module.forwarded_for
+    assert f("127.0.0.1", "203.0.113.5") == "203.0.113.5"
+    assert f("::1", "198.51.100.7, 203.0.113.9") == "203.0.113.9"   # the nearest proxy's entry
+    assert f("198.51.100.1", "203.0.113.5") == "198.51.100.1"       # a remote caller cannot pick its address
+    assert f("127.0.0.1", "not an address") == "127.0.0.1"
+    assert f("127.0.0.1", None) == "127.0.0.1"
+
+
+def test_callers_behind_a_proxy_are_counted_one_by_one(tmp_path, monkeypatch):
+    import socket
+    monkeypatch.setattr(hub_module, "MAX_PER_ADDRESS", 3)
+    monkeypatch.setattr(hub_module, "READ_SECONDS", 30)
+    h = Hub(state_dir=tmp_path / "server-state")
+    h.listen("127.0.0.1:0")
+    host, port = h.public_url.split("//")[1].split(":")
+    held = []
+
+    def ask(caller, finish):
+        s = socket.create_connection((host, int(port)), timeout=5)
+        body = b"{}" if finish else b"{"
+        path = wire.API + ("/nowhere" if finish else "/pair")   # a real path waits for the rest of its body
+        s.sendall((f"POST {path} HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: {caller}\r\n"
+                   f"Content-Length: {2 if finish else 50}\r\n\r\n").encode() + body)
+        if not finish:
+            held.append(s)
+            time.sleep(0.15)
+            return None
+        status = int(s.recv(200).split()[1])
+        s.close()
+        return status
+
+    try:
+        for _ in range(3):
+            ask("203.0.113.5", finish=False)       # three requests one caller never finishes
+        assert ask("203.0.113.5", finish=True) == 503   # that caller has its share
+        assert ask("203.0.113.6", finish=True) == 404   # another caller is answered
+    finally:
+        for s in held:
+            s.close()
+        h.close()
+
+
+def test_deeply_nested_request_is_a_bad_request(hub):
+    import urllib.error
+    import urllib.request
+    request = urllib.request.Request(hub.public_url + wire.API + "/poll", b"[" * 100000 + b"]" * 100000,
+                                     {"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request, timeout=10)
+    assert refused.value.code == 400
+
+
+
+def test_restore_preserves_overflow_and_unknown_routes(hub, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "_wanted", {})
+    saved = {f"chat-{i}": "renamed-or-revoked" for i in range(2005)}
+    hub.dir.mkdir(parents=True, exist_ok=True)
+    (hub.dir / "conversations.json").write_text(json.dumps(saved))
+    chat.restore()
+    assert chat._wanted == saved
+    with pytest.raises(HandsUnavailable):
+        hub.pick(chat._wanted["chat-2004"])
+
+
+def test_expired_device_retries_results_without_running_commands(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device.expires = time.time() - 1
+    device._unsent = [("finished", "output", 0)]
+    events = []
+    monkeypatch.setattr(device, "pair", lambda: None)
+    monkeypatch.setattr(device, "bye", lambda: None)
+    monkeypatch.setattr(device, "poll", lambda: pytest.fail("polled after execution expiry"))
+    monkeypatch.setattr(device, "_stop_runner", lambda: events.append("stopped"))
+    attempts = []
+
+    def report(*args, timeout):
+        assert events == ["stopped"] and device._waiting
+        assert 0 < timeout <= 5
+        attempts.append(args)
+        if len(attempts) < 3:
+            raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    monkeypatch.setattr(device, "_pause", lambda seconds, deadline: None)
+    assert device.serve() == 0
+    assert len(attempts) == 3 and not device._unsent
+
+
+@pytest.mark.parametrize("signal_stop", [False, True])
+def test_deferred_result_delivery_honors_stop(hub, folder, monkeypatch, signal_stop):
+    import signal
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device._unsent = [("finished", "output", 0)]
+    attempts = []
+
+    def report(*args, timeout):
+        assert device._waiting and timeout <= 5
+        attempts.append(args)
+        if signal_stop:
+            device.stop(signal.SIGINT)
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    monkeypatch.setattr(device, "_pause", lambda seconds, deadline: device.stop())
+    device._drain_results()
+    device._drain_results()  # no final flush after stopping during a request or backoff
+    assert len(attempts) == 1 and device._unsent and not device._waiting
+
+
+def test_result_retries_end_at_reporting_deadline(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device._unsent = [("finished", "output", 0)]
+    monkeypatch.setattr(device, "report", lambda *args, **kwargs: pytest.fail("reporting grace expired"))
+    device.expires = time.time() - wire.REPORT_GRACE - 1
+    device._drain_results()
+    assert device._unsent
+
+
+def test_idle_proxy_keepalives_do_not_consume_caller_quota(tmp_path, monkeypatch):
+    import http.client
+    monkeypatch.setattr(hub_module, "MAX_PER_ADDRESS", 2)
+    monkeypatch.setattr(hub_module, "MAX_CONNECTIONS", 8)
+    h = Hub(state_dir=tmp_path / "server-state")
+    h.listen("127.0.0.1:0")
+    host, port = h._server.server_address
+    connections = []
+    try:
+        for i in range(5):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            connections.append(conn)
+            conn.request("POST", wire.API + "/poll", body="{}", headers={"X-Forwarded-For": f"203.0.113.{i + 1}"})
+            response = conn.getresponse()
+            assert response.status == 410
+            response.read()
+        # Reuse a connection with another caller; quota accounting follows each request.
+        connections[0].request("POST", wire.API + "/poll", body="{}", headers={"X-Forwarded-For": "198.51.100.1"})
+        response = connections[0].getresponse()
+        assert response.status == 410
+        response.read()
+        deadline = time.time() + 2
+        while h._server.per_address and time.time() < deadline:
+            time.sleep(0.01)
+        assert not h._server.per_address and h._server.total == 5
+    finally:
+        for conn in connections:
+            conn.close()
+        h.close()
+
+
+def test_stopped_command_gets_only_one_short_immediate_report(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device.stop()
+    attempts = []
+
+    def report(*args, timeout):
+        assert timeout == 1 and device._waiting
+        attempts.append(args)
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    with pytest.raises(ConnectionError):
+        device._deliver("stopped", "cancelled", 130)
+    device._drain_results()
+    assert len(attempts) == 1 and not device._waiting

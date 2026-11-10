@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import stat
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -429,7 +430,14 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
             detail = ""
         raise HandsError(detail or f"the server answered {e.code}") from e
     except (OSError, ValueError) as e:
-        raise ConnectionError(str(getattr(e, "reason", e))) from e
+        reason = getattr(e, "reason", e)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise ConnectionError(
+                f"this machine does not trust the server's certificate "
+                f"({getattr(reason, 'verify_message', '') or reason}). If the server "
+                "uses its own certificate authority or a self-signed certificate, set SSL_CERT_FILE to that "
+                "certificate file and run this again") from e
+        raise ConnectionError(str(reason)) from e
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
@@ -563,6 +571,7 @@ class Device:
         self._talk = threading.Lock()                          # one writer to a runner at a time
         self._busy: Optional[tuple] = None                     # (runner, its job id) while a command runs
         self._job: Optional[str] = None                        # the command being handled, by the server's id
+        self._unsent: list = []  # results the server has not received yet: (command id, output, exit code)
         self._stop_job: Optional[str] = None                   # the command that was asked to stop
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
@@ -615,13 +624,60 @@ class Device:
         except (HandsError, ConnectionError):
             pass
 
-    def report(self, job_id: str, output: str, returncode: int) -> None:
+    def report(self, job_id: str, output: str, returncode: int, timeout: float = 60) -> None:
         output = wire.fit(output)
         args = {"job": job_id, "digest": wire.digest(output, returncode)}
         _post(self.url + wire.API + "/result", {
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
             "sig": self._signed(wire.TOOL_RESULT, args),
-        }, timeout=60)
+        }, timeout=timeout)
+
+    def _deliver(self, job_id: str, output: str, returncode: int) -> None:
+        """Keep the result before trying delivery, including when a stop interrupts it."""
+        self._unsent.append((job_id, output, returncode))
+        if self._stop:
+            # A command just interrupted locally can still confirm its exit immediately.
+            # This is one short attempt, not a flush of previously queued results.
+            self._waiting = True
+            try:
+                self.report(job_id, output, returncode, timeout=1)
+            finally:
+                self._waiting = False
+            self._unsent.pop()
+            return
+        self._send_unsent()
+
+    def _send_unsent(self, deadline: Optional[float] = None) -> None:
+        """Retry held results with short, signal-interruptible requests. No new work runs."""
+        deadline = self.expires + wire.REPORT_GRACE if deadline is None else deadline
+        while self._unsent and not self._stop:
+            left = deadline - time.time()
+            if left <= 0:
+                return
+            job_id, output, returncode = self._unsent[0]
+            self._waiting = True
+            try:
+                if self._stop:
+                    return
+                self.report(job_id, output, returncode, timeout=min(5, left))
+            except HandsError:
+                self.say("The server refused a held result; it is no longer pending for delivery.")
+            else:
+                self.say("Sent a result that was held while the server could not be reached.")
+            finally:
+                self._waiting = False
+            self._unsent.pop(0)
+
+    def _drain_results(self) -> None:
+        """After expiry, retry only reporting within the existing reporting grace period."""
+        deadline = self.expires + wire.REPORT_GRACE
+        while self._unsent and not self._stop and time.time() < deadline:
+            try:
+                self._send_unsent(deadline)
+            except _Stopped:
+                break
+            except ConnectionError:
+                self._pause(1, deadline=deadline)
 
     # -- checking and running one command ----------------------------------------
 
@@ -1008,7 +1064,7 @@ class Device:
         except Exception as e:  # a refusal is reported, never run
             reason = str(e) or type(e).__name__
             self._record(shown, None, f"refused: {reason}")
-            self.report(job_id, f"hands: refused on the device: {reason}\n", 126)
+            self._deliver(job_id, f"hands: refused on the device: {reason}\n", 126)
             return
         done = threading.Event()
         with self._talk:
@@ -1024,7 +1080,7 @@ class Device:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
-        self.report(job_id, output, code)
+        self._deliver(job_id, output, code)
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": shown,
@@ -1036,9 +1092,9 @@ class Device:
 
     # -- the loop ---------------------------------------------------------------
 
-    def _pause(self, seconds: float) -> None:
+    def _pause(self, seconds: float, deadline: Optional[float] = None) -> None:
         """Wait, but not past a request to stop or the end of the time window."""
-        end = min(time.time() + seconds, self.expires)
+        end = min(time.time() + seconds, self.expires if deadline is None else deadline)
         while not self._stop and time.time() < end:
             time.sleep(0.2)
 
@@ -1083,6 +1139,7 @@ class Device:
         failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
+                self._send_unsent()
                 self._waiting = True
                 try:
                     job = self.poll()
@@ -1132,9 +1189,15 @@ class Device:
             if job:
                 try:
                     self.handle(job)
-                except (HandsError, ConnectionError) as e:
+                except _Stopped:
+                    break
+                except ConnectionError as e:
+                    self.say(f"Couldn't reach the server to report a result ({e}); it is kept and sent when "
+                             "the connection is back.")
+                except HandsError as e:
                     self.say(f"Couldn't report a result: {e}")
         self._stop_runner()
+        self._drain_results()  # commands are already stopped; only reporting may continue
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         return 0

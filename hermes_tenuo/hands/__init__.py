@@ -49,5 +49,6 @@ def register(ctx: Any) -> bool:
     if register_middleware is not None:
         register_middleware("tool_execution", chat.around_tool)
         chat.can_switch = True
+        chat.restore()  # conversations keep the machine they were using before a restart
     logger.info("hermes-tenuo hands: listening on %s", listen)
     return True
