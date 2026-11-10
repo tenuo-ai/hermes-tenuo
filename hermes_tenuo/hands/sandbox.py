@@ -148,7 +148,7 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # The user's session sockets (the desktop bus, the service manager, agents) can start
     # programs outside the sandbox, so a command does not get them. Paths are resolved
     # first: bubblewrap cannot mount onto a path that goes through a symlink.
-    runtime = os.path.realpath(f"/run/user/{os.getuid()}")
+    runtime = _runtime_dir()
     if os.path.isdir(runtime):
         argv += ["--tmpfs", runtime]
         emptied.append(runtime)
@@ -236,6 +236,21 @@ def available() -> Optional[str]:
     return _probe[0]
 
 
+def _runtime_dir() -> str:
+    return os.path.realpath(f"/run/user/{os.getuid()}")
+
+
+def socket_overlap(path: str) -> bool:
+    """An extra read mount must not restore a masked host service or its parent."""
+    if not sys.platform.startswith("linux"):
+        return False
+    real = os.path.realpath(path)
+    masks = (_runtime_dir(), "/run/docker.sock", "/var/run/docker.sock")
+    return any(real == mask or real.startswith(mask.rstrip(os.sep) + os.sep)
+               or mask.startswith(real.rstrip(os.sep) + os.sep)
+               for mask in map(os.path.realpath, masks))
+
+
 def protected(path: str, hidden: Sequence[str] = ()) -> bool:
     """True if `path` is one of the protected paths or inside one (or inside `hidden`)."""
     real = os.path.realpath(path)
@@ -257,7 +272,7 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
     command has no internet: on Linux a network of its own, on macOS this machine only."""
     # A folder to show that is itself protected, or inside something protected, is not
     # shown: putting it back would uncover exactly what is hidden on purpose.
-    tools = [path for path in tools if not protected(path, hidden)]
+    tools = [path for path in tools if not protected(path, hidden) and not socket_overlap(path)]
     kind = available()
     if kind == "sandbox-exec":
         return ["/usr/bin/sandbox-exec", "-p",

@@ -1923,3 +1923,63 @@ def test_check_network_reports_missing_socket_isolation(hub, folder, monkeypatch
     checks = device_module.check(hub.invite(), str(folder), network=True)
     assert any(ok is False and "Landlock ABI 6" in text for ok, text in checks)
     assert not hub.sessions()
+
+
+@pytest.mark.parametrize("relative", ["runtime", "runtime/child", ".", "alias"])
+def test_extra_reads_cannot_restore_host_socket_masks(tmp_path, monkeypatch, relative):
+    runtime = tmp_path / "runtime"
+    (runtime / "child").mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(runtime)
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "_runtime_dir", lambda: str(runtime))
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    path = str(tmp_path / relative)
+    with pytest.raises(HandsError, match="host service sockets"):
+        device_module.shown_in_home([path])
+    argv = sandbox.wrap(str(tmp_path / "project"), str(tmp_path / "temp"), ["true"],
+                        home_visible=False, tools=[path])
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--ro-bind"]
+    assert path not in binds
+
+
+@sandboxed
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux pathname sockets")
+def test_extra_read_does_not_expose_a_live_host_socket(tmp_path, monkeypatch):
+    import socket
+    runtime, project, temp = [tmp_path / name for name in ("runtime", "project", "temp")]
+    for path in (runtime, project, temp):
+        path.mkdir()
+    monkeypatch.setattr(sandbox, "_runtime_dir", lambda: str(runtime))
+    with socket.socket(socket.AF_UNIX) as listener:
+        address = str(runtime / "service.sock")
+        listener.bind(address)
+        listener.listen(1)
+        script = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({address!r})"
+        for exposed in (runtime, tmp_path):
+            argv = sandbox.wrap(str(project), str(temp), [sys.executable, "-I", "-S", "-c", script],
+                                home_visible=False, tools=[str(exposed)])
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            assert result.returncode != 0 and "FileNotFoundError" in result.stderr, result.stderr
+
+
+@sandboxed
+@pytest.mark.parametrize("root", [".local/share/pipx", ".local/pipx", "Library/Application Support/pipx", "custom-pipx"])
+def test_pipx_executable_links_work_with_hidden_home(home_base, monkeypatch, root):
+    import shlex
+    home = home_base / "home"
+    project, temp, bin_dir = home / "project", home_base / "temp", home / ".local/bin"
+    package = home / root / "venvs/example/bin"
+    for path in (project, temp, bin_dir, package):
+        path.mkdir(parents=True, exist_ok=True)
+    executable = package / "example"
+    executable.write_text("#!/bin/sh\necho pipx-ok\n")
+    executable.chmod(0o755)
+    (bin_dir / "example").symlink_to(executable)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + "/usr/bin:/bin")
+    if root == "custom-pipx":
+        monkeypatch.setenv("PIPX_HOME", str(home / root))
+    argv = sandbox.wrap(str(project), str(temp), ["/bin/sh", "-c", shlex.quote(str(bin_dir / "example"))],
+                        home_visible=False, tools=device_module.shown_in_home())
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout.strip() == "pipx-ok", result.stderr
