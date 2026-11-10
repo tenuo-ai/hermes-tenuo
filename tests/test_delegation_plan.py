@@ -421,3 +421,27 @@ def test_child_without_delegate_task_gets_a_terminal_grant(tree):
     assert _delegate(g, "s1", "s2") is None
     inspector, _ = g._resolve_warrant("s2")
     assert inspector.is_terminal()  # no delegate_task, so its grant can't be delegated
+
+
+@pytest.mark.parametrize('contents', ['invalid_regex', 'invalid_utf8'])
+def test_invalid_plan_registers_block_all(tmp_path, monkeypatch, contents):
+    import base64
+    import json
+    from types import SimpleNamespace
+    from hermes_tenuo import register
+
+    path = tmp_path / 'plan.json'
+    plan = copy.deepcopy(PLAN)
+    plan['root']['tools']['terminal']['command']['patterns'] = ['^[$']
+    path.write_bytes(json.dumps(plan).encode() if contents == 'invalid_regex' else b'\xff')
+    path.chmod(0o600)
+    root, holder = SigningKey.generate(), SigningKey.generate()
+    warrant = Warrant.mint_builder().holder(holder.public_key).capability('read_file').ttl(600).mint(root)
+    monkeypatch.setattr('hermes_tenuo._config._get_plugin_entry', lambda ctx: {
+        'warrant': base64.b64encode(warrant.to_bytes()).decode(), 'delegation_plan': str(path),
+    })
+    hooks = {}
+    ctx = SimpleNamespace(register_skill=lambda *a, **kw: None,
+                          register_hook=lambda name, fn: hooks.setdefault(name, fn))
+    register(ctx)
+    assert hooks['pre_tool_call'](tool_name='read_file', args={})['action'] == 'block'

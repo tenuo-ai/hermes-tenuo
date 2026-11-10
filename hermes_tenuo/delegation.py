@@ -197,5 +197,11 @@ def load_plan(path: str | Path) -> DelegationPlan:
         return parse_plan(json.loads(p.read_text()))
     except FileNotFoundError as exc:
         raise DelegationPlanError(f"delegation plan {p} does not exist") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DelegationPlanError(f"delegation plan {p} cannot be read: {exc}") from exc
+    except DelegationPlanError:
+        raise
+    except Exception as exc:
+        # Core constraint constructors (e.g. Regex) use their own exception
+        # types. All invalid plans must reach the startup block-all handler.
+        raise DelegationPlanError(
+            f"delegation plan {p} cannot be loaded ({type(exc).__name__})"
+        ) from exc

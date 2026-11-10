@@ -12,8 +12,10 @@ handler, so the tests check that a secret file's contents never come back.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -54,6 +56,8 @@ _DRIVER = textwrap.dedent(
 
     from hermes_cli.plugins import get_plugin_manager, invoke_hook, resolve_pre_tool_block
     get_plugin_manager().discover_and_load()
+    loaded = next(p for p in get_plugin_manager().list_plugins() if p["name"] == "hermes-tenuo")
+    assert loaded["error"] is None, loaded
     import model_tools
 
     secret, public = os.path.join(data, "secret.txt"), os.path.join(data, "pub", "notes.txt")
@@ -92,6 +96,15 @@ _DRIVER = textwrap.dedent(
         start("p", "c0", "web only", "sa-0-x")
         out["c0_public"] = read(public, session_id="c0", task_id="sa-0-x")
         out["c1_public"] = read(public, session_id="c1", task_id="sa-1-x")
+    elif scenario == "failed_spawn_retry":
+        out["first"] = resolve_pre_tool_block("delegate_task", {"goal": "same"},
+            session_id="p", task_id="t-p", tool_call_id="first")
+        invoke_hook("post_tool_call", tool_name="delegate_task", args={"goal": "same"},
+            result='{"error":"spawn failed"}', session_id="p", task_id="t-p", tool_call_id="first")
+        out["retry"] = resolve_pre_tool_block("delegate_task", {"goal": "same", "toolsets": ["web"]},
+            session_id="p", task_id="t-p", tool_call_id="retry")
+        start("p", "c0", "same", "sa-0-x")
+        out["c0_public"] = read(public, session_id="c0", task_id="sa-0-x")
     elif scenario == "unauthorised_child":
         read(public, session_id="p", task_id="t-p")
         start("p", "c0", "never delegated", "sa-0-x")
@@ -116,6 +129,15 @@ def _run(scenario: str, tmp_path: Path) -> dict:
     home, data = tmp_path / "home", tmp_path / "data"
     (data / "pub").mkdir(parents=True)
     home.mkdir()
+    try:
+        importlib.metadata.distribution("hermes-tenuo")
+    except importlib.metadata.PackageNotFoundError:
+        # Match the directory install route used by the upstream CI matrix.
+        shutil.copytree(
+            Path(__file__).resolve().parents[1], home / "plugins" / "hermes-tenuo",
+            ignore=shutil.ignore_patterns(".git", ".venv", "venv", "build", "dist",
+                                         "*.egg-info", "__pycache__", ".pytest_cache", "hermes-agent"),
+        )
     (data / "secret.txt").write_text(SECRET)
     (data / "pub" / "notes.txt").write_text(PUBLIC)
     (data / "pub" / "warm.txt").write_text("warm")
@@ -175,3 +197,9 @@ def test_execute_code_calls_follow_the_session_that_ran_the_script(tmp_path):
     assert _ran(r["child_script_public"], PUBLIC), r["child_script_public"]
     assert _blocked(r["unknown_task_secret"]), r["unknown_task_secret"]
     assert _ran(r["parent_script_secret"], SECRET), r["parent_script_secret"]
+
+
+def test_failed_spawn_cannot_lend_its_grant_to_a_retry(tmp_path):
+    r = _run("failed_spawn_retry", tmp_path)
+    assert r["first"] is None and r["retry"] is None
+    assert _blocked(r["c0_public"]), r["c0_public"]

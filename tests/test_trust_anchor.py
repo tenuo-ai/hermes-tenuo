@@ -42,6 +42,10 @@ def test_configured_trusted_root_verifies_root_and_child(session):
     assert _read(_guard(trusted="own"), session) is None
 
 
-@pytest.mark.parametrize("session", ["s0", "s1"])
-def test_audit_mode_logs_instead_of_blocking(session):
-    assert _read(_guard(trusted=None, on_denial="log"), session) is None
+def test_audit_mode_logs_instead_of_blocking_root_calls():
+    assert _read(_guard(trusted=None, on_denial="log"), "s0") is None
+
+
+def test_audit_mode_does_not_create_untrusted_child_authority():
+    denied = _read(_guard(trusted=None, on_denial="log"), "s1")
+    assert denied and "holds no authority" in denied["message"]

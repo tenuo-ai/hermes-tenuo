@@ -218,3 +218,56 @@ def test_task_shared_by_two_live_sessions_is_ambiguous(keys):
     assert g.pre_tool_call("web_search", {"query": "q"}, task_id="shared") is not None
     g.on_session_end("c")
     assert g.pre_tool_call("web_search", {"query": "q"}, task_id="shared") is None
+
+
+@pytest.mark.parametrize('result', ['{"error":"spawn failed"}', '{"results":[]}'])
+def test_completed_invocation_cannot_supply_a_retry_grant(keys, result):
+    g = _guard(keys)
+    assert g.pre_tool_call('delegate_task', {'goal': 'same'}, session_id='p', tool_call_id='first') is None
+    g.post_tool_call('delegate_task', {'goal': 'same'}, result, session_id='p', tool_call_id='first')
+    assert g.pre_tool_call('delegate_task', {'goal': 'same', 'toolsets': ['web']},
+                           session_id='p', tool_call_id='retry') is None
+    g.on_subagent_start('p', 'c', child_goal='same')
+    assert not _allowed(g, 'read_file', {'path': '/data/secret'}, 'c')
+    assert _allowed(g, 'web_search', {'query': 'q'}, 'c')
+
+
+def test_overlapping_invocations_with_same_goal_are_rejected(keys):
+    g = _guard(keys)
+    assert g.pre_tool_call('delegate_task', {'goal': 'same'}, session_id='p', tool_call_id='first') is None
+    denied = g.pre_tool_call('delegate_task', {'goal': 'same', 'toolsets': ['web']},
+                             session_id='p', tool_call_id='second')
+    assert denied and 'ambiguous' in denied['message']
+    # A post hook for the rejected invocation must not clear the first one's grant.
+    g.post_tool_call('delegate_task', {}, '{}', session_id='p', tool_call_id='second')
+    g.on_subagent_start('p', 'c', child_goal='same')
+    assert _allowed(g, 'read_file', {'path': '/data/file'}, 'c')
+
+
+def test_finishing_one_invocation_preserves_other_pending_grants(keys):
+    g = _guard(keys)
+    for call_id in ('first', 'second'):
+        assert g.pre_tool_call('delegate_task', {'goal': call_id}, session_id='p', tool_call_id=call_id) is None
+    g.post_tool_call('delegate_task', {}, '{}', session_id='p', tool_call_id='first')
+    g.on_subagent_start('p', 'c1', child_goal='first')
+    g.on_subagent_start('p', 'c2', child_goal='second')
+    assert not _allowed(g, 'read_file', {'path': '/data/file'}, 'c1')
+    assert _allowed(g, 'read_file', {'path': '/data/file'}, 'c2')
+
+
+@pytest.mark.parametrize('action', ['list', 'steer', 'stop'])
+def test_control_actions_do_not_stage_child_authority(keys, action):
+    g = _guard(keys)
+    assert g.pre_tool_call('delegate_task', {'action': action}, session_id='p') is None
+    assert not g._planned_children
+
+
+def test_log_only_denial_does_not_create_delegation_authority(keys):
+    root, agent = keys
+    parent = (Warrant.mint_builder().holder(agent.public_key)
+              .capability('read_file', path=Subpath('/data')).ttl(600).mint(root))
+    g = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key], on_denial='log')
+    assert g.pre_tool_call('delegate_task', {'goal': 'r'}, session_id='p') is None
+    assert not g._planned_children
+    g.on_subagent_start('p', 'c', child_goal='r')
+    assert not _allowed(g, 'read_file', {'path': '/data/file'}, 'c')
