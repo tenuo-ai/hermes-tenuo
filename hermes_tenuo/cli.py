@@ -324,9 +324,10 @@ def _mint_local(args: argparse.Namespace) -> int:
         print("# its trusted_root is that value. To sign every task with one issuer, use")
         print("#   hermes-tenuo mint --task ID --issuer-key ISSUER.key --holder-public-key HOLDER.pub ...")
         if get_trusted_roots(None):
+            from hermes_tenuo._config import get_on_denial
             print(
                 "warning: the trusted_root configured here did not sign this task warrant; "
-                "the worker blocks every call until trusted_root is updated",
+                f"for the worker, {_trust_failure_effect(get_on_denial(None))}",
                 file=sys.stderr,
             )
     return 0
@@ -336,6 +337,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Show what the plugin will load, and where each value comes from."""
     from hermes_tenuo._config import _env_secret, _get_plugin_entry, _looks_like_path, get_require_warrant
     from hermes_tenuo._home import config_path, hermes_cli_available
+    from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw, task_warrant_path
 
     cfg_path = config_path()
     entry = _get_plugin_entry(None)
@@ -350,10 +352,19 @@ def cmd_status(args: argparse.Namespace) -> int:
         ("Signing key", None, _env_secret(signing_env), None, signing_env),
         ("Trusted root", entry.get("trusted_root"), _env_secret("TENUO_TRUSTED_ROOT"), "trusted_root", "TENUO_TRUSTED_ROOT"),
     ]
-    all_required = True
-    warrant_set = bool(rows[0][1] or rows[0][2])
+    # A kanban worker loads its task warrant and never the install-wide one.
+    task_id = current_task_id()
+    task_staged = bool(task_id and load_task_warrant_raw(task_id))
+    warrant_set = task_staged if task_id else bool(rows[0][1] or rows[0][2])
+    missing = []
     for label, cfg_val, env_val, cfg_key, env_name in rows:
-        if cfg_val:
+        if label == "Warrant" and task_id:
+            if task_staged:
+                print(f"  ✓  {label:14} set  (kanban task {task_id}, file)")
+            else:
+                print(f"  ✗  {label:14} not staged  (kanban task {task_id}: {task_warrant_path(task_id)})")
+                missing.append(label)
+        elif cfg_val:
             # Never echo the value: a warrant or root is credential material. Say only
             # whether the config points at a file or carries the value inline.
             kind = "file" if isinstance(cfg_val, str) and _looks_like_path(cfg_val) else "inline"
@@ -363,12 +374,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             hint = f"{cfg_key} or ${env_name}" if cfg_key else f"${env_name}"
             print(f"  ✗  {label:14} not set  ({hint})")
-            all_required = False
+            missing.append(label)
 
-    if all_required:
+    if not missing:
         print("\n  Ready for enforcement. Run `hermes-tenuo doctor` to check the values.")
+    elif task_id and not task_staged:
+        print(f"\n  No warrant is staged for kanban task {task_id} — every tool call is blocked.")
+    elif warrant_set and "Signing key" in missing:
+        print("\n  A warrant is set but the signing key is not — every tool call is blocked until it is.")
     elif warrant_set:
-        print("\n  A warrant is set but the rest is not — every tool call is blocked until it is.")
+        print(f"\n  A warrant is set but trusted_root is not — {_trust_failure_effect(entry.get('on_denial'))}.")
     elif get_require_warrant(None):
         print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
     else:
@@ -383,6 +398,16 @@ def _warrant_holder(warrant: Any):
         if value is not None and hasattr(value, "to_bytes"):
             return value
     return None
+
+
+def _trust_failure_effect(on_denial: Any) -> str:
+    """What a trusted_root problem does at runtime, which depends on on_denial."""
+    if on_denial == "log":
+        return (
+            "every tool call fails the warrant check; with on_denial: log it is recorded "
+            "and still runs (delegate_task spawns are blocked)"
+        )
+    return "every tool call is blocked until this is fixed"
 
 
 def _signed_by(warrant: Any, roots: list) -> bool:
@@ -563,25 +588,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         else:
             check(False, "signing key not set", "export TENUO_SIGNING_KEY=...")
 
-        # 7. Trusted root: set, a public key, and the issuer of this warrant
+        # 7. Trusted root: set, a public key, and the issuer of this warrant.
+        # Unlike an unusable warrant, a trust failure is a denial on each
+        # call, so on_denial decides whether those calls still run.
+        trust_effect = _trust_failure_effect(config_entry.get("on_denial", "block"))
         trusted = config_entry.get("trusted_root") or _env_secret("TENUO_TRUSTED_ROOT")
         if not trusted:
             check(
                 False,
                 "trusted_root set",
-                f"set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root — {blocks}",
+                f"set TENUO_TRUSTED_ROOT or plugins.entries.hermes-tenuo.trusted_root — {trust_effect}",
             )
         else:
             roots = get_trusted_roots(None)
             if not roots:
-                check(False, "trusted_root is not a base64 public key", blocks)
+                check(False, "trusted_root is not a base64 public key", trust_effect)
             else:
                 check(True, "trusted_root set")
                 signed = _signed_by(warrant, roots)
                 check(
                     signed,
                     "warrant is signed by trusted_root" if signed else "warrant is not signed by trusted_root",
-                    f"set trusted_root to the public key of the issuer that minted this warrant — {blocks}",
+                    f"set trusted_root to the public key of the issuer that minted this warrant — {trust_effect}",
                 )
 
         # 8. Delegation plan, when configured

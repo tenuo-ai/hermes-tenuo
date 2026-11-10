@@ -182,8 +182,13 @@ class PluginGuard:
     ) -> None:
         """Best effort: keep the audit log from showing this blocked call as allowed."""
         try:
+            # Attribute a sessionless call the way the post hook will, so the
+            # two records share a session and the decision can be found again.
+            session_id, _ = self._guard._attribute_session(session_id, task_id)
             self._guard._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
-            self._guard._remember_decision(tool_call_id, False, reason)
+            self._guard._remember_decision(
+                tool_call_id, False, reason, (tool_name, args, session_id, task_id),
+            )
         except Exception as exc:  # noqa: BLE001 - recording must not undo the denial
             logger.error("hermes-tenuo: could not record the denial for %s (%s)", tool_name, type(exc).__name__)
 

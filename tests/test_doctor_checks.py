@@ -54,7 +54,18 @@ def test_trusted_root_that_did_not_sign_the_warrant_fails(install, capsys):
     rc, out = _doctor(capsys)
     assert rc == 1 and "All checks passed" not in out
     assert "✗  warrant is not signed by trusted_root" in out
-    assert "blocks every tool call" in out
+    assert "every tool call is blocked until this is fixed" in out
+
+
+@pytest.mark.parametrize("root", ["other", "not-a-key", None])
+def test_trusted_root_failures_say_what_log_mode_does(install, capsys, root):
+    if root == "other":
+        root = _b64(SigningKey.generate().public_key.to_bytes())
+    install(trusted_root=root, on_denial="log")
+    rc, out = _doctor(capsys)
+    assert rc == 1
+    assert "with on_denial: log it is recorded and still runs" in out
+    assert "is blocked until this is fixed" not in out
 
 
 def test_one_matching_root_in_a_list_is_enough(install, capsys, monkeypatch):
@@ -73,7 +84,7 @@ def test_trusted_root_that_is_not_a_key_fails(install, capsys):
     rc, out = _doctor(capsys)
     assert rc == 1
     assert "✗  trusted_root is not a base64 public key" in out
-    assert "blocks every tool call" in out
+    assert "every tool call is blocked until this is fixed" in out
 
 
 def test_missing_delegation_plan_fails(install, capsys, tmp_path):
@@ -133,3 +144,39 @@ def test_status_says_not_enforcing_when_no_warrant(install, capsys):
     assert "enforces nothing" in _status(capsys)
     install(warrant=None, require_warrant="true")
     assert "require_warrant is on — every tool call is blocked" in _status(capsys)
+
+
+def test_status_missing_trusted_root_depends_on_on_denial(install, capsys):
+    install(trusted_root=None)
+    out = _status(capsys)
+    assert "trusted_root is not — every tool call is blocked" in out
+    install(trusted_root=None, on_denial="log")
+    out = _status(capsys)
+    assert "recorded and still runs" in out and "is blocked until" not in out
+
+
+def test_status_missing_key_blocks_even_in_log_mode(install, capsys, monkeypatch):
+    install(on_denial="log")
+    monkeypatch.delenv("TENUO_SIGNING_KEY")
+    assert "signing key is not — every tool call is blocked" in _status(capsys)
+
+
+@pytest.mark.parametrize("global_warrant", [True, False])
+def test_status_reports_the_kanban_task_warrant(install, capsys, monkeypatch, global_warrant):
+    from hermes_tenuo.kanban import task_warrant_path
+
+    if not global_warrant:
+        install(warrant=None)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "card-1")
+    out = _status(capsys)
+    assert "not staged  (kanban task card-1:" in out
+    assert "No warrant is staged for kanban task card-1 — every tool call is blocked" in out
+    assert "enforces nothing" not in out and "Ready for enforcement" not in out
+
+    path = task_warrant_path("card-1")
+    path.parent.mkdir(parents=True)
+    path.write_text("staged-warrant-text")
+    out = _status(capsys)
+    assert "Warrant        set  (kanban task card-1, file)" in out
+    assert "Ready for enforcement" in out
+    assert "staged-warrant-text" not in out
