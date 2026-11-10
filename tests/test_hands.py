@@ -2072,7 +2072,7 @@ def test_conversation_keeps_its_machine_across_a_restart(hub, folder, monkeypatc
     hub.revoke("laptop", "")
     monkeypatch.setattr(chat, "_wanted", {})
     chat.restore()
-    assert chat._wanted == {}                  # a forgotten machine is not brought back
+    assert chat._wanted == {"chat-a": "laptop"}  # revoked routes fail closed until explicitly switched off
 
 
 def test_invite_switches_the_conversation_on_a_single_session_hermes(hub, folder, monkeypatch):
@@ -2149,3 +2149,100 @@ def test_deeply_nested_request_is_a_bad_request(hub):
         urllib.request.urlopen(request, timeout=10)
     assert refused.value.code == 400
 
+
+
+def test_restore_preserves_overflow_and_unknown_routes(hub, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "_wanted", {})
+    saved = {f"chat-{i}": "renamed-or-revoked" for i in range(2005)}
+    hub.dir.mkdir(parents=True, exist_ok=True)
+    (hub.dir / "conversations.json").write_text(json.dumps(saved))
+    chat.restore()
+    assert chat._wanted == saved
+    with pytest.raises(HandsUnavailable):
+        hub.pick(chat._wanted["chat-2004"])
+
+
+def test_expired_device_retries_results_without_running_commands(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device.expires = time.time() - 1
+    device._unsent = [("finished", "output", 0)]
+    events = []
+    monkeypatch.setattr(device, "pair", lambda: None)
+    monkeypatch.setattr(device, "bye", lambda: None)
+    monkeypatch.setattr(device, "poll", lambda: pytest.fail("polled after execution expiry"))
+    monkeypatch.setattr(device, "_stop_runner", lambda: events.append("stopped"))
+    attempts = []
+
+    def report(*args, timeout):
+        assert events == ["stopped"] and device._waiting
+        assert 0 < timeout <= 5
+        attempts.append(args)
+        if len(attempts) < 3:
+            raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    monkeypatch.setattr(device, "_pause", lambda seconds, deadline: None)
+    assert device.serve() == 0
+    assert len(attempts) == 3 and not device._unsent
+
+
+@pytest.mark.parametrize("signal_stop", [False, True])
+def test_deferred_result_delivery_honors_stop(hub, folder, monkeypatch, signal_stop):
+    import signal
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device._unsent = [("finished", "output", 0)]
+    attempts = []
+
+    def report(*args, timeout):
+        assert device._waiting and timeout <= 5
+        attempts.append(args)
+        if signal_stop:
+            device.stop(signal.SIGINT)
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(device, "report", report)
+    monkeypatch.setattr(device, "_pause", lambda seconds, deadline: device.stop())
+    device._drain_results()
+    device._drain_results()  # no final flush after stopping during a request or backoff
+    assert len(attempts) == 1 and device._unsent and not device._waiting
+
+
+def test_result_retries_end_at_reporting_deadline(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, say=lambda _: None)
+    device._unsent = [("finished", "output", 0)]
+    monkeypatch.setattr(device, "report", lambda *args, **kwargs: pytest.fail("reporting grace expired"))
+    device.expires = time.time() - wire.REPORT_GRACE - 1
+    device._drain_results()
+    assert device._unsent
+
+
+def test_idle_proxy_keepalives_do_not_consume_caller_quota(tmp_path, monkeypatch):
+    import http.client
+    monkeypatch.setattr(hub_module, "MAX_PER_ADDRESS", 2)
+    monkeypatch.setattr(hub_module, "MAX_CONNECTIONS", 8)
+    h = Hub(state_dir=tmp_path / "server-state")
+    h.listen("127.0.0.1:0")
+    host, port = h._server.server_address
+    connections = []
+    try:
+        for i in range(5):
+            conn = http.client.HTTPConnection(host, port, timeout=5)
+            connections.append(conn)
+            conn.request("POST", wire.API + "/poll", body="{}", headers={"X-Forwarded-For": f"203.0.113.{i + 1}"})
+            response = conn.getresponse()
+            assert response.status == 410
+            response.read()
+        # Reuse a connection with another caller; quota accounting follows each request.
+        connections[0].request("POST", wire.API + "/poll", body="{}", headers={"X-Forwarded-For": "198.51.100.1"})
+        response = connections[0].getresponse()
+        assert response.status == 410
+        response.read()
+        deadline = time.time() + 2
+        while h._server.per_address and time.time() < deadline:
+            time.sleep(0.01)
+        assert not h._server.per_address and h._server.total == 5
+    finally:
+        for conn in connections:
+            conn.close()
+        h.close()

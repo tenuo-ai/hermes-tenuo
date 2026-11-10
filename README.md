@@ -316,9 +316,11 @@ What your machine enforces, whatever the server asks:
   stopped waiting for it (the machine slept, the network stalled) is refused,
   not run. If your machine restarts with a command in hand, the server reports
   that the outcome is unknown rather than sending it again.
-- **A dropped connection does not lose a result.** If the server cannot be
-  reached when a command ends, your machine keeps the result and sends it when
-  the connection is back. If it never arrives in the command's time, the agent
+- **Results are retried after a dropped connection.** If the server cannot be
+  reached when a command ends, your machine keeps the result in memory and
+  retries while Hands is running. After normal expiry, commands stop and
+  reporting alone may continue for up to two minutes. An explicit stop or
+  device restart discards pending results. If it never arrives in the command's time, the agent
   is told the outcome is unknown and to check before running it again.
 - **Only your server.** Your machine signs a warrant for the server's key.
   Every command arrives signed by that key and is checked on your machine
@@ -331,7 +333,8 @@ What your machine enforces, whatever the server asks:
 - **It survives a restart of Hermes.** A machine that is up pairs again by
   itself when the server comes back, with the same folder and the time it had
   left, and each conversation keeps the machine it was using. A machine you
-  revoked does not.
+  revoked does not. A conversation whose machine was renamed or revoked stays
+  routed to the unavailable name until you select another machine or use `/hands off`.
 
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted

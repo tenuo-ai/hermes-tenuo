@@ -517,7 +517,7 @@ class Hub:
                 # proxy reports, so one caller cannot use up everyone's connections.
                 peer = str(self.client_address[0]) if self.client_address else ""
                 caller = forwarded_for(peer, self.headers.get("X-Forwarded-For"))
-                if caller != peer and not self.server.recount(peer, caller):
+                if not self.server.recount(self.connection, caller):
                     try:
                         # Take what has already arrived, briefly, so the refusal is delivered
                         # as an answer and not as a dropped connection.
@@ -532,7 +532,7 @@ class Hub:
                     self._answer()
                 finally:
                     if caller != peer:
-                        self.server.recount(caller, peer, always=True)
+                        self.server.recount(self.connection, None)
 
             def _answer(self) -> None:
                 routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
@@ -582,54 +582,63 @@ class Hub:
             counting = threading.Lock()
             total = 0
             per_address: Dict[str, int] = {}
+            counted: Dict[Any, Optional[str]] = {}
 
-            def _take(self, address: str) -> bool:
+            def _take(self, request: Any, address: str) -> bool:
                 with self.counting:
                     if self.total >= MAX_CONNECTIONS or self.per_address.get(address, 0) >= MAX_PER_ADDRESS:
                         return False
                     self.total += 1
+                    self.counted[request] = address
                     self.per_address[address] = self.per_address.get(address, 0) + 1
                     return True
 
-            def _give(self, address: str) -> None:
+            def _give(self, request: Any) -> None:
                 with self.counting:
                     self.total -= 1
-                    left = self.per_address.get(address, 1) - 1
-                    if left > 0:
-                        self.per_address[address] = left
-                    else:
-                        self.per_address.pop(address, None)
+                    address = self.counted.pop(request, None)
+                    if address is not None:
+                        self._uncount(address)
 
-            def recount(self, old: str, new: str, always: bool = False) -> bool:
-                """Count one open connection against `new` instead of `old`. False, and nothing
-                changes, if `new` already has its share (unless `always`)."""
+            def _uncount(self, address: str) -> None:
+                left = self.per_address.get(address, 1) - 1
+                if left > 0:
+                    self.per_address[address] = left
+                else:
+                    self.per_address.pop(address, None)
+
+            def recount(self, request: Any, new: Optional[str]) -> bool:
+                """Idle forwarded connections count globally, but not against any caller.
+                New/incomplete connections still count against their peer until headers arrive."""
                 with self.counting:
-                    if not always and self.per_address.get(new, 0) >= MAX_PER_ADDRESS:
+                    old = self.counted[request]
+                    if old == new:
+                        return True
+                    if new is not None and self.per_address.get(new, 0) >= MAX_PER_ADDRESS:
                         return False
-                    left = self.per_address.get(old, 1) - 1
-                    if left > 0:
-                        self.per_address[old] = left
-                    else:
-                        self.per_address.pop(old, None)
-                    self.per_address[new] = self.per_address.get(new, 0) + 1
+                    if old is not None:
+                        self._uncount(old)
+                    if new is not None:
+                        self.per_address[new] = self.per_address.get(new, 0) + 1
+                    self.counted[request] = new
                     return True
 
             def process_request(self, request: Any, client_address: Any) -> None:
                 address = str(client_address[0]) if client_address else ""
-                if not self._take(address):
+                if not self._take(request, address):
                     self.shutdown_request(request)
                     return
                 try:
                     super().process_request(request, client_address)
                 except Exception:
-                    self._give(address)
+                    self._give(request)
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    self._give(str(client_address[0]) if client_address else "")
+                    self._give(request)
 
         server = Listener((host or "127.0.0.1", int(port)), Handler)
         self._server = server

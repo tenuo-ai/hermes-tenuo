@@ -624,34 +624,50 @@ class Device:
         except (HandsError, ConnectionError):
             pass
 
-    def report(self, job_id: str, output: str, returncode: int) -> None:
+    def report(self, job_id: str, output: str, returncode: int, timeout: float = 60) -> None:
         output = wire.fit(output)
         args = {"job": job_id, "digest": wire.digest(output, returncode)}
         _post(self.url + wire.API + "/result", {
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
             "sig": self._signed(wire.TOOL_RESULT, args),
-        }, timeout=60)
+        }, timeout=timeout)
 
     def _deliver(self, job_id: str, output: str, returncode: int) -> None:
-        """Report a result; if the server cannot be reached, keep it to send later."""
-        try:
-            self.report(job_id, output, returncode)
-        except ConnectionError:
-            self._unsent.append((job_id, output, returncode))
-            raise
+        """Keep the result before trying delivery, including when a stop interrupts it."""
+        self._unsent.append((job_id, output, returncode))
+        self._send_unsent()
 
-    def _send_unsent(self) -> None:
-        """Send results held while the server could not be reached, before asking for more
-        work. A lost connection leaves them for the next try. A refusal means the server no
-        longer waits for that command (it restarted, or the caller stopped waiting)."""
-        while self._unsent:
+    def _send_unsent(self, deadline: Optional[float] = None) -> None:
+        """Retry held results with short, signal-interruptible requests. No new work runs."""
+        deadline = self.expires + wire.REPORT_GRACE if deadline is None else deadline
+        while self._unsent and not self._stop:
+            left = deadline - time.time()
+            if left <= 0:
+                return
             job_id, output, returncode = self._unsent[0]
+            self._waiting = True
             try:
-                self.report(job_id, output, returncode)
+                if self._stop:
+                    return
+                self.report(job_id, output, returncode, timeout=min(5, left))
             except HandsError:
-                pass
+                self.say("The server refused a held result; it is no longer pending for delivery.")
+            else:
+                self.say("Sent a result that was held while the server could not be reached.")
+            finally:
+                self._waiting = False
             self._unsent.pop(0)
-            self.say("Sent a result that was held while the server could not be reached.")
+
+    def _drain_results(self) -> None:
+        """After expiry, retry only reporting within the existing reporting grace period."""
+        deadline = self.expires + wire.REPORT_GRACE
+        while self._unsent and not self._stop and time.time() < deadline:
+            try:
+                self._send_unsent(deadline)
+            except _Stopped:
+                break
+            except ConnectionError:
+                self._pause(1, deadline=deadline)
 
     # -- checking and running one command ----------------------------------------
 
@@ -1066,9 +1082,9 @@ class Device:
 
     # -- the loop ---------------------------------------------------------------
 
-    def _pause(self, seconds: float) -> None:
+    def _pause(self, seconds: float, deadline: Optional[float] = None) -> None:
         """Wait, but not past a request to stop or the end of the time window."""
-        end = min(time.time() + seconds, self.expires)
+        end = min(time.time() + seconds, self.expires if deadline is None else deadline)
         while not self._stop and time.time() < end:
             time.sleep(0.2)
 
@@ -1163,16 +1179,15 @@ class Device:
             if job:
                 try:
                     self.handle(job)
+                except _Stopped:
+                    break
                 except ConnectionError as e:
                     self.say(f"Couldn't reach the server to report a result ({e}); it is kept and sent when "
                              "the connection is back.")
                 except HandsError as e:
                     self.say(f"Couldn't report a result: {e}")
         self._stop_runner()
-        try:
-            self._send_unsent()  # the server still takes a result for a short while after the window
-        except ConnectionError:
-            pass
+        self._drain_results()  # commands are already stopped; only reporting may continue
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         return 0

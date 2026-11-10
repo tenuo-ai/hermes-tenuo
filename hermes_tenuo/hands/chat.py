@@ -24,7 +24,6 @@ _devices: Dict[str, str] = {}  # task -> device name
 _saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
-MAX_REMEMBERED = 2000  # conversations whose machine is kept across a restart
 
 HELP = """Hands runs this conversation's commands on your own machine.
   /hands invite        print the line to run on your machine
@@ -99,7 +98,8 @@ def _remember() -> None:
 def restore() -> None:
     """Pick up, when Hermes starts, which machine each conversation was using. A machine that
     is not back yet makes that conversation's commands fail with a message saying so; they
-    never run on the server instead. Machines that were forgotten are dropped."""
+    never run on the server instead. Unknown or revoked names remain selected until the
+    user explicitly switches off or chooses another machine."""
     hub = get_hub()
     if hub is None:
         return
@@ -109,10 +109,9 @@ def restore() -> None:
         return
     if not isinstance(saved, dict):
         return
-    names = {str(entry.get("name", "")) for entry in hub._known().values() if isinstance(entry, dict)}
     with _lock:
-        for conversation, name in list(saved.items())[:MAX_REMEMBERED]:
-            if isinstance(conversation, str) and isinstance(name, str) and (not name or name in names):
+        for conversation, name in saved.items():
+            if isinstance(conversation, str) and isinstance(name, str):
                 _wanted.setdefault(conversation, name)
 
 
