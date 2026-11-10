@@ -80,6 +80,7 @@ class Hub:
         self.public_url = public_url.rstrip("/")
         self._lock = threading.RLock()
         self._invites: Dict[str, float] = {}
+        self._paired: Dict[str, float] = {}  # pairing requests already used -> when
         self._sessions: Dict[str, Session] = {}
         self._server: Optional[ThreadingHTTPServer] = None
         self._key = None
@@ -170,6 +171,8 @@ class Hub:
                                    "Run `hermes-tenuo hands up` on it again.")
         if wire.sent_size(cmd) + wire.sent_size(stdin or "") > wire.MAX_TEXT:
             return "hands: this command and its input are too large to send to the device in one piece\n", 126
+        if cancelled is not None and cancelled.is_set():
+            return "hands: stopped before it started\n", 130  # never put in line at all
         job_id = uuid.uuid4().hex
         pending = {"id": job_id, "cmd": cmd, "login": bool(login), "stdin": stdin, "shown": shown,
                    "deadline": time.monotonic() + int(timeout)}
@@ -258,6 +261,16 @@ class Hub:
         if grant.is_expired() or wire.TOOL not in grant.tools:
             raise Refused("the grant has expired or doesn't allow running commands")
         with self._lock:
+            # A pairing request works once. Sent again by the device itself (its first reply
+            # was lost), it is answered without touching the session it made; sent again
+            # by anyone else later, it cannot replace a newer session.
+            now = time.time()
+            self._paired = {n: t for n, t in self._paired.items() if now - t < 3600}
+            if nonce in self._paired:
+                current = self._sessions.get(device)
+                if current is not None and current.grant.to_base64() == grant.to_base64():
+                    return {"ok": True, "name": current.name}
+                raise Refused("this pairing request was already used: run `hermes-tenuo hands up` again")
             known = self._known()
             secret = str(body.get("invite") or "")
             invited = bool(secret) and self._invites.pop(secret, 0) > time.time()
@@ -271,6 +284,7 @@ class Hub:
             new = Session(device, name, folder, grant, identity, device_key,
                           time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp)
             new.nonces = [nonce]
+            self._paired[nonce] = now
             old = self._sessions.get(device)
             if old is not None:
                 # Commands still waiting for this device follow it to its new session; they

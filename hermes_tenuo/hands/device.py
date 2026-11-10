@@ -12,6 +12,7 @@ import math
 import os
 import secrets
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -352,31 +353,36 @@ class Device:
             timeout = math.ceil(timeout - max(0.0, late))
         return max(1, min(timeout, math.ceil(window)))
 
-    def _env(self) -> Dict[str, str]:
+    def _env(self, tmp: Optional[str] = None) -> Dict[str, str]:
+        tmp = tmp or self.tmp
         env = {name: value for name, value in os.environ.items() if name in SAFE_ENV}
         env.setdefault("PATH", os.defpath)
-        env["HOME"] = self.tmp  # a login shell must not source the user's real dotfiles
-        env["TMPDIR"] = self.tmp
+        env["HOME"] = tmp  # a login shell must not source the user's real dotfiles
+        env["TMPDIR"] = tmp
         return env
 
     def run(self, job: Dict[str, Any], folder: str, timeout: Optional[int] = None) -> tuple:
         shell = ["/bin/bash", "-lc" if job.get("login") else "-c", job["cmd"]]
         timeout = timeout or max(1, min(int(job["timeout"]), 24 * 3600))
+        # A narrower warrant gets its own, narrower sandbox for the one command, with a temp
+        # folder of its own: the session's temp folder holds files later commands run, and
+        # a narrower command must not be able to change them.
+        own = folder != self.folder
+        tmp = tempfile.mkdtemp(prefix="narrow-", dir=self.state) if own else self.tmp
         # The command writes its output to this file. It is read back through the handle
         # opened here, never by name: the name is in a folder the command can change.
-        fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=self.tmp)
+        fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=tmp)
         try:
-            if folder == self.folder:
+            if own:
+                runner = self._start_runner(folder, shared=False, tmp=tmp)
+            else:
                 if self._runner is not None and self._runner.poll() is not None:
                     self.say("  A command ended Hands's own supervisor. What it left running was stopped where "
                              "it could be found; check for stray processes if this was not expected.")
                     self._stop_runner()  # clear what it left, start again
                 if self._runner is None:
                     self._runner = self._start_runner(self.folder, shared=True)
-                runner, own = self._runner, False
-            else:
-                # A narrower warrant gets its own, narrower sandbox for the one command.
-                runner, own = self._start_runner(folder, shared=False), True
+                runner = self._runner
             if runner is None:
                 return "hands: this machine could not start its sandbox, so the command was not run\n", 126
             code = self._ask(runner, shell, folder, job.get("stdin"), timeout, out_path)
@@ -393,10 +399,13 @@ class Device:
                 data += chunk
         finally:
             os.close(fd)
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
+            if own:
+                shutil.rmtree(tmp, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(out_path)
+                except OSError:
+                    pass
         text = data[:MAX_OUTPUT].decode("utf-8", errors="replace")
         if code is None:
             code = 124
@@ -408,36 +417,45 @@ class Device:
 
     # -- the sandbox the commands run in ---------------------------------------------
 
-    def _start_runner(self, folder: str, shared: bool) -> Optional[subprocess.Popen]:
+    def _start_runner(self, folder: str, shared: bool, tmp: Optional[str] = None) -> Optional[subprocess.Popen]:
+        tmp = tmp or self.tmp
         python = os.path.realpath(getattr(sys, "_base_executable", None) or sys.executable)
         # The interpreter and its standard library, wherever they are installed.
         own = sorted({os.path.realpath(p) for p in (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
         try:
-            argv = sandbox.wrap(folder, self.tmp, [python, "-I", "-S", "-c", RUNNER],
+            argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
                                 hidden=[self.state])
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(), bufsize=0)
+                                      stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
             return None
-        if self._line(runner, 15) != "ready":
+        try:
+            ready = self._line(runner, 15)
+        except EOFError:
+            ready = None
+        if ready != "ready":
             self._close(runner)
             return None
         return runner
 
     @staticmethod
     def _line(runner: subprocess.Popen, seconds: float) -> Optional[str]:
-        """One line from the runner, or None if it does not come in time."""
-        data, end = b"", time.time() + seconds
-        while not data.endswith(b"\n"):
+        """The next line from the runner, or None if none comes in time. EOFError if the
+        runner is gone. One read can bring more than one line; the rest waits for the next call."""
+        held = getattr(runner, "hands_held", b"")
+        end = time.time() + seconds
+        while b"\n" not in held:
             left = end - time.time()
             if left <= 0 or not select.select([runner.stdout], [], [], left)[0]:
+                runner.hands_held = held
                 return None
             chunk = os.read(runner.stdout.fileno(), 65536)
             if not chunk:
-                return None
-            data += chunk
-        return data.decode("utf-8", errors="replace").strip()
+                raise EOFError
+            held += chunk
+        line, _, runner.hands_held = held.partition(b"\n")
+        return line.decode("utf-8", errors="replace").strip()
 
     @staticmethod
     def _close(runner: Optional[subprocess.Popen]) -> None:
@@ -507,15 +525,21 @@ class Device:
                 runner.stdin.write(line.encode())
                 runner.stdin.flush()
                 self._busy = (runner, job_id)
-            reply = self._line(runner, timeout + 20)
-            answer = json.loads(reply) if reply else {}
-            if "started" in answer:
-                self._groups[int(answer["started"])] = time.time()
+            give_up, asked, answer = time.time() + timeout + 20, False, {}
+            while time.time() < give_up:
+                reply = self._line(runner, 1.0)  # short waits, so a local stop is noticed
+                if reply is None:
+                    if self._stop and not asked:
+                        asked = True
+                        self.cancel()  # Ctrl-C on this machine stops the command that is running
+                    continue
+                answer = json.loads(reply)
+                if "started" not in answer:
+                    break
+                self._groups[int(answer.pop("started"))] = time.time()
                 while len(self._groups) > 2000:
                     self._groups.pop(next(iter(self._groups)))
-                reply = self._line(runner, timeout + 20)
-                answer = json.loads(reply) if reply else {}
-        except (OSError, ValueError):
+        except (OSError, ValueError, EOFError):
             answer = {}
         finally:
             with self._talk:
@@ -580,7 +604,8 @@ class Device:
         finally:
             done.set()
         if code == 130:
-            output += "\nhands: stopped at the server's request\n"
+            output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
+                       "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
         self.report(job_id, output, code)
 
@@ -596,7 +621,7 @@ class Device:
     def stop(self, *from_signal: Any) -> None:
         self._stop = True
         if from_signal and self._waiting:
-            raise _Stopped()  # leave the open request now; a running command finishes first
+            raise _Stopped()  # leave the open request now; a running command is stopped by its own loop
 
     def serve(self) -> int:
         self.pair()

@@ -112,6 +112,11 @@ SCRIPT = textwrap.dedent('''
         tool("fresh_after", "terminal", {"command": "pwd"}, task="chat-2")
         out["restored"] = resolve_task_overrides("chat-3")
         other.stop()
+    else:
+        # The whole profile runs on the device: /hands off must say so, not claim a switch.
+        out["off"] = chat.command("off")
+        tool("after", "terminal", {"command": "pwd"})
+        out["status"] = chat.command("status")
     device.stop()
     print("RESULT " + json.dumps(out))
 ''')
@@ -185,3 +190,6 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
 def test_a_profile_whose_backend_is_hands(tmp_path):
     out, project, server_dir = _run(tmp_path, "profile")
     _on_the_device(out, project, server_dir)
+    assert "cannot move" in out["off"] and "server again" not in out["off"], out["off"]
+    assert out["after"]["text"].strip().startswith(os.path.realpath(project)), out["after"]
+    assert "the server" not in out["status"].splitlines()[-1], out["status"]

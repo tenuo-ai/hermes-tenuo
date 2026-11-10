@@ -719,3 +719,92 @@ def test_output_that_grows_when_sent_still_arrives(hub, paired, monkeypatch):
     assert code == 0 and "cut to fit" in out and wire.sent_size(out) < 70_000
     big, code = hub.run(hub.pick(paired.name), "cat", login=False, timeout=5, stdin="\x00" * 50_000)
     assert code == 126 and "too large" in big
+
+
+# --- third review round ---------------------------------------------------------------------------
+
+def _capture_pair(device):
+    from hermes_tenuo.hands import device as device_module
+    sent, real = {}, device_module._post
+
+    def capture(url, body, timeout):
+        sent.update(body)
+        return real(url, body, timeout)
+
+    device_module._post = capture
+    try:
+        device.pair()
+    finally:
+        device_module._post = real
+    return sent
+
+
+def test_pairing_request_works_once(hub, folder):
+    first = Device(hub.invite(), str(folder), 600, allow_unsandboxed=True)
+    sent = _capture_pair(first)
+    session = hub.pick(first.name)
+    assert hub.pair(dict(sent)) == {"ok": True, "name": first.name}  # the device's own retry
+    assert hub.pick(first.name) is session
+    Device(None, str(folder), 600, allow_unsandboxed=True).pair()  # the device came back
+    newer = hub.pick(first.name)
+    with pytest.raises(Refused, match="already used"):
+        hub.pair(dict(sent))
+    assert hub.pick(first.name) is newer
+
+
+def test_call_stopped_before_it_is_sent_is_never_put_in_line(hub, paired):
+    stop = threading.Event()
+    stop.set()
+    session = hub.pick(paired.name)
+    assert hub.run(session, "echo never", login=False, timeout=30, stdin=None, cancelled=stop)[1] == 130
+    assert session.jobs.empty() and not session.waiting
+
+
+def test_runner_lines_are_read_one_at_a_time():
+    both = subprocess.Popen(["/bin/sh", "-c", "printf 'first\\nsecond\\n'; sleep 1"], stdout=subprocess.PIPE)
+    try:
+        time.sleep(0.3)  # both lines are waiting in the pipe
+        assert Device._line(both, 2) == "first"
+        assert Device._line(both, 2) == "second"
+        with pytest.raises(EOFError):
+            Device._line(both, 5)
+    finally:
+        both.kill()
+
+
+@sandboxed
+def test_stopping_the_device_stops_the_command_it_is_running(hub, folder):
+    device = up(hub, folder)
+    result = {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(
+        hub.pick("laptop"), "sleep 4; echo late > late.txt", login=False, timeout=120, stdin=None)))
+    waiter.start()
+    time.sleep(1.5)
+    started = time.time()
+    device.stop()
+    waiter.join(15)
+    assert time.time() - started < 10 and result["r"][1] == 130, result
+    assert "stopped on the device" in result["r"][0]
+    time.sleep(4)
+    assert not (folder / "late.txt").exists()
+
+
+@sandboxed
+def test_narrower_command_cannot_touch_the_sessions_temp_folder(hub, folder):
+    from tenuo import Subpath, Wildcard
+    device = Device(hub.invite(), str(folder), 600)
+    device.pair()
+    session = hub.pick(device.name)
+    planted = os.path.join(device.tmp, "hermes-snap-planted.sh")
+    sub = os.path.join(session.folder, "src")
+    builder = session.grant.attenuate_builder()
+    builder.with_capability(wire.TOOL, {"dir": Subpath(sub), "cmd": Wildcard()})
+    child = builder.delegate(hub.key)
+    cmd = f"echo planted > {planted}; ls {device.tmp}; echo own > $TMPDIR/own.txt && cat $TMPDIR/own.txt"
+    args = {"dir": sub, "cmd": wire.digest("job-tmp", cmd, False, None, 30, "", 0, "")}
+    job = {"id": "job-tmp", "cmd": cmd, "login": False, "timeout": 30, "stdin": None, "shown": "", "dir": sub,
+           "chain": [session.grant.to_base64(), child.to_base64()], "pop": wire.sign(child, hub.key, wire.TOOL, args)}
+    out, code = device.run(job, device.verify(job))
+    assert not os.path.exists(planted)
+    assert out.strip().endswith("own") and code == 0, out  # it has a temp folder of its own
+    assert not [name for name in os.listdir(device.state) if name.startswith("narrow-")]

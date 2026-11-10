@@ -13,10 +13,12 @@ from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
 logger = logging.getLogger("hermes_tenuo.hands")
 
 _lock = threading.Lock()
+# One Hermes process can serve several profiles, and neither conversation keys nor task ids
+# are unique across them. Everything below is keyed by `_scoped(...)`, which adds the profile.
 _wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one up), set by /hands on
-_applied: Dict[str, str] = {}  # Hermes task id -> conversation it was switched for
-_devices: Dict[str, str] = {}  # Hermes task id -> device name
-_saved: Dict[str, Dict[str, Any]] = {}  # Hermes task id -> the overrides it had before /hands on
+_applied: Dict[str, tuple] = {}  # task -> (conversation it was switched for, the task id as Hermes knows it)
+_devices: Dict[str, str] = {}  # task -> device name
+_saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
 
@@ -28,18 +30,37 @@ HELP = """Hands runs this conversation's commands on your own machine.
   /hands revoke <name> forget a machine"""
 
 
+def _scoped(key: str) -> str:
+    """`key` with the profile this call was routed to, where Hermes serves several."""
+    try:
+        from tools.terminal_tool import _qualify_task_key
+        return _qualify_task_key(key)
+    except Exception:
+        return key
+
+
 def _conversation() -> str:
-    """The conversation the current message belongs to; "" in a single-session CLI."""
+    """The conversation the current message belongs to; the same for a whole single-session CLI."""
     try:
         from gateway.session_context import get_session_env
-        return get_session_env("HERMES_SESSION_KEY", "") or ""
+        return _scoped(get_session_env("HERMES_SESSION_KEY", "") or "")
     except Exception:
-        return ""
+        return _scoped("")
+
+
+def _whole_profile() -> bool:
+    """True if this profile's terminal backend is Hands itself, for every conversation."""
+    try:
+        from hermes_tenuo.hands.backend import NAME
+        from tools.terminal_scope import terminal_env
+        return terminal_env("TERMINAL_ENV", "local") == NAME
+    except Exception:
+        return False
 
 
 def device_for(task_id: str) -> str:
     with _lock:
-        return _devices.get(task_id, "")
+        return _devices.get(task_id) or _devices.get(_scoped(task_id), "")
 
 
 def current_device() -> Any:
@@ -80,6 +101,10 @@ def command(raw_args: str = "") -> str:
             with _lock:
                 _wanted.pop(_conversation(), None)
             _release(_conversation())
+            if _whole_profile():
+                return ("This profile runs every conversation's commands on your machine (terminal.backend: "
+                        "hands), so /hands off cannot move this one to the server. Change the profile's "
+                        "terminal backend to do that.")
             return "This conversation runs commands on the server again."
         if verb == "revoke":
             if len(words) < 2:
@@ -90,8 +115,10 @@ def command(raw_args: str = "") -> str:
             rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}, "
                     f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions()]
             here = _wanted.get(_conversation())
+            if here is None:
+                here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
             return "\n".join(["Machines:"] + (rows or ["  none are up (/hands invite to add one)"]) +
-                             [f"This conversation runs on: {here if here is not None else 'the server'}"])
+                             [f"This conversation runs on: {here}"])
     except HandsUnavailable as e:
         return str(e)
     return HELP
@@ -103,14 +130,14 @@ def _release(conversation: str) -> None:
     except Exception:
         return
     with _lock:
-        tasks = [t for t, c in _applied.items() if c == conversation]
-        for task in tasks:
-            _applied.pop(task, None)
-            _devices.pop(task, None)
-    for task in tasks:
+        mine = [(key, entry[1]) for key, entry in _applied.items() if entry[0] == conversation]
+        for key, _ in mine:
+            _applied.pop(key, None)
+            _devices.pop(key, None)
+    for key, task in mine:
         _drop_shell(task)  # while the task still has its own slot, so the server's shell is untouched
         with _lock:
-            before = _saved.pop(task, None)
+            before = _saved.pop(key, None)
         clear_task_env_overrides(task)  # also forgets the device folder as this task's directory
         if before:
             try:
@@ -210,15 +237,19 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
     except HandsUnavailable:
         folder = ""  # the backend reports the missing device when the call runs
     if not whole_profile:
+        key = _scoped(task)
         with _lock:
-            fresh = _applied.get(task) != conversation
-            switched = not fresh and _devices.get(task) != wanted
-            _applied[task] = conversation
-            _devices[task] = wanted
+            entry = _applied.get(key)
+            fresh = entry is None or entry[0] != conversation
+            switched = not fresh and _devices.get(key) != wanted
+            _applied[key] = (conversation, task)
+            _devices[key] = wanted
         if fresh:
             before = _own_overrides(task)
+            if before.get("env_type") == NAME:
+                before.pop("env_type")  # never save our own switch as the thing to go back to
             with _lock:
-                _saved[task] = before
+                _saved[key] = before
             register_task_env_overrides(task, {**before, "env_type": NAME})
         elif switched:
             _drop_shell(task)  # /hands on <another machine>: never keep running on the first one
