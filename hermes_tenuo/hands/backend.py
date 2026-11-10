@@ -6,7 +6,7 @@ this class only decides where one bash command runs.
 
 from __future__ import annotations
 
-import threading
+import collections
 from typing import Any, Optional
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
@@ -27,7 +27,7 @@ class HandsEnvironment(BaseEnvironment):
         self._hub = hub
         self._session = hub.pick(device)
         self._folder = self._session.folder
-        self._shown = threading.local()
+        self._wrapped: "collections.deque[tuple]" = collections.deque(maxlen=32)
         super().__init__(cwd=self._folder, timeout=timeout)
         self.init_session()
 
@@ -39,15 +39,17 @@ class HandsEnvironment(BaseEnvironment):
         # device; anything outside the granted folder starts in the folder.
         if not self._inside(cwd):
             cwd = self.cwd if self._inside(self.cwd) else self._folder
-        self._shown.text = command
-        try:
-            return super().execute(command, cwd, **kwargs)
-        finally:
-            self._shown.text = ""
+        return super().execute(command, cwd, **kwargs)
+
+    def _wrap_command(self, command: str, cwd: str) -> str:
+        # Remember which plain command each wrapped script came from, for the device's log.
+        wrapped = super()._wrap_command(command, cwd)
+        self._wrapped.append((wrapped, command))
+        return wrapped
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: Optional[str] = None):
-        shown = getattr(self._shown, "text", "")
+        shown = self._plain(cmd_string)
 
         def run() -> tuple:
             try:
@@ -57,6 +59,15 @@ class HandsEnvironment(BaseEnvironment):
                 return f"{e}\n", 127
 
         return _ThreadedProcessHandle(run)
+
+    def _plain(self, script: str) -> str:
+        """The command as Hermes was asked to run it. Hermes wraps each command in session
+        bookkeeping, may add stdin handling, and may spawn it from another thread, so the
+        plain text is looked up by the wrapped script it produced."""
+        for wrapped, command in reversed(self._wrapped):
+            if wrapped in script:
+                return command
+        return ""
 
     def cleanup(self) -> None:
         pass

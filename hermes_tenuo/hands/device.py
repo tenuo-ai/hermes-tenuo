@@ -175,7 +175,7 @@ class Device:
 
     def handle(self, job: Dict[str, Any]) -> None:
         job_id = str(job.get("id", ""))
-        shown = str(job.get("shown") or "")[:500]
+        shown = str(job.get("shown") or "(session setup)")[:500]
         try:
             folder = self.verify(job)
         except Exception as e:  # a refusal is reported, never run

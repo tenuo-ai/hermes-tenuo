@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(sandbox.available() is None, reason="needs sandb
 SCRIPT = textwrap.dedent('''
     import json, os, sys, threading, time
     from pathlib import Path
-    base = Path(sys.argv[1])
+    base, whole_profile = Path(sys.argv[1]), sys.argv[2] == "profile"
     device_dir, server_dir = base / "device-project", base / "server-dir"
     os.chdir(server_dir)
 
@@ -50,30 +50,39 @@ SCRIPT = textwrap.dedent('''
             data = {"output": raw}
         out[key] = {"exit": data.get("exit_code"), "text": str(data.get("output", data.get("content", data)))}
 
-    tool("before", "terminal", {"command": "pwd"})
-    out["on_without_device"] = chat.command("on")
-    invite = chat.command("invite").split("'")[1]
+    if whole_profile:
+        # The profile's backend is `hands`, and Hermes was started in a server folder.
+        os.environ["TERMINAL_ENV"], os.environ["TERMINAL_CWD"] = "hands", str(server_dir)
+        invite = get_hub().invite()
+    else:
+        tool("before", "terminal", {"command": "pwd"})
+        out["on_without_device"] = chat.command("on")
+        invite = chat.command("invite").split("'")[1]
     device = Device(invite, str(device_dir), 600, name="laptop", say=lambda text: None)
     threading.Thread(target=device.serve, daemon=True).start()
     deadline = time.time() + 15
     while time.time() < deadline and not any(s.online for s in get_hub().sessions()):
         time.sleep(0.05)
-    out["on"] = chat.command("on")
+    if not whole_profile:
+        out["on"] = chat.command("on")
+    # A relative write before any command has run must still land on the device.
+    tool("first", "write_file", {"path": "first.txt", "content": "first\\n"})
     tool("pwd", "terminal", {"command": "pwd"})
     tool("cd", "terminal", {"command": "cd src && pwd"})
     tool("stays", "terminal", {"command": "pwd"})
     tool("read", "read_file", {"path": "../README.md"})
     tool("write", "write_file", {"path": "made.txt", "content": "through Hermes\\n"})
     tool("escape", "terminal", {"command": f"echo x > {server_dir}/escape.txt"})
-    out["status"] = chat.command("status")
-    out["off"] = chat.command("off")
-    tool("after", "terminal", {"command": "pwd"})
+    if not whole_profile:
+        out["status"] = chat.command("status")
+        out["off"] = chat.command("off")
+        tool("after", "terminal", {"command": "pwd"})
     device.stop()
     print("RESULT " + json.dumps(out))
 ''')
 
 
-def test_one_conversation_switches_to_the_device_and_back(tmp_path):
+def _run(tmp_path, mode):
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     if not _plugin_installed():
@@ -92,22 +101,38 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     env = dict(os.environ, HERMES_HOME=str(home), TENUO_HANDS_HOME=str(tmp_path / "device-state"))
     for name in ("TERMINAL_ENV", "TERMINAL_CWD", "TENUO_WARRANT", "TENUO_SIGNING_KEY"):
         env.pop(name, None)
-    done = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path)], capture_output=True, text=True,
+    done = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path), mode], capture_output=True, text=True,
                           env=env, timeout=180, cwd=str(tmp_path))
     lines = [line for line in done.stdout.splitlines() if line.startswith("RESULT ")]
     assert lines, done.stdout[-2000:] + done.stderr[-4000:]
-    out = json.loads(lines[-1][7:])
-    here, there = os.path.realpath(server_dir), os.path.realpath(project)
+    return json.loads(lines[-1][7:]), project, server_dir
 
-    assert out["before"]["text"].strip() == here
-    assert "no device is up" in out["on_without_device"]
-    assert "laptop" in out["on"]
+
+def _on_the_device(out, project, server_dir):
+    there = os.path.realpath(project)
+    assert (project / "first.txt").read_text() == "first\n", out["first"]
     assert out["pwd"]["text"].strip() == there
     assert out["cd"]["text"].strip() == os.path.join(there, "src")
     assert out["stays"]["text"].strip() == os.path.join(there, "src")
     assert "device readme" in out["read"]["text"]
     assert (project / "src" / "made.txt").read_text() == "through Hermes\n"
-    assert out["escape"]["exit"] != 0 and not (server_dir / "escape.txt").exists()
+    assert out["escape"]["exit"] != 0
+    assert not list(Path(server_dir).iterdir())
+    log = (project.parent / "device-state" / "log.jsonl").read_text()
+    assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log
+
+
+def test_one_conversation_switches_to_the_device_and_back(tmp_path):
+    out, project, server_dir = _run(tmp_path, "chat")
+    here = os.path.realpath(server_dir)
+    assert out["before"]["text"].strip() == here
+    assert "no device is up" in out["on_without_device"]
+    assert "laptop" in out["on"]
+    _on_the_device(out, project, server_dir)
     assert "laptop: up" in out["status"] and "runs on: laptop" in out["status"]
     assert out["after"]["text"].strip() == here
-    assert not list(Path(server_dir).iterdir())
+
+
+def test_a_profile_whose_backend_is_hands(tmp_path):
+    out, project, server_dir = _run(tmp_path, "profile")
+    _on_the_device(out, project, server_dir)

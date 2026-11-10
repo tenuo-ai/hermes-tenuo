@@ -117,32 +117,57 @@ def _policy_with_hands() -> Dict[str, str]:
     return policy
 
 
+def _inside(path: Any, folder: str) -> bool:
+    return isinstance(path, str) and (path == folder or path.startswith(folder.rstrip("/") + "/"))
+
+
 def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
                 **_: Any) -> Any:
-    """tool_execution middleware: when this conversation is switched on, run this one tool
-    call on the device.
+    """tool_execution middleware: run this tool call on the device when the conversation is
+    switched on (or the whole profile uses the `hands` backend).
 
     Hermes picks the terminal backend from a per-context policy, so the switch wraps this
     call only. The task also gets its own environment slot, so the server's shell for the
     same conversation is left untouched.
+
+    File tools resolve a relative path against the session's recorded directory before any
+    command has run, so that record is pointed at the device's folder first. Otherwise a
+    session whose first call is `write_file` would aim at a server path.
     """
     conversation = _conversation()
     task = str(task_id or "default")
     with _lock:
         wanted = _wanted.get(conversation)
-    if wanted is None:
-        return next_call()
-    from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope
-    if isinstance(get_terminal_scope(), TerminalPolicyRefusal):
-        return next_call()  # Hermes is refusing terminal use for this profile; leave that alone
-    with _lock:
-        fresh = _applied.get(task) != conversation
-        _applied[task] = conversation
-        _devices[task] = wanted
-    if fresh:
+    try:
         from hermes_tenuo.hands.backend import NAME
-        from tools.terminal_tool import register_task_env_overrides
-        register_task_env_overrides(task, {"env_type": NAME})
+        from tools.terminal_scope import (
+            TerminalPolicyRefusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope, terminal_env)
+        from tools.terminal_tool import get_session_cwd, record_session_cwd, register_task_env_overrides
+        if isinstance(get_terminal_scope(), TerminalPolicyRefusal):
+            return next_call()  # Hermes is refusing terminal use for this profile; leave that alone
+        whole_profile = wanted is None and terminal_env("TERMINAL_ENV", "local") == NAME
+    except Exception as e:
+        logger.debug("hermes-tenuo hands: tool call left on the server (%s)", e)
+        return next_call()
+    if wanted is None and not whole_profile:
+        return next_call()
+
+    hub = get_hub()
+    try:
+        folder = hub.pick(wanted or "").folder if hub is not None else ""
+    except HandsUnavailable:
+        folder = ""  # the backend reports the missing device when the call runs
+    if not whole_profile:
+        with _lock:
+            fresh = _applied.get(task) != conversation
+            _applied[task] = conversation
+            _devices[task] = wanted
+        if fresh:
+            register_task_env_overrides(task, {"env_type": NAME})
+    if folder and not _inside(get_session_cwd(task), folder):
+        record_session_cwd(task, folder)
+    if whole_profile:
+        return next_call()
     token = set_terminal_scope(_policy_with_hands())
     try:
         return next_call()
