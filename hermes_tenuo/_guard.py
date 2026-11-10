@@ -228,6 +228,7 @@ class PluginGuard:
             session_id=session_id,
             tool_call_id=tool_call_id,
             duration_ms=duration_ms,
+            status=str(kwargs.get("status") or ""),
         )
 
     def on_session_start_hook(

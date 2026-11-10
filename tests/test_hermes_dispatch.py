@@ -96,6 +96,23 @@ _DRIVER = textwrap.dedent(
         start("p", "c0", "web only", "sa-0-x")
         out["c0_public"] = read(public, session_id="c0", task_id="sa-0-x")
         out["c1_public"] = read(public, session_id="c1", task_id="sa-1-x")
+    elif scenario == "cw_missing_ids":
+        out["delegate"] = delegate("p", {"goal": "summarise"})
+        start("p", "c0", "summarise", "sa-0-x")
+        out["anonymous_secret"] = read(secret)
+    elif scenario == "cancelled_spawn_retry":
+        out["first"] = resolve_pre_tool_block("delegate_task", {"goal": "same", "toolsets": ["web"]},
+            session_id="p", task_id="t-p", tool_call_id="first")
+        invoke_hook("post_tool_call", tool_name="delegate_task", args={"goal": "same", "toolsets": ["web"]},
+            result="abandoned", status="cancelled", session_id="p", task_id="t-p", tool_call_id="first")
+        out["retry"] = resolve_pre_tool_block("delegate_task", {"goal": "same"},
+            session_id="p", task_id="t-p", tool_call_id="retry")
+        out["distinct"] = resolve_pre_tool_block("delegate_task", {"goal": "distinct"},
+            session_id="p", task_id="t-p", tool_call_id="distinct")
+        start("p", "late", "same", "sa-late")
+        out["late_public"] = read(public, session_id="late", task_id="sa-late")
+        start("p", "new", "distinct", "sa-new")
+        out["new_public"] = read(public, session_id="new", task_id="sa-new")
     elif scenario == "failed_spawn_retry":
         out["first"] = resolve_pre_tool_block("delegate_task", {"goal": "same"},
             session_id="p", task_id="t-p", tool_call_id="first")
@@ -203,3 +220,18 @@ def test_failed_spawn_cannot_lend_its_grant_to_a_retry(tmp_path):
     r = _run("failed_spawn_retry", tmp_path)
     assert r["first"] is None and r["retry"] is None
     assert _blocked(r["c0_public"]), r["c0_public"]
+
+
+def test_missing_ids_do_not_fall_back_to_the_parent(tmp_path):
+    r = _run("cw_missing_ids", tmp_path)
+    assert r["delegate"] is None
+    assert _blocked(r["anonymous_secret"]), r["anonymous_secret"]
+
+
+def test_cancelled_child_cannot_claim_a_retry_through_hermes_hooks(tmp_path):
+    r = _run("cancelled_spawn_retry", tmp_path)
+    assert r["first"] is None
+    assert r["retry"] and "cancelled child goal" in r["retry"]
+    assert r["distinct"] is None
+    assert _blocked(r["late_public"]), r["late_public"]
+    assert _ran(r["new_public"], PUBLIC), r["new_public"]

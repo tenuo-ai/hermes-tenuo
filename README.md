@@ -391,7 +391,11 @@ not group- or world-writable. Invalid or unreadable plans fail closed during
 plugin startup.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
-expire when that call returns, including failed and background calls. Concurrent
+expire when that call returns, including failed and background calls. Cancelled,
+timed-out, or errored lifecycle posts reserve their goals for the lifetime of the
+guard: retries must use distinct goals because abandoned workers can announce
+children late. Without an originating call ID or goal, start a new session
+after cancellation. Concurrent
 invocations with overlapping child goals are rejected because Hermes does not
 include the originating call ID in its child-start hook. Use distinct goals for
 concurrent delegations. Control actions (`list`, `steer`, `stop`) create no grants.

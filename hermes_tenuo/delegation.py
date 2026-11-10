@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -190,11 +191,22 @@ def load_plan(path: str | Path) -> DelegationPlan:
     try:
         if p.is_symlink():
             raise DelegationPlanError(f"delegation plan {p} must not be a symlink")
-        if os.name != "nt" and p.stat().st_mode & 0o022:
-            raise DelegationPlanError(
-                f"delegation plan {p} must not be writable by group or other users"
-            )
-        return parse_plan(json.loads(p.read_text()))
+        # Nonblocking open avoids hanging on FIFOs. Check the opened descriptor,
+        # not a separate stat of a path that could be replaced before the read.
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(p, flags)
+        try:
+            mode = os.fstat(fd).st_mode
+            if not stat.S_ISREG(mode):
+                raise DelegationPlanError(f"delegation plan {p} must be a regular file")
+            if os.name != "nt" and mode & 0o022:
+                raise DelegationPlanError(
+                    f"delegation plan {p} must not be writable by group or other users"
+                )
+            with os.fdopen(fd, encoding="utf-8", closefd=False) as stream:
+                return parse_plan(json.load(stream))
+        finally:
+            os.close(fd)
     except FileNotFoundError as exc:
         raise DelegationPlanError(f"delegation plan {p} does not exist") from exc
     except DelegationPlanError:

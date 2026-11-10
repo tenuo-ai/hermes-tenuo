@@ -30,7 +30,7 @@ import os
 import sys
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -270,6 +270,9 @@ class HermesGuard:
         self._delegation_plan = delegation_plan
         # parent session → grants staged by an authorised delegate_task, awaiting subagent_start
         self._planned_children: Dict[str, deque] = {}
+        # Cancelled workers may announce children late. Never reuse their goals.
+        self._cancelled_goals: Dict[str, set] = {}
+        self._cancelled_invocations: set = set()
         self._audit_only_warned = False  # warn once when running without a warrant
         self._uses_session_warrants = False  # set by set_session_warrant (gateway)
 
@@ -530,7 +533,7 @@ class HermesGuard:
                 # This is an atomic cap in the signed delegation operation. It
                 # cannot accidentally request a lifetime beyond the parent.
                 builder.with_ttl_capped_to_parent(ttl)
-                if "delegate_task" not in keep:
+                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
                     # The child can't delegate, so its grant can't be delegated either.
                     builder.terminal()
                 child = builder.delegate(parent_key)
@@ -603,7 +606,7 @@ class HermesGuard:
                         builder.with_capability(tool, tool_args)
                 builder.with_holder(child_key.public_key)
                 builder.with_ttl_capped_to_parent(level.ttl_seconds)
-                if "delegate_task" not in keep:
+                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
                     # The child can't delegate, so its grant can't be delegated either.
                     builder.terminal()
                 planned.append(_ChildGrant(builder.delegate(parent_key), chain, child_key, goal, invocation_id))
@@ -622,6 +625,14 @@ class HermesGuard:
         # subagent_start carries a goal, but no originating tool-call ID.
         # Never let two outstanding invocations compete for the same goal.
         with self._pending_lock:
+            if any((parent_session_id, g.invocation_id) in self._cancelled_invocations for g in grants):
+                return {"action": "block", "message": "tenuo: delegation invocation was cancelled"}
+            cancelled = self._cancelled_goals.get(parent_session_id, set())
+            if cancelled and any(None in cancelled or g.goal is None or g.goal in cancelled for g in grants):
+                return {
+                    "action": "block",
+                    "message": "tenuo: delegation rejected: cancelled child goal cannot be reused; use a distinct goal",
+                }
             pending = self._planned_children.setdefault(parent_session_id, deque())
             if pending and any(
                 not old.invocation_id or not new.invocation_id
@@ -636,12 +647,23 @@ class HermesGuard:
             pending.extend(grants)
         return None
 
-    def _finish_delegation(self, session_id: str, invocation_id: str) -> None:
-        # Hermes constructs children (and fires subagent_start) before returning,
-        # including background calls. Unclaimed grants can no longer be used.
+    def _finish_delegation(
+        self, session_id: str, invocation_id: str, status: str = "", args: Optional[dict] = None
+    ) -> None:
+        # Normal returns occur after child construction. Cancellation/timeout
+        # posts can precede worker exit, so reserve those goals permanently for
+        # this guard. Session-end must not erase protection against late hooks.
         with self._pending_lock:
             pending = self._planned_children.get(session_id)
+            if status in {"cancelled", "timeout", "error"}:
+                self._cancelled_invocations.add((session_id, invocation_id))
+                goals = {goal for goal, _ in _delegated_tasks(args or {})}
+                self._cancelled_goals.setdefault(session_id, set()).update(goals)
             if pending is not None:
+                if status in {"cancelled", "timeout", "error"}:
+                    goals = {g.goal for g in pending if g.invocation_id == invocation_id}
+                    if goals:
+                        self._cancelled_goals.setdefault(session_id, set()).update(goals)
                 remaining = deque(g for g in pending if g.invocation_id != invocation_id)
                 if remaining:
                     self._planned_children[session_id] = remaining
@@ -658,6 +680,9 @@ class HermesGuard:
         task order, which is the order Hermes builds the children in.
         """
         with self._pending_lock:
+            cancelled = self._cancelled_goals.get(parent_session_id, set())
+            if cancelled and (goal is None or None in cancelled or goal in cancelled):
+                return None
             queue = self._planned_children.get(parent_session_id)
             if not queue:
                 return None
@@ -701,7 +726,10 @@ class HermesGuard:
         with self._session_lock:
             self._session_warrant_chains.pop(session_id, None)
         with self._pending_lock:
-            self._planned_children.pop(session_id, None)
+            abandoned = self._planned_children.pop(session_id, ())
+            if abandoned:
+                self._cancelled_goals.setdefault(session_id, set()).update(g.goal for g in abandoned)
+                self._cancelled_invocations.update((session_id, g.invocation_id) for g in abandoned)
         with self._task_lock:
             for task_id in [t for t, s in self._task_sessions.items() if session_id in s]:
                 self._task_sessions[task_id].discard(session_id)
@@ -787,7 +815,7 @@ class HermesGuard:
             if task_id:
                 self._remember_task(task_id, session_id)
             return session_id, None
-        if not task_id:
+        if not task_id and not self._uses_session_warrants:
             return session_id, None
         with self._task_lock:
             sessions = set(self._task_sessions.get(task_id, ()))
@@ -825,10 +853,10 @@ class HermesGuard:
             return {"action": "block", "message": unattributed}
         warrant, signing_key = self._resolve_warrant(session_id)
         if warrant is _NO_AUTHORITY:
-            return {
-                "action": "block",
-                "message": "tenuo: this subagent was not started by an authorised delegation and holds no authority",
-            }
+            reason = "tenuo: this subagent was not started by an authorised delegation and holds no authority"
+            self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+            self._remember_decision(tool_call_id, False, reason)
+            return {"action": "block", "message": reason}
 
         # Ensure primary session is tracked even before child sessions appear
         if session_id and self._primary_session_id is None:
@@ -866,23 +894,7 @@ class HermesGuard:
                 "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
             }
 
-        result, authorized = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
-
-        # Intercept delegate_task: only pre-register attenuated child warrants if
-        # the delegation call itself was AUTHORIZED. Registering before authorization
-        # would let a denied delegation poison pending slots — the next heuristic
-        # child session could claim a warrant with no valid parent delegation.
-        if (tool_name == "delegate_task" and authorized
-                and str(args.get("action") or "spawn").strip().lower() == "spawn"):
-            tasks = _delegated_tasks(args)
-            if self._delegation_plan is not None:
-                blocked = self._register_planned_children(session_id, tasks, tool_call_id)
-            else:
-                blocked = self._grant_children(session_id, tasks, tool_call_id)
-            if blocked is not None:
-                self._remember_decision(tool_call_id, False, blocked["message"])
-                return blocked
-
+        result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
 
     def _enforce(
@@ -913,8 +925,15 @@ class HermesGuard:
             # warrant in the chain being verified. Deriving trust from the
             # credential under test accepts any chain an attacker signs. Without
             # a configured trusted_root, enforce_tool_call fails closed.
+            # Preserve exact matches; accept the conventional tool: alias only
+            # when the warrant has no capability under the incoming name.
+            authorization_tool = tool_name
+            if tool_name not in (warrant.tools or []):
+                alternate = tool_name.removeprefix("tool:") if tool_name.startswith("tool:") else f"tool:{tool_name}"
+                if alternate in (warrant.tools or []):
+                    authorization_tool = alternate
             result = enforce_tool_call(
-                tool_name=tool_name,
+                tool_name=authorization_tool,
                 tool_args=args,
                 bound_warrant=bound,
                 trusted_roots=trusted,
@@ -929,6 +948,22 @@ class HermesGuard:
             # allow execution, regardless of the on_denial setting.
             self._remember_decision(tool_call_id, False, f"Authorization error: {exc}")
             return {"action": "block", "message": f"Authorization error: {exc}"}, False
+
+        # Grant validation is part of the effective delegation decision. Do it
+        # before publishing any ALLOW, and never issue authority for log-only denials.
+        grant_rejected = False
+        if (result.allowed and tool_name.removeprefix("tool:") == "delegate_task"
+                and str(args.get("action") or "spawn").strip().lower() == "spawn"):
+            tasks = _delegated_tasks(args)
+            if self._delegation_plan is not None:
+                blocked = self._register_planned_children(session_id, tasks, tool_call_id)
+            else:
+                blocked = self._grant_children(session_id, tasks, tool_call_id)
+            if blocked is not None:
+                grant_rejected = True
+                # A plugin policy refusal is not a Rust-attested authorization.
+                result = replace(result, allowed=False, denial_reason=blocked["message"],
+                                 error_type="delegation_rejected", chain_result=None)
 
         if self._control_plane is not None:
             try:
@@ -945,7 +980,7 @@ class HermesGuard:
             # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
             # so the post record must carry this decision, not "post-dispatch".
             self._remember_decision(tool_call_id, False, reason)
-            if self._on_denial == "log":
+            if self._on_denial == "log" and not grant_rejected:
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 return None, False
             return {"action": "block", "message": reason}, False
@@ -979,13 +1014,29 @@ class HermesGuard:
         session_id: str = "",
         tool_call_id: str = "",
         duration_ms: int = 0,
+        status: str = "",
     ) -> None:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
         if not session_id and task_id:
             session_id, _ = self._attribute_session(session_id, task_id)
-        if tool_name == "delegate_task":
-            self._finish_delegation(session_id, tool_call_id)
+        if (tool_name.removeprefix("tool:") == "delegate_task"
+                and str(args.get("action") or "spawn").strip().lower() == "spawn"):
+            self._finish_delegation(session_id, tool_call_id, status, args)
+        # A recorded pre-hook denial wins even when no static warrant exists
+        # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
+        pre = None
+        if tool_call_id:
+            with self._pre_decisions_lock:
+                pre = self._pre_decisions.pop(tool_call_id, None)
+        if pre is not None:
+            allowed, reason = pre
+            self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
+            return
         warrant, _ = self._resolve_warrant(session_id)
+        if warrant is _NO_AUTHORITY:
+            self._emit_audit(tool_name, args, False, "tenuo: this subagent holds no authority",
+                             session_id, task_id, tool_call_id, duration_ms)
+            return
 
         # In audit-only mode (no warrant), emit a passthrough audit event
         if warrant is None:
@@ -1003,17 +1054,8 @@ class HermesGuard:
             self._emit_audit(tool_name, args, True, "audit-only", session_id, task_id, tool_call_id, duration_ms)
             return
 
-        # The pre hook already decided; this record adds timing. Without a stored
-        # decision (no tool_call_id, or a call that skipped the pre hook) the
-        # handler did run, so it is an ALLOW tagged "post-dispatch".
-        allowed = True
-        reason = "post-dispatch"
-        if tool_call_id:
-            with self._pre_decisions_lock:
-                pre = self._pre_decisions.pop(tool_call_id, None)
-            if pre is not None:
-                allowed, reason = pre
-        self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
+        # No correlated pre decision: this is an unobserved post-dispatch event.
+        self._emit_audit(tool_name, args, True, "post-dispatch", session_id, task_id, tool_call_id, duration_ms)
 
     # ------------------------------------------------------------------
     # Internal: audit callback
