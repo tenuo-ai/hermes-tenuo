@@ -782,6 +782,83 @@ def test_read_only_machine_is_described_as_such():
     assert "to read, not to change" in denied["hands_note"] and "shares only" not in denied["hands_note"]
 
 
+def test_a_failed_download_is_explained_where_commands_have_no_internet():
+    class Offline(_Where):
+        network = "off"
+
+    class Online(_Where):
+        network = "on"
+    failures = ("curl: (6) Could not resolve host: pypi.org",
+                "socket.gaierror: [Errno -3] Temporary failure in name resolution",
+                "npm error code ENOTFOUND",
+                "[Errno 8] nodename nor servname provided, or not known")
+    for output in failures:
+        result = json.dumps({"output": output, "exit_code": 1})
+        note = json.loads(chat._marked(result, "terminal", Offline()))["hands_note"]
+        assert "no internet access" in note and "--network" in note and "shares only" not in note
+        assert "hands_note" not in json.loads(chat._marked(result, "terminal", Online()))
+        assert "hands_note" not in json.loads(chat._marked(result, "terminal", _Where()))  # not said: not claimed
+    refused = json.dumps({"output": "PermissionError: [Errno 1] Operation not permitted", "exit_code": 1})
+    note = json.loads(chat._marked(refused, "terminal", Offline()))["hands_note"]
+    assert "shares only /work/app" in note and "--network" in note
+    assert "--network" not in json.loads(chat._marked(refused, "terminal", Online()))["hands_note"]
+    ordinary = json.loads(chat._marked(json.dumps({"output": "ERROR: No matching distribution found for six",
+                                                   "exit_code": 1}), "terminal", Offline()))
+    assert "hands_note" not in ordinary and "no internet" in ordinary["ran_on"]  # every result says it
+    assert "internet" not in json.loads(chat._marked(refused, "terminal", Online()))["ran_on"]
+
+
+def test_the_network_is_off_unless_asked(tmp_path):
+    project, temp = str(tmp_path / "p"), str(tmp_path / "t")
+    resolver = "/private/var/run/mDNSResponder"
+    offline, online = sandbox._mac_profile(project, temp), sandbox._mac_profile(project, temp, network=True)
+    assert '(remote ip "localhost:*")' in offline and "(allow network-outbound (remote ip))" not in offline
+    assert resolver not in offline
+    assert "(allow network-outbound (remote ip))" in online and resolver in online
+    assert "--unshare-net" in sandbox._bwrap(project, temp, ["true"])
+    assert "--unshare-net" not in sandbox._bwrap(project, temp, ["true"], network=True)
+
+
+CONNECT = ("import socket,sys\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(2)\n"
+           "try:\n    s.connect((sys.argv[1], int(sys.argv[2])))\n    print('connected')\n"
+           "except Exception as e:\n    print(type(e).__name__, e)\n")
+
+
+@sandboxed
+@pytest.mark.parametrize("network", [False, True])
+def test_commands_reach_the_internet_only_with_network(hub, folder, monkeypatch, network):
+    """A numeric address that answers nobody stands in for the internet: without the network
+    the connection is refused at once, with it the command is left to try."""
+    import socket
+
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    (folder / "connect.py").write_text(CONNECT)
+    device = up(hub, folder, network=network)
+    assert hub.pick("laptop").network == ("on" if network else "off")
+    assert ("internet on" if network else "no internet") in chat.command("status")
+    assert any("--network" in line for line in device.lines)
+    python = "python3 -I -S connect.py"
+    out, _ = run(hub, f"{python} 192.0.2.1 9")
+    if sys.platform == "darwin":
+        assert ("PermissionError" in out) is not network
+    elif not network:
+        assert "unreachable" in out
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:  # a program on this machine
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        out, _ = run(hub, f"{python} 127.0.0.1 {server.getsockname()[1]}")
+    # macOS commands share the machine's loopback either way; Linux ones only with the network.
+    assert ("connected" in out) is (network or sys.platform == "darwin")
+    device.stop()
+
+
+def test_a_machine_without_a_sandbox_is_not_called_offline(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, name="open", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert hub.pick("open").network == "on" and "internet" not in chat.command("status")
+
+
 def test_the_server_learns_how_a_machine_holds_commands(hub, folder, monkeypatch):
     monkeypatch.setattr(sandbox, "_probe", [None])
     Device(hub.invite(), str(folder), 60, name="open", allow_unsandboxed=True).pair()
@@ -799,6 +876,9 @@ def test_a_pairing_request_cannot_claim_another_mode(hub, folder, monkeypatch):
     hub._paired.clear()
     with pytest.raises(Refused, match="doesn't match"):
         hub.pair(dict(sent, mode="sandboxed"))
+    assert sent["network"] == "on"
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, network="off"))
 
 
 def test_only_device_tools_and_plain_results_are_marked():
@@ -1237,14 +1317,15 @@ def test_why_there_is_no_sandbox(monkeypatch):
 
 @pytest.mark.skipif(not sandbox.scopes_sockets() or sandbox.available() != "bwrap",
                     reason="needs Linux 6.12 or later and bubblewrap")
-def test_commands_cannot_reach_another_programs_named_socket(hub, folder):
+@pytest.mark.parametrize("network", [False, True])  # with the machine's network, the kernel holds them back
+def test_commands_cannot_reach_another_programs_named_socket(hub, folder, network):
     import socket
     name = f"hands-test-{os.getpid()}"
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind("\0" + name)
     listener.listen(1)
     try:
-        device = up(hub, folder)
+        device = up(hub, folder, network=network)
         out, _ = run(hub, "python3 -c \"import socket\ns = socket.socket(socket.AF_UNIX)\n"
                           f"try:\n    s.connect('\\0{name}'); print('reached')\n"
                           "except OSError as e:\n    print('refused')\"")

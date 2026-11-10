@@ -140,7 +140,9 @@ def command(raw_args: str = "") -> str:
                     if hub.revoke(words[1], _owner()) else f"No machine of yours is called '{words[1]}'.")
         if verb == "status":
             how = {"read-only": ", read-only", "none": ", no sandbox"}
-            rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}{how.get(s.mode, '')}, "
+            net = {"on": ", internet on", "off": ", no internet"}
+            rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}{how.get(s.mode, '')}"
+                    f"{net.get(s.network, '') if s.mode != 'none' else ''}, "
                     f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions(_owner())]
             here = _wanted.get(_conversation())
             if here is None:
@@ -250,6 +252,10 @@ ON_DEVICE = {"terminal", "read_file", "write_file", "patch", "search_files"}
 # How a sandbox's refusal reads in a command's output: macOS denies the call, Linux shows
 # everything outside the folder as a read-only file system.
 REFUSALS = ("Operation not permitted", "Permission denied", "Read-only file system")
+# How having no internet reads: a name that cannot be looked up, or no route out.
+NO_NETWORK = ("Could not resolve host", "Temporary failure in name resolution", "Temporary failure resolving",
+              "Name or service not known", "nodename nor servname provided", "failed to lookup address information",
+              "Network is unreachable", "network is unreachable", "ENOTFOUND", "EAI_AGAIN")
 
 
 def _marked(result: Any, tool_name: str, session: Any) -> Any:
@@ -268,12 +274,28 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
     # Only what the machine said holds its commands is repeated. One that runs them with
     # no sandbox, or did not say, gets no explanation: the failure is an ordinary one.
     mode = getattr(session, "mode", "")
-    if mode in ("sandboxed", "read-only") and any(refusal in text for refusal in REFUSALS):
+    if mode not in ("sandboxed", "read-only"):
+        return json.dumps(data, ensure_ascii=False)
+    offline = getattr(session, "network", "") == "off"
+    if offline:  # said with every result: a failed install does not always say why
+        data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder}, no internet)"
+    notes = []
+    refused = any(refusal in text for refusal in REFUSALS)
+    if refused:
         shares = (f"shares {session.folder} to read, not to change: commands there cannot change it or anything else"
                   if mode == "read-only" else
                   f"shares only {session.folder}: commands there cannot change anything outside it")
-        data["hands_note"] = (f"'{session.name}' {shares}, and the user's keys, credentials and browser data "
-                              "cannot be read.")
+        notes.append(f"'{session.name}' {shares}, and the user's keys, credentials and browser data cannot be read.")
+    # Where commands have no internet, an install or download fails on a name that cannot be
+    # looked up, or (macOS, a numeric address) as a refusal. Say what it is and who can change it.
+    if offline:
+        if any(sign in text for sign in NO_NETWORK):
+            notes.append(f"Commands on '{session.name}' have no internet access, so installs and downloads fail. "
+                         "The user can allow it by starting Hands on that machine with --network.")
+        elif refused:
+            notes.append("Commands there also have no internet access unless the user starts Hands with --network.")
+    if notes:
+        data["hands_note"] = " ".join(notes)
     return json.dumps(data, ensure_ascii=False)
 
 

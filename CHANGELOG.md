@@ -26,6 +26,9 @@
 - Commands cannot read the home folder outside the shared folder, except
   toolchains and folders on `PATH`. `--read FOLDER` shows one more folder and
   `--read-home` shows the home folder except credentials and browser data.
+- Commands have no internet unless `hands up` is started with `--network`.
+  Results from a machine without it say so, and a failed download or install
+  tells the agent how the person can allow it.
 - The conversation that asked for an invite starts using the machine when it
   comes up. Where the chat platform says who is writing, a machine belongs to
   the person who invited it: others cannot see, use or forget it.

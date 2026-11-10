@@ -804,7 +804,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
     try:
         dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
                             allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
-                            plain_http=args.plain_http, read_home=args.read_home, read=args.read or ())
+                            plain_http=args.plain_http, read_home=args.read_home, read=args.read or (),
+                            network=args.network)
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
         return dev.serve()
@@ -907,6 +908,8 @@ def main() -> None:
                       help="Let commands read the folder but not change it")
     up_p.add_argument("--plain-http", action="store_true",
                       help="Connect to a server on the internet without encryption (not recommended)")
+    up_p.add_argument("--network", action="store_true",
+                      help="Let commands use the internet, to install dependencies, clone or download (off by default)")
     up_p.add_argument("--read", action="append", metavar="FOLDER",
                       help="Also let commands read this folder in your home folder (repeatable)")
     up_p.add_argument("--read-home", action="store_true",

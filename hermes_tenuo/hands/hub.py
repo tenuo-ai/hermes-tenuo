@@ -59,6 +59,7 @@ class Session:
     tmp: str = ""                # where the device keeps temp files for this session
     mode: str = ""               # what holds commands there: "sandboxed", "read-only", "none"; "" = not said
     owner: str = ""              # who paired it, where the chat platform says who is asking; "" = anyone
+    network: str = ""            # whether commands there have the internet: "on", "off"; "" = not said
     running_until: float = 0.0   # a command is with the device until about then
     gone: bool = False           # the device said it is going down
     last_seen: float = field(default_factory=time.time)
@@ -280,9 +281,10 @@ class Hub:
             raise Refused(f"this pairing request isn't valid ({type(e).__name__})") from e
         # How the device runs commands, and the invite it uses, are part of what it signs:
         # the first is repeated to the agent, and the second decides whose machine it is.
-        mode = str(body.get("mode") or "")
-        signed = (grant.to_base64(), folder, name, tmp, mode, str(body.get("invite") or ""))
-        if nonce != wire.digest(*signed) or mode not in ("", "sandboxed", "read-only", "none"):
+        mode, network = str(body.get("mode") or ""), str(body.get("network") or "")
+        signed = (grant.to_base64(), folder, name, tmp, mode, str(body.get("invite") or ""), network)
+        if (nonce != wire.digest(*signed) or mode not in ("", "sandboxed", "read-only", "none")
+                or network not in ("", "on", "off")):
             raise Refused("this pairing request doesn't match what was signed")
         if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):
             raise Refused("this device's temp folder has a path Hands can't use")
@@ -317,7 +319,8 @@ class Hub:
                              "paired": known.get(device, {}).get("paired") or time.strftime("%Y-%m-%d")}
             self._save_known(known)
             new = Session(device, name, folder, grant, identity, device_key,
-                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp, mode=mode, owner=owner)
+                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp, mode=mode, owner=owner,
+                          network=network)
             new.nonces = [nonce]
             self._paired[nonce] = now
             old = self._sessions.get(device)

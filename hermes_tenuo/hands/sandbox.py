@@ -66,7 +66,8 @@ def _ancestors(path: str) -> List[str]:
 
 
 def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
-                 writable: bool = True, home_visible: bool = True, tools: Sequence[str] = ()) -> str:
+                 writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
+                 network: bool = False) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -99,10 +100,13 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         "(allow ipc-posix-sem)", "(allow ipc-posix-shm*)", "(allow pseudo-tty)",
         '(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))',
         f"(allow mach-lookup {services})",
-        # The network stays on; other programs' local sockets do not.
-        "(allow system-socket)", "(allow network-bind (local ip))", "(allow network-inbound (local ip))",
-        "(allow network-outbound (remote ip))",
-        '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
+        # Without `network`, commands reach this machine only: a dev server and what talks
+        # to it work, the internet and name lookups do not. With it, the network is on.
+        # Other programs' local sockets are out of reach either way.
+        "(allow system-socket)", "(allow network-bind (local ip))",
+        *(["(allow network-inbound (local ip))", "(allow network-outbound (remote ip))",
+           '(allow network-outbound (literal "/private/var/run/mDNSResponder"))'] if network else
+          ['(allow network-inbound (local ip "localhost:*"))', '(allow network-outbound (remote ip "localhost:*"))']),
         "(allow file-read*)", *home_rule, *tool_rule,
         f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
         *([f"(allow file-read-metadata {on_the_way})"] if on_the_way else []),
@@ -115,14 +119,17 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
            readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True,
-           home_visible: bool = True, tools: Sequence[str] = ()) -> List[str]:
+           home_visible: bool = True, tools: Sequence[str] = (), network: bool = False) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
-            "--die-with-parent", "--unshare-net"]
-    # A private network namespace also hides abstract Unix sockets, which cannot be
-    # masked with filesystem mounts. Commands have loopback only; the device keeps
-    # its host network connection outside the sandbox.
+            "--die-with-parent"]
+    if not network:
+        # A private network namespace also hides abstract Unix sockets, which cannot be
+        # masked with filesystem mounts. Commands have loopback only; the device keeps
+        # its host network connection outside the sandbox. With `network` they share the
+        # machine's network, and newer kernels still keep them from those sockets.
+        argv += ["--unshare-net"]
     emptied: List[str] = []  # folders shown empty; made read-only at the end, once what goes inside is in place
     if not home_visible:
         argv += ["--tmpfs", _home()]  # an empty home folder; what commands need from it is put back below
@@ -238,23 +245,25 @@ def protected(path: str, hidden: Sequence[str] = ()) -> bool:
 
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
          shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
-         writable: bool = True, home_visible: bool = True, tools: Sequence[str] = ()) -> List[str]:
+         writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
+         network: bool = False) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
     `hidden` names more folders a command must not read (the device's own state). With
     `writable` off the command can read `folder` and change only its temp folder. With
     `home_visible` off the home folder cannot be read at all, except `tools`: real folders
-    in it that hold toolchains, or that the person chose to show."""
+    in it that hold toolchains, or that the person chose to show. Without `network` the
+    command has no internet: on Linux a network of its own, on macOS this machine only."""
     # A folder to show that is itself protected, or inside something protected, is not
     # shown: putting it back would uncover exactly what is hidden on purpose.
     tools = [path for path in tools if not protected(path, hidden)]
     kind = available()
     if kind == "sandbox-exec":
         return ["/usr/bin/sandbox-exec", "-p",
-                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools), *command]
+                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network), *command]
     if kind == "bwrap":
-        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools)
+        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools, network)
     if allow_unsandboxed:
         if not writable:
             raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")

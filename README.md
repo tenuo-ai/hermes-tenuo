@@ -260,6 +260,9 @@ plugins:
 uvx hermes-tenuo hands up 'hands://my-server:8765/…' --dir . --for 4h
 ```
 
+Commands on your machine have no internet. Add `--network` if the work needs
+to install dependencies or download anything.
+
 **Back in the chat**, the conversation that asked for the line starts using
 your machine as soon as it is up: its `terminal`, `read_file`, `write_file`
 and the other file tools act there. `/hands off` returns it to the server and
@@ -275,7 +278,7 @@ someone else in a shared chat does not run on it.
 | `/hands off` | chat | This conversation runs on the server again. |
 | `/hands status` | chat | Which machines are up, and for how long. |
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
-| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. `--network` lets them use the internet. |
 | `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
 
@@ -289,9 +292,15 @@ What your machine enforces, whatever the server asks:
   and `--read FOLDER` adds a folder of your choice. With `--read-home` the
   home folder is readable except `~/.ssh`, `~/.aws`, cloud and package-manager
   credentials, keychains, browser profiles and shell history, which are never
-  readable. System files stay readable. On macOS the network stays on; Linux
-  commands have an isolated loopback network with no host or internet access.
-  The device itself can still connect to the Hermes server.
+  readable. System files stay readable.
+- **No internet unless you say so.** Commands cannot reach the internet, so
+  nothing they read can be sent anywhere and nothing can be downloaded and
+  run. Start with `--network` when the work needs it: installing
+  dependencies, cloning, calling an API. Without it, Linux commands have a
+  network of their own with nothing else on it, and macOS commands can reach
+  only programs listening on the machine itself. When an install fails for
+  this reason the agent is told why, and can ask you to restart with
+  `--network`. Hands's own connection to the Hermes server is not affected.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -343,11 +352,12 @@ printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwra
 sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ```
 
-Limits today: macOS and Linux machines only; on macOS commands share your
-machine's network, so they can reach services that listen on the machine
-itself (`localhost`); Linux commands cannot download dependencies or reach
-host services, and dev servers are reachable only from other commands in the
-same Hands sandbox; a machine with no sandbox refuses
+Limits today: macOS and Linux machines only; on macOS commands can reach
+services that listen on the machine itself (`localhost`), with or without
+`--network`; on Linux without `--network` a dev server is reachable only from
+other commands in the same Hands sandbox, and with it commands reach services
+on the machine too; `--network` is all or nothing, not a list of allowed
+sites; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
@@ -446,7 +456,7 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home]   # on your own machine
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home] [--network]   # on your own machine
 hermes-tenuo hands check [INVITE] [--dir FOLDER]
 hermes-tenuo hands log [--last N]
 ```

@@ -485,7 +485,7 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
 class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
                  allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
-                 plain_http: bool = False, read_home: bool = False, read: Any = ()):
+                 plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False):
         self.folder = os.path.realpath(os.path.expanduser(folder))
         if not os.path.isdir(self.folder):
             raise HandsError(f"{folder} is not a folder")
@@ -495,6 +495,7 @@ class Device:
             raise HandsError("the time window must be positive")
         self.allow_unsandboxed = allow_unsandboxed
         self.read_only = read_only  # commands may look at the folder and not change it
+        self.network = network      # commands may use the internet (to install, clone, download)
         # Commands cannot read the home folder unless the person says so; what they need
         # from it (toolchains, and any folder named with --read) is put back.
         self.read_home = read_home
@@ -513,7 +514,8 @@ class Device:
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
-                     writable=not read_only, home_visible=read_home, tools=self.shown)  # fail before pairing
+                     writable=not read_only, home_visible=read_home, tools=self.shown,
+                     network=network)  # fail before pairing
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -558,11 +560,12 @@ class Device:
     def pair(self) -> None:
         grant, identity = self.grant.to_base64(), self.identity.to_base64()
         mode = self.mode()
+        network = "on" if self.network or mode == "none" else "off"  # with no sandbox nothing is held back
         # The invite is signed too: whose machine this becomes follows from it.
-        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode, self.secret)
+        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode, self.secret, network)
         _post(self.url + wire.API + "/pair", {
             "invite": self.secret, "device": self.me, "name": self.name, "folder": self.folder, "tmp": self.tmp,
-            "mode": mode, "grant": grant, "identity": identity, "nonce": nonce,
+            "mode": mode, "network": network, "grant": grant, "identity": identity, "nonce": nonce,
             "sig": self._request("pair", nonce),
         }, timeout=30)
         _private_write(home() / "server.json", json.dumps(
@@ -774,7 +777,7 @@ class Device:
             argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
                                 hidden=[self.state], writable=not self.read_only,
-                                home_visible=self.read_home, tools=self.shown)
+                                home_visible=self.read_home, tools=self.shown, network=self.network)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
@@ -1022,11 +1025,20 @@ class Device:
         else:
             lines.append("They cannot read the rest of your home folder, except your toolchains"
                          + (" and " + ", ".join(self.named) if self.named else "") + ".")
-        if kind == "sandbox-exec":
-            lines.append("They can read system files and use the network.")
-            lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        lines.append("They can read system files.")
+        if self.network:
+            lines.append("They can use the internet (--network), and reach programs listening on this machine.")
+            if kind == "bwrap" and not sandbox.scopes_sockets():
+                lines.append("On this Linux kernel (before 6.12) that includes other programs' local sockets that "
+                             "are not files; share this machine only with a server you trust.")
+        elif kind == "sandbox-exec":
+            lines.append("They have no internet (start with --network to let them install or download). "
+                         "They can reach programs listening on this machine.")
         else:
-            lines.append("They can read system files. They have no network: no internet, and no services on this machine.")
+            lines.append("They have no network: no internet, and no programs on this machine "
+                         "(start with --network to let them install or download).")
+        if kind == "sandbox-exec":
+            lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
         return lines
 
     def stop(self, *from_signal: Any) -> None:
