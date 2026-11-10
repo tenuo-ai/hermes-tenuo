@@ -293,14 +293,15 @@ What your machine enforces, whatever the server asks:
   home folder is readable except `~/.ssh`, `~/.aws`, cloud and package-manager
   credentials, keychains, browser profiles and shell history, which are never
   readable. System files stay readable.
-- **No internet unless you say so.** Commands cannot reach the internet, so
-  nothing they read can be sent anywhere and nothing can be downloaded and
-  run. Start with `--network` when the work needs it: installing
+- **No internet unless you say so.** Commands cannot open connections to the
+  internet. Start with `--network` when the work needs it: installing
   dependencies, cloning, calling an API. Without it, Linux commands have a
   network of their own with nothing else on it, and macOS commands can reach
-  only programs listening on the machine itself. When an install fails for
-  this reason the agent is told why, and can ask you to restart with
-  `--network`. Hands's own connection to the Hermes server is not affected.
+  only programs listening on the machine itself, which includes a proxy if
+  one is running there. When an install fails for this reason the agent is
+  told why, and can ask you to restart with `--network`. This limits what
+  commands connect to, not what the server learns: the output of every
+  command still goes back to the Hermes server, over Hands's own connection.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -363,7 +364,9 @@ Limits today: macOS and Linux machines only; on macOS commands can reach
 services that listen on the machine itself (`localhost`), with or without
 `--network`; on Linux without `--network` a dev server is reachable only from
 other commands in the same Hands sandbox, and with it commands reach services
-on the machine too; `--network` is all or nothing, not a list of allowed
+on the machine too. Linux `--network` requires enabled Landlock ABI 6 or later
+(available starting with Linux 6.12) to block host abstract sockets; if the
+restriction cannot be installed, commands do not start. `--network` is all or nothing, not a list of allowed
 sites; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process

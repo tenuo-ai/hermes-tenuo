@@ -52,16 +52,31 @@ def _conversation() -> str:
         return _scoped("")
 
 
+NOBODY = "?"  # a message on a chat platform with no one sender; never the owner of a machine
+
+
 def _owner() -> str:
-    """Who is asking, where Hermes knows: the chat platform and the person on it. Empty on
-    a single-user Hermes (the CLI, the desktop app), where every machine is the user's."""
+    """Who is asking, where Hermes knows: the chat platform and the person who sent this
+    message. Hermes names the sender of a message apart from the user a conversation is
+    routed by, which is empty in a shared chat; a Hermes from before it did has only the
+    latter. Empty on a single-user Hermes (the CLI, the desktop app), where every machine
+    is the user's. NOBODY for a message on a chat platform that has no one sender."""
     try:
-        from gateway.session_context import get_session_env
-        person = str(get_session_env("HERMES_SESSION_USER_ID", "") or "")
-        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "")
+        from gateway import session_context as context
     except Exception:
         return ""
-    return f"{platform}:{person}" if person else ""
+    try:
+        import inspect
+        read = context.get_session_env
+        platform = str(read("HERMES_SESSION_PLATFORM", "") or "")
+        names_sender = "actor_id" in inspect.signature(context.set_session_vars).parameters
+        person = str(read("HERMES_SESSION_ACTOR_ID" if names_sender else "HERMES_SESSION_USER_ID", "") or "")
+        if person:
+            return f"{platform}:{person}"
+        messaging = getattr(context, "session_is_messaging_surface", None)
+        return NOBODY if (messaging() if callable(messaging) else platform not in ("", "cli", "desktop")) else ""
+    except Exception:
+        return NOBODY
 
 
 def _remember() -> None:
@@ -138,9 +153,13 @@ def command(raw_args: str = "") -> str:
     if hub is None:
         return ("Hands is off in this Hermes process. Add `hands: {listen: \"0.0.0.0:8765\", "
                 "url: \"http://<this-server>:8765\"}` under plugins.entries.hermes-tenuo and restart.")
+    asking = _owner()
+    if asking == NOBODY and verb in ("invite", "on", "revoke"):
+        return ("Hands cannot tell who sent this message, so nothing was changed. "
+                "Send the command again as a message of its own.")
     try:
         if verb == "invite":
-            line = hub.invite(_owner(), _conversation())
+            line = hub.invite(asking, _conversation())
             local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
             return ("On your machine, in the folder you want to work in, run:\n\n"
                     f"  hermes-tenuo hands up '{line}' --dir . --for 4h\n\n"
@@ -158,7 +177,7 @@ def command(raw_args: str = "") -> str:
                 return ("This Hermes version can't switch one conversation to a machine. Set "
                         "`terminal.backend: hands` for a profile to run all of its commands there.")
             name = words[1] if len(words) > 1 else ""
-            session = hub.pick(name, _owner())
+            session = hub.pick(name, asking)
             with _lock:
                 _wanted[_conversation()] = session.name
                 _remember()
@@ -179,13 +198,13 @@ def command(raw_args: str = "") -> str:
             if len(words) < 2:
                 return "Which machine? /hands revoke <name>"
             return (f"'{words[1]}' is forgotten; it needs a new invite to come back."
-                    if hub.revoke(words[1], _owner()) else f"No machine of yours is called '{words[1]}'.")
+                    if hub.revoke(words[1], asking) else f"No machine of yours is called '{words[1]}'.")
         if verb == "status":
             how = {"read-only": ", read-only", "none": ", no sandbox"}
             net = {"on": ", internet on", "off": ", no internet"}
             rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}{how.get(s.mode, '')}"
                     f"{net.get(s.network, '') if s.mode != 'none' else ''}, "
-                    f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions(_owner())]
+                    f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions(asking)]
             here = _wanted.get(_conversation())
             if here is None:
                 here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
@@ -381,9 +400,11 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
     except HandsUnavailable:
         session = None  # the backend reports the missing device when the call runs
     folder = session.folder if session is not None else ""
-    if session is not None and session.owner and session.owner != _owner():
+    if session is not None and session.owner and session.owner != _owner() and tool_name in ON_DEVICE:
         # The conversation is switched to a machine, but this message is from someone else
         # (a shared chat). It is not run there, and never falls back to the server either.
+        # A tool that only ever runs on the server goes on as usual; anything else that
+        # reaches for the machine is refused where the command would leave the server.
         raise HandsUnavailable(f"hands: '{session.name}' belongs to the person who paired it; this call was not "
                                "run. They can type /hands off to return this conversation to the server")
     if not whole_profile:

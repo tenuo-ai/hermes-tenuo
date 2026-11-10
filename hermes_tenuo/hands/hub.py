@@ -142,7 +142,8 @@ class Hub:
 
     def invite(self, owner: str = "", conversation: Optional[str] = None) -> str:
         """A line that pairs one machine. `owner` is who asked for it: the machine is theirs,
-        and only they can use or forget it. `conversation` is where they asked."""
+        and only they can use or forget it. `conversation` is where they asked; a
+        single-session Hermes has one conversation, whose name is empty."""
         if not self.public_url:
             raise HandsUnavailable("Hands has no address to give out. Set hands.url (or hands.listen) in the "
                                    "hermes-tenuo plugin config and restart Hermes.")
@@ -335,7 +336,7 @@ class Hub:
                 raise Refused("this pairing request was already used: run `hermes-tenuo hands up` again")
             known = self._known()
             secret = str(body.get("invite") or "")
-            until, asked_by, asked_in = self._invites.pop(secret, (0.0, "", "")) if secret else (0.0, "", "")
+            until, asked_by, asked_in = self._invites.pop(secret, (0.0, "", None)) if secret else (0.0, "", None)
             invited = until > time.time()
             if not invited and device not in known:
                 raise Refused("this device isn't paired: run `/hands invite` in a Hermes chat and use the new line")
