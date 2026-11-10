@@ -12,7 +12,7 @@ Each --allow takes a tool name with optional argument constraints:
 
     --allow web_search                      any arguments
     --allow read_file:path=/data            path must stay under /data
-    --allow write_file:path=/tmp/out,mode=w exact mode, path under /tmp/out
+    --allow write_file:path=/tmp/out,content=*  path under /tmp/out, any content
     --allow web_search:query=acme*          glob pattern
     --allow git:action=status|diff|log      one of several values
     --allow checkout:amount=0..4000         number from 0 to 4000, inclusive
@@ -21,6 +21,9 @@ Value rules: ``*`` allows anything; ``a|b`` is a choice; ``MIN..MAX`` is a
 numeric range (both ends required, inclusive); a value containing ``*`` or
 ``?`` is a glob; a value starting with ``/`` or ``~`` is a path prefix
 (Subpath, traversal-safe); anything else must match exactly.
+
+Once a tool has any constraint, a call may only send the arguments named
+here: an unnamed argument is denied, and ``arg=*`` requires the argument.
 
 A range only matches numbers. A tool that sends the amount as a string
 (``"40.00"``) is denied, so declare that argument as a number.
