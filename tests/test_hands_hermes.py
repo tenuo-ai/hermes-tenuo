@@ -102,6 +102,9 @@ SCRIPT = textwrap.dedent('''
     session.owner = "telegram:alice"
     chat._owner = lambda: "telegram:bob"
     tool("stranger", "terminal", {"command": "echo x > stranger.txt"})
+    # A tool that only runs on the server is not theirs to lose.
+    out["stranger_server_tool"] = chat.around_tool(tool_name="web_search", args={}, next_call=lambda: "on the server",
+                                                   task_id="chat-1")
     shell = next(e for e in terminal_tool._active_environments.values() if isinstance(e, HandsEnvironment))
     out["stranger_backend"] = str(shell.execute("echo x > stranger2.txt"))
     chat._owner = lambda: "telegram:alice"
@@ -182,6 +185,7 @@ def _on_the_device(out, project, server_dir):
         assert out[key]["ran_on"] is None, (key, out[key])
     assert not (project / "stranger.txt").exists() and not (project / "stranger2.txt").exists()
     assert "belongs to the person who paired it" in out["stranger_backend"], out["stranger_backend"]
+    assert out["stranger_server_tool"] == "on the server"
     assert out["owner"]["text"].strip() == "mine", out["owner"]
     assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
     assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]

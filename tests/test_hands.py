@@ -1163,6 +1163,111 @@ def test_chat_commands_only_see_your_own_machines(hub, folder, monkeypatch):
     chat._wanted.pop("chat-a", None)
 
 
+def _hermes_says(monkeypatch, names_sender=True, **said):
+    """A stand-in for the part of Hermes that says who sent the current message."""
+    import types
+    context = types.ModuleType("gateway.session_context")
+    context.get_session_env = lambda name, default="": said.get(name, default)
+    if names_sender:
+        context.set_session_vars = lambda platform="", user_id="", actor_id=None: []
+        context.session_is_messaging_surface = lambda: said.get("HERMES_SESSION_PLATFORM", "") not in ("", "cli")
+    else:
+        context.set_session_vars = lambda platform="", user_id="": []
+    gateway = types.ModuleType("gateway")
+    gateway.session_context = context
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", context)
+
+
+def test_the_owner_is_whoever_sent_the_message(monkeypatch):
+    telegram = {"HERMES_SESSION_PLATFORM": "telegram"}
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="42", HERMES_SESSION_ACTOR_ID="42")
+    assert chat._owner() == "telegram:42"
+    # A shared chat is routed by no one user; the sender of each message is still named.
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="", HERMES_SESSION_ACTOR_ID="7")
+    assert chat._owner() == "telegram:7"
+    # A message with no one sender is nobody's, not a single-user session's.
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="42", HERMES_SESSION_ACTOR_ID="")
+    assert chat._owner() == chat.NOBODY
+    _hermes_says(monkeypatch, HERMES_SESSION_PLATFORM="cli")
+    assert chat._owner() == ""
+    _hermes_says(monkeypatch)
+    assert chat._owner() == ""
+    # A Hermes that does not name the sender: the user the conversation is routed by.
+    _hermes_says(monkeypatch, names_sender=False, **telegram, HERMES_SESSION_USER_ID="42")
+    assert chat._owner() == "telegram:42"
+    _hermes_says(monkeypatch, names_sender=False, **telegram)
+    assert chat._owner() == ""
+    monkeypatch.setitem(sys.modules, "gateway", None)   # not inside Hermes at all
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+    assert chat._owner() == ""
+
+
+def test_a_message_with_no_sender_cannot_set_up_or_take_a_machine(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    Device(hub.invite("telegram:alice"), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "_owner", lambda: chat.NOBODY)
+    for words in ("invite", "on laptop", "revoke laptop"):
+        assert "cannot tell who sent" in chat.command(words), words
+    assert not hub._invites and "group" not in chat._wanted and hub.sessions("telegram:alice")
+    assert "laptop" not in chat.command("status")
+    assert hub.sessions(chat.NOBODY) == []
+
+
+def test_the_one_conversation_of_a_cli_starts_using_the_machine(hub, folder):
+    switched = []
+    hub.joined = lambda conversation, name: switched.append((conversation, name))
+    Device(hub.invite("", ""), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert switched == [("", "laptop")]      # its conversation has an empty name, and is still one
+    Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert len(switched) == 1                # asked for by no conversation: nothing to switch
+
+
+def test_a_linked_tool_folder_is_given_to_commands_as_the_folder_it_stands_for(tmp_path, folder, hub, monkeypatch):
+    home = tmp_path / "home"
+    (home / "tools" / "bin").mkdir(parents=True)
+    outside = tmp_path / "opt-tools"
+    outside.mkdir()
+    (home / "bin").symlink_to(home / "tools" / "bin")
+    (home / "opt").symlink_to(outside)
+    (home / ".rustup-real").mkdir()
+    (home / ".rustup").symlink_to(home / ".rustup-real")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RUSTUP_HOME", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / "bin"), str(home / "opt"), "/usr/bin", "/bin"]))
+    real = os.path.realpath
+    hidden = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    parts = hidden._env()["PATH"].split(os.pathsep)
+    assert real(home / "tools" / "bin") in parts and real(outside) in parts
+    assert str(home / "bin") not in parts and str(home / "opt") not in parts and "/usr/bin" in parts
+    assert hidden._env()["RUSTUP_HOME"] == real(home / ".rustup-real")
+    assert real(home / "tools" / "bin") in hidden.shown
+    seen = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, read_home=True)
+    assert str(home / "bin") in seen._env()["PATH"].split(os.pathsep)   # readable as it is: left alone
+
+
+@sandboxed
+def test_a_tool_behind_a_link_in_the_home_folder_still_runs(hub, home_base, monkeypatch):
+    home = home_base / "home"
+    project = home / "work" / "app"
+    for path in (project, home / "tools" / "bin"):
+        path.mkdir(parents=True)
+    tool = home / "tools" / "bin" / "hands-linked-tool"
+    tool.write_text("#!/bin/sh\necho linked-tool-ran\n")
+    tool.chmod(0o755)
+    (home / "bin").symlink_to(home / "tools" / "bin")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TENUO_HANDS_HOME", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / "bin"), os.environ.get("PATH", os.defpath)]))
+    device = up(hub, project)
+    out, code = run(hub, "hands-linked-tool")
+    assert code == 0 and "linked-tool-ran" in out, out
+    device.stop()
+    device.thread.join(30)
+
+
 @pytest.fixture
 def home_base(tmp_path):
     """Where a stand-in home folder can live. On Linux a sandbox has its own /tmp, so a

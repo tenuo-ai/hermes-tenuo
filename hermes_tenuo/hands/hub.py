@@ -126,9 +126,10 @@ class Hub:
 
     # -- what the chat command and the backend call ----------------------------------
 
-    def invite(self, owner: str = "", conversation: str = "") -> str:
+    def invite(self, owner: str = "", conversation: Optional[str] = None) -> str:
         """A line that pairs one machine. `owner` is who asked for it: the machine is theirs,
-        and only they can use or forget it. `conversation` is where they asked."""
+        and only they can use or forget it. `conversation` is where they asked; a
+        single-session Hermes has one conversation, whose name is empty."""
         if not self.public_url:
             raise HandsUnavailable("Hands has no address to give out. Set hands.url (or hands.listen) in the "
                                    "hermes-tenuo plugin config and restart Hermes.")
@@ -305,7 +306,7 @@ class Hub:
                 raise Refused("this pairing request was already used: run `hermes-tenuo hands up` again")
             known = self._known()
             secret = str(body.get("invite") or "")
-            until, asked_by, asked_in = self._invites.pop(secret, (0.0, "", "")) if secret else (0.0, "", "")
+            until, asked_by, asked_in = self._invites.pop(secret, (0.0, "", None)) if secret else (0.0, "", None)
             invited = until > time.time()
             if not invited and device not in known:
                 raise Refused("this device isn't paired: run `/hands invite` in a Hermes chat and use the new line")
@@ -348,7 +349,7 @@ class Hub:
             if old is not None:
                 old.jobs.put(None)  # wake a request the old session still has open
         logger.info("hermes-tenuo hands: device '%s' is up for %s", name, folder)
-        if invited and asked_in and self.joined is not None:
+        if invited and asked_in is not None and self.joined is not None:
             try:
                 self.joined(asked_in, name)  # the conversation that asked for it starts using it
             except Exception as e:  # pairing has succeeded; the switch can still be made by hand

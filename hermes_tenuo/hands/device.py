@@ -331,6 +331,16 @@ def shown_in_home(extra: Any = ()) -> list:
     return found
 
 
+def _real_in_home(path: str) -> str:
+    """`path` with links followed, if it is a folder in the home folder; else as it is."""
+    home_folder = os.path.expanduser("~")
+    if not path or not os.path.isabs(path) or not os.path.isdir(path):
+        return path
+    if not (_within(path, home_folder) or _within(os.path.realpath(path), os.path.realpath(home_folder))):
+        return path
+    return os.path.realpath(path)
+
+
 def _run_quiet(argv: list) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
@@ -664,6 +674,14 @@ class Device:
         for name in TOOL_PATHS:
             if os.environ.get(name):
                 env[name] = os.environ[name]
+        if not self.read_home:
+            # The home folder is hidden except the real folders that hold tools. A name in it
+            # that is a link to one (~/bin -> ~/tools/bin, or -> /opt/tools) would lead
+            # nowhere, so commands get the folder it stands for.
+            env["PATH"] = os.pathsep.join(_real_in_home(part) for part in env["PATH"].split(os.pathsep))
+            for name in (*TOOL_HOMES, *TOOL_PATHS):
+                if name in env:
+                    env[name] = _real_in_home(env[name])
         dirs, sdk = self._tools
         if dirs:
             env["PATH"] = _before_usr_bin(env["PATH"], dirs)
