@@ -77,4 +77,4 @@ jobs:
           TOML
           uv lock --project "$RUNNER_TEMP/ws" --python 3.14
       - name: Load through Hermes's plugin loader
-        run: hermes-agent/.venv/bin/python -m pytest tests/test_upstream_hermes.py tests/test_hands_hermes.py -q -rs --tb=short
+        run: hermes-agent/.venv/bin/python -m pytest tests/test_upstream_hermes.py tests/test_hermes_dispatch.py tests/test_hands_hermes.py -q -rs --tb=short
