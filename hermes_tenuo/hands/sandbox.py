@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from typing import List, Optional
 
@@ -43,7 +44,8 @@ def _mac_profile(folder: str, tmp: str) -> str:
 
 
 def _bwrap(folder: str, tmp: str, command: List[str]) -> List[str]:
-    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+    # /tmp is the device's own temp folder, so Hermes's session files there last between commands.
+    argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--bind", tmp, "/tmp",
             "--bind", folder, folder, "--bind", tmp, tmp, "--die-with-parent"]
     for path in _private_paths():
         if os.path.isdir(path):
@@ -53,12 +55,25 @@ def _bwrap(folder: str, tmp: str, command: List[str]) -> List[str]:
     return argv + ["--chdir", folder, "--", *command]
 
 
+_probe: List[Optional[str]] = []
+
+
 def available() -> Optional[str]:
-    if sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec"):
-        return "sandbox-exec"
-    if sys.platform.startswith("linux") and shutil.which("bwrap"):
-        return "bwrap"
-    return None
+    """Which sandbox works here. bubblewrap is tried once: some systems install it but
+    forbid the user namespaces it needs."""
+    if not _probe:
+        kind = None
+        if sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec"):
+            kind = "sandbox-exec"
+        elif sys.platform.startswith("linux") and shutil.which("bwrap"):
+            try:
+                ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--", "true"], capture_output=True,
+                                    timeout=10).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            kind = "bwrap" if ok else None
+        _probe.append(kind)
+    return _probe[0]
 
 
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False) -> List[str]:

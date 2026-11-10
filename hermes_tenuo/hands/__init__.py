@@ -43,6 +43,9 @@ def register(ctx: Any) -> bool:
     register_provider(HandsProvider())
     ctx.register_command("hands", chat.command, description="Run this conversation's commands on your own machine",
                          args_hint="invite | on [name] | off | status | revoke <name>")
-    ctx.register_hook("pre_tool_call", chat.before_tool)
+    register_middleware = getattr(ctx, "register_middleware", None)
+    if register_middleware is not None:
+        register_middleware("tool_execution", chat.around_tool)
+        chat.can_switch = True
     logger.info("hermes-tenuo hands: listening on %s", listen)
     return True

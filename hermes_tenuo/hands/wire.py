@@ -67,7 +67,10 @@ class Invite:
         secret = parts.path.strip("/")
         if not scheme or not parts.netloc or not secret or not parts.fragment:
             raise ValueError("not a Hands invite (expected hands://host:port/<secret>#<key>)")
-        public_key(parts.fragment)  # refuse a malformed key now, not at the first command
+        try:
+            public_key(parts.fragment)  # refuse a malformed key now, not at the first command
+        except Exception as e:
+            raise ValueError("this Hands invite is damaged: copy the whole line from `/hands invite`") from e
         return cls(f"{scheme}://{parts.netloc}", secret, parts.fragment)
 
     def render(self) -> str:

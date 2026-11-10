@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Hands
+
+- Add Hands: a conversation with a remote Hermes can run its terminal and file
+  tools in one folder on your own machine, for a set time. `/hands invite`,
+  `/hands on|off|status|revoke` in chat; `hermes-tenuo hands up` and
+  `hermes-tenuo hands log` on the machine.
+- The machine signs a warrant for the server's key, checks every command
+  against it before running, and runs it in a sandbox limited to the folder.
+- Off unless `hands.listen` is configured. Works with or without an
+  enforcement warrant.
+
 ## 0.2.0 - 2026-10-31
 
 This minor release adds explicit issuer/holder separation and signed Cloud

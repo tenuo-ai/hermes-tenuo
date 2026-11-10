@@ -223,6 +223,73 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 Runnable versions of the first three live in
 [`examples/`](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
 
+## Hands: let your server's agent use your own machine
+
+Your Hermes runs on a server, with its skills and memory. Your code is on your
+laptop. Hands lets a conversation with that server run its commands and file
+tools in one folder on the laptop, for a time you choose. It needs no
+enforcement warrant and works alone.
+
+**On the server**, give Hands an address and restart Hermes:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      hands:
+        listen: "0.0.0.0:8765"            # where the server listens
+        url: "http://my-server:8765"      # the address your machine can reach
+```
+
+**In a Hermes chat**, type `/hands invite`. It prints one line.
+
+**On your machine**, in the folder you want to work in, run that line:
+
+```bash
+uvx hermes-tenuo hands up 'hands://my-server:8765/…' --dir . --for 4h
+```
+
+**Back in the chat**, type `/hands on`. From then on that conversation's
+`terminal`, `read_file`, `write_file` and the other file tools act on your
+machine. `/hands off` returns it to the server. Other conversations, bots and
+scheduled jobs are not affected.
+
+| Command | Where | What it does |
+|---|---|---|
+| `/hands invite` | chat | Prints the line to run on your machine. Works once, for 10 minutes. |
+| `/hands on [name]` | chat | This conversation runs on that machine. |
+| `/hands off` | chat | This conversation runs on the server again. |
+| `/hands status` | chat | Which machines are up, and for how long. |
+| `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. |
+| `hermes-tenuo hands log` | your machine | What the server ran here. |
+
+What your machine enforces, whatever the server asks:
+
+- **One folder.** Commands run in a sandbox (`sandbox-exec` on macOS,
+  bubblewrap on Linux) that can write only to the shared folder and a private
+  temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials and
+  keychains are unreadable. Other files stay readable, and the network stays on.
+- **A time window.** When it ends, your machine stops answering. Run `hands up`
+  again to continue.
+- **Only your server.** Your machine signs a warrant for the server's key.
+  Every command arrives signed by that key and is checked on your machine
+  before it runs. A changed, replayed or forged command is refused.
+- **A record.** Each command and its exit code is printed where `hands up` runs
+  and kept in `hermes-tenuo hands log`.
+
+The connection goes from your machine to the server, so a laptop behind a home
+router needs no open port. Commands and results are signed but not encrypted
+by Hands: use an `https://` address behind a reverse proxy, or a private
+network such as Tailscale or WireGuard.
+
+Limits today: macOS and Linux machines only; a machine with no sandbox refuses
+to start unless you pass `--no-sandbox`; Hands lives in one Hermes process
+(the gateway), so a separate `hermes` CLI process on the same server does not
+see the machines; `/hands on` needs a Hermes version with tool-execution
+middleware, and on older versions `terminal.backend: hands` switches a whole
+profile.
+
 ## See what your agent actually calls
 
 Every decision is appended to a local JSONL audit log, on by default at
@@ -314,6 +381,8 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME]   # on your own machine
+hermes-tenuo hands log [--last N]
 ```
 
 After a catalog install these commands are not on your path. Prefix each
@@ -341,6 +410,8 @@ variable equivalent.
 | `on_denial` | | `block` (default) or `log`. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
+| `hands.listen` | `TENUO_HANDS_LISTEN` | `host:port` the server listens on for your machines. Unset means Hands is off. |
+| `hands.url` | `TENUO_HANDS_URL` | The address put in invites. Set it when machines reach the server by another name, or over `https://`. |
 
 Keep secret key material in env vars or a secrets manager, never in
 `config.yaml`.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
 
@@ -15,6 +15,7 @@ _lock = threading.Lock()
 _wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one up), set by /hands on
 _applied: Dict[str, str] = {}  # Hermes task id -> conversation it was switched for
 _devices: Dict[str, str] = {}  # Hermes task id -> device name
+can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
 
 HELP = """Hands runs this conversation's commands on your own machine.
   /hands invite        print the line to run on your machine
@@ -50,10 +51,16 @@ def command(raw_args: str = "") -> str:
     try:
         if verb == "invite":
             line = hub.invite()
+            local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
             return ("On your machine, in the folder you want to work in, run:\n\n"
                     f"  hermes-tenuo hands up '{line}' --dir . --for 4h\n\n"
-                    "The line works once and for 10 minutes. Then type /hands on here.")
+                    "The line works once and for 10 minutes. Then type /hands on here."
+                    + ("\n\nNote: that address only works on the server itself. Set hands.url in the "
+                       "plugin config to an address your machine can reach." if local else ""))
         if verb == "on":
+            if not can_switch:
+                return ("This Hermes version can't switch one conversation to a machine. Set "
+                        "`terminal.backend: hands` for a profile to run all of its commands there.")
             name = words[1] if len(words) > 1 else ""
             session = hub.pick(name)
             with _lock:
@@ -96,25 +103,48 @@ def _release(conversation: str) -> None:
         clear_task_env_overrides(task)
 
 
-def before_tool(tool_name: str = "", task_id: str = "", **_: Any) -> Optional[dict]:
-    """pre_tool_call: point this conversation's task at the device before its first command."""
+def _policy_with_hands() -> Dict[str, str]:
+    """This context's complete terminal policy, with the backend set to the device."""
+    import os
+
+    from hermes_tenuo.hands.backend import NAME
+    from tools.terminal_scope import get_terminal_scope
+    current = get_terminal_scope()
+    policy = dict(current) if current is not None else {
+        k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")}
+    policy["TERMINAL_ENV"] = NAME
+    policy.pop("TERMINAL_CWD", None)  # a server path means nothing on the device
+    return policy
+
+
+def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
+                **_: Any) -> Any:
+    """tool_execution middleware: when this conversation is switched on, run this one tool
+    call on the device.
+
+    Hermes picks the terminal backend from a per-context policy, so the switch wraps this
+    call only. The task also gets its own environment slot, so the server's shell for the
+    same conversation is left untouched.
+    """
     conversation = _conversation()
+    task = str(task_id or "default")
     with _lock:
         wanted = _wanted.get(conversation)
-        task = str(task_id or "default")
-        if wanted is None or _applied.get(task) == conversation:
-            return None
+    if wanted is None:
+        return next_call()
+    from tools.terminal_scope import TerminalPolicyRefusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope
+    if isinstance(get_terminal_scope(), TerminalPolicyRefusal):
+        return next_call()  # Hermes is refusing terminal use for this profile; leave that alone
+    with _lock:
+        fresh = _applied.get(task) != conversation
         _applied[task] = conversation
         _devices[task] = wanted
-    try:
+    if fresh:
         from hermes_tenuo.hands.backend import NAME
         from tools.terminal_tool import register_task_env_overrides
         register_task_env_overrides(task, {"env_type": NAME})
-    except Exception as e:
-        logger.warning("hermes-tenuo hands: could not switch this conversation to the device (%s)", e)
-        with _lock:
-            _applied.pop(task, None)
-            _devices.pop(task, None)
-        return {"action": "block", "message": "hands: this Hermes version can't switch a conversation to a device. "
-                                              "Use /hands off, or set terminal.backend: hands for a profile."}
-    return None
+    token = set_terminal_scope(_policy_with_hands())
+    try:
+        return next_call()
+    finally:
+        reset_terminal_scope(token)
