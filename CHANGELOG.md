@@ -32,6 +32,19 @@
   sessions with no warrant of their own are blocked and `delegate_task` is
   refused until Hermes restarts.
 
+### Diagnostics and audit
+
+- `hermes-tenuo doctor` now fails when `trusted_root` is not a public key or
+  did not sign the warrant, when a configured delegation plan does not load,
+  and when `on_denial` is not `block` or `log`.
+- `hermes-tenuo status` says whether an incomplete configuration blocks every
+  call or enforces nothing.
+- `mint --task` accepts `--issuer-key` and `--holder-public-key`, so task
+  warrants can be signed by the issuer the worker already trusts. Task ids
+  that are paths are refused.
+- Calls blocked for a missing signing key, a session without a warrant, or an
+  internal error are written to the audit log as denials.
+
 ## 0.3.0 - 2026-11-09
 
 This minor release hardens every subagent delegation boundary, fails closed on

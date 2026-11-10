@@ -151,14 +151,18 @@ class PluginGuard:
                 tool_call_id=tool_call_id,
             )
         except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
-            return self._internal_error_block(tool_name, "authorization check", exc)
+            block = self._internal_error_block(tool_name, "authorization check", exc)
+            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            return block
 
         if result is not None and not isinstance(result, dict):
-            return self._internal_error_block(
+            block = self._internal_error_block(
                 tool_name,
                 "authorization check",
                 TypeError(f"unexpected result type {type(result).__name__}"),
             )
+            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            return block
 
         if result and result.get("action") == "block":
             try:
@@ -172,6 +176,21 @@ class PluginGuard:
                     type(exc).__name__,
                 )
         return result  # None = allow, {"action": "block", "message": "..."} = block
+
+    def _record_block(
+        self, tool_name: str, args: dict, reason: str, session_id: str, task_id: str, tool_call_id: str,
+    ) -> None:
+        """Best effort: keep the audit log from showing this blocked call as allowed."""
+        try:
+            # Attribute a sessionless call the way the post hook will, so the
+            # two records share a session and the decision can be found again.
+            session_id, _ = self._guard._attribute_session(session_id, task_id)
+            self._guard._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+            self._guard._remember_decision(
+                tool_call_id, False, reason, (tool_name, args, session_id, task_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - recording must not undo the denial
+            logger.error("hermes-tenuo: could not record the denial for %s (%s)", tool_name, type(exc).__name__)
 
     @staticmethod
     def _internal_error_block(tool_name: str, stage: str, exc: Exception) -> dict:

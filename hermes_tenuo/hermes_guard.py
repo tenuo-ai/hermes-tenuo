@@ -24,6 +24,7 @@ Invariants:
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import os
@@ -363,6 +364,10 @@ class HermesGuard:
         # Stored by pre_tool_call so post_tool_call can record the accurate outcome.
         self._pre_decisions: Dict[str, Tuple[bool, str]] = {}
         self._pre_decisions_lock = threading.Lock()
+        # The same, for calls Hermes sends without a tool-call id: keyed by the
+        # call itself. Each entry is (thread id, allowed, reason), one per
+        # invocation in flight, since identical calls may run concurrently.
+        self._unkeyed_decisions: "OrderedDict[str, deque]" = OrderedDict()
 
         # Connect to control plane (auto-discovers from env if not already connected);
         # adds signed Cloud receipts when the optional SDK is installed.
@@ -1036,15 +1041,11 @@ class HermesGuard:
         """
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
-            self._emit_audit(tool_name, args, False, unattributed, session_id, task_id, tool_call_id)
-            self._remember_decision(tool_call_id, False, unattributed)
-            return {"action": "block", "message": unattributed}
+            return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
         reason = _marker_reason(warrant)
         if reason is not None:
-            self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
-            self._remember_decision(tool_call_id, False, reason)
-            return {"action": "block", "message": reason}
+            return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
 
         # Ensure primary session is tracked even before child sessions appear
         if session_id and self._primary_session_id is None:
@@ -1052,19 +1053,13 @@ class HermesGuard:
                 if self._primary_session_id is None:
                     self._primary_session_id = session_id
 
-        # No warrant on this call. An unconfigured single-agent guard is a
-        # documented no-op. A gateway that already called set_session_warrant
-        # is configured: unknown sessions fail closed unless the operator
-        # sets require_session_warrant=False.
+        reason = self._denial_before_enforcement(warrant, signing_key)
+        if reason is not None:
+            return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
+
+        # No warrant on this call: an unconfigured single-agent guard is a
+        # documented no-op.
         if warrant is None:
-            if self._session_warrant_required:
-                return {
-                    "action": "block",
-                    "message": (
-                        "tenuo: no warrant for this session — "
-                        "require_session_warrant is on"
-                    ),
-                }
             if not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
@@ -1073,17 +1068,41 @@ class HermesGuard:
                 )
             return None
 
-        # Enforcement requires a signing key for Proof-of-Possession.
-        # Hard block: a misconfigured demo that silently passes through
-        # defeats the point of running Tenuo at all.
-        if signing_key is None:
-            return {
-                "action": "block",
-                "message": "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set",
-            }
-
         result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
+
+    def _denial_before_enforcement(self, warrant: Any, signing_key: Optional[Any]) -> Optional[str]:
+        """Why a call is blocked before the warrant is checked, or None if it is not.
+
+        Shared by the pre and post hooks so a call blocked here is never
+        recorded as allowed.
+        """
+        reason = _marker_reason(warrant)
+        if reason is not None:
+            return reason
+        if warrant is None:
+            # A gateway that already called set_session_warrant is configured:
+            # unknown sessions fail closed unless the operator sets
+            # require_session_warrant=False.
+            if self._session_warrant_required:
+                return "tenuo: no warrant for this session — require_session_warrant is on"
+            return None
+        if signing_key is None:
+            # Enforcement requires a signing key for Proof-of-Possession. Hard
+            # block: a misconfigured install that silently passes through
+            # defeats the point of running Tenuo at all.
+            return "tenuo: TENUO_SIGNING_KEY not configured — all calls blocked until signing key is set"
+        return None
+
+    def _block(
+        self, tool_name: str, args: Dict[str, Any], reason: str,
+        session_id: str, task_id: str, tool_call_id: str,
+    ) -> Dict[str, Any]:
+        """Record a denial and return the block response for it."""
+        self._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+        # Hermes may fire post_tool_call for a blocked call; it must carry this decision.
+        self._remember_decision(tool_call_id, False, reason, (tool_name, args, session_id, task_id))
+        return {"action": "block", "message": reason}
 
     def _enforce(
         self,
@@ -1139,8 +1158,9 @@ class HermesGuard:
             # *policy* denials from the Rust core (result.allowed=False). Internal
             # failures (bad warrant, expired key, crypto error) should never silently
             # allow execution, regardless of the on_denial setting.
-            self._remember_decision(tool_call_id, False, f"Authorization error: {exc}")
-            return {"action": "block", "message": f"Authorization error: {exc}"}, False
+            return self._block(
+                tool_name, args, f"Authorization error: {exc}", session_id, task_id, tool_call_id,
+            ), False
 
         # Grant validation is part of the effective delegation decision. Do it
         # before publishing any ALLOW, and never issue authority for log-only denials.
@@ -1171,26 +1191,98 @@ class HermesGuard:
             reason = _format_denial_reason(result, tool_name)
             # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
             # so the post record must carry this decision, not "post-dispatch".
-            self._remember_decision(tool_call_id, False, reason)
+            self._remember_decision(tool_call_id, False, reason, (tool_name, args, session_id, task_id))
             if self._on_denial == "log" and not grant_rejected and not _is_delegation_spawn(tool_name, args):
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 return None, False
             return {"action": "block", "message": reason}, False
 
-        self._remember_decision(tool_call_id, True, "")
+        self._remember_decision(tool_call_id, True, "", (tool_name, args, session_id, task_id))
         return None, True
 
     _MAX_PENDING_DECISIONS = 2048
 
-    def _remember_decision(self, tool_call_id: str, allowed: bool, reason: str) -> None:
+    @staticmethod
+    def _call_key(call: Tuple[str, Dict[str, Any], str, str]) -> str:
+        """Identify a call that has no tool-call id by what it is."""
+        tool_name, args, session_id, task_id = call
+        try:
+            digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()
+        except Exception:
+            digest = ""
+        return "\0".join((session_id, task_id, tool_name, digest))
+
+    def _remember_decision(
+        self, tool_call_id: str, allowed: bool, reason: str,
+        call: Optional[Tuple[str, Dict[str, Any], str, str]] = None,
+    ) -> None:
         """Stash the pre-hook decision for post_tool_call. Bounded: an older Hermes
-        that never fires post for a blocked call must not leak memory."""
-        if not tool_call_id:
-            return
+        that never fires post for a blocked call must not leak memory.
+
+        *call* is ``(tool_name, args, session_id, task_id)``; it stands in for
+        the id when Hermes sends none, so the post record still carries this
+        decision instead of being logged as an unobserved call.
+        """
         with self._pre_decisions_lock:
-            self._pre_decisions[tool_call_id] = (allowed, reason)
-            while len(self._pre_decisions) > self._MAX_PENDING_DECISIONS:
-                self._pre_decisions.pop(next(iter(self._pre_decisions)))
+            if tool_call_id:
+                self._pre_decisions[tool_call_id] = (allowed, reason)
+                while len(self._pre_decisions) > self._MAX_PENDING_DECISIONS:
+                    self._pre_decisions.pop(next(iter(self._pre_decisions)))
+            elif call is not None:
+                key = self._call_key(call)
+                pending = self._unkeyed_decisions.setdefault(key, deque(maxlen=64))
+                # One thread runs one invocation at a time. An earlier entry
+                # from this thread is the same invocation checked again (hook,
+                # then registry) or one whose post never came: replace it.
+                thread_id = threading.get_ident()
+                for index in range(len(pending) - 1, -1, -1):
+                    if pending[index][0] == thread_id:
+                        del pending[index]
+                        break
+                pending.append((thread_id, allowed, reason))
+                self._unkeyed_decisions.move_to_end(key)
+                while len(self._unkeyed_decisions) > self._MAX_PENDING_DECISIONS:
+                    self._unkeyed_decisions.popitem(last=False)
+
+    def _take_decision(
+        self, tool_call_id: str, call: Tuple[str, Dict[str, Any], str, str], blocked: bool = False,
+    ) -> Optional[Tuple[bool, str]]:
+        """The pre-hook decision for this post event, removed from the pending set.
+
+        Without a tool-call id the match is by the call itself: this thread's
+        own decision, else the oldest. A call Hermes reports as *blocked* did
+        not run, so it only ever takes a denial (this thread's, else the
+        newest); with none pending it takes nothing, and the caller records
+        the block.
+        """
+        with self._pre_decisions_lock:
+            if tool_call_id:
+                return self._pre_decisions.pop(tool_call_id, None)
+            key = self._call_key(call)
+            pending = self._unkeyed_decisions.get(key)
+            if not pending:
+                return None
+            newest_first = range(len(pending) - 1, -1, -1)
+            thread_id = threading.get_ident()
+            own = next((i for i in newest_first if pending[i][0] == thread_id), None)
+            decision = None
+            if not blocked:
+                index = own if own is not None else 0
+            elif own is not None and not pending[own][1]:
+                index = own
+            else:
+                index = next((i for i in newest_first if not pending[i][1]), None)
+            if index is not None:
+                _, allowed, reason = pending[index]
+                decision = (allowed, reason)
+                del pending[index]
+            elif own is not None:
+                # This thread allowed the call and something else blocked it.
+                # Drop the entry so it cannot be taken for a later call.
+                del pending[own]
+            if not pending:
+                del self._unkeyed_decisions[key]
+            return decision
 
     # ------------------------------------------------------------------
     # Hook: post_tool_call
@@ -1212,11 +1304,10 @@ class HermesGuard:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
-        pre = None
-        if tool_call_id:
-            with self._pre_decisions_lock:
-                pre = self._pre_decisions.pop(tool_call_id, None)
         session_id, unattributed = self._attribute_session(session_id, task_id)
+        pre = self._take_decision(
+            tool_call_id, (tool_name, args, session_id, task_id), blocked=status == "blocked",
+        )
         if pre is None and unattributed is not None:
             self._emit_audit(
                 tool_name, args, False, unattributed,
@@ -1229,10 +1320,17 @@ class HermesGuard:
             allowed, reason = pre
             self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)
             return
-        warrant, _ = self._resolve_warrant(session_id)
-        marker_reason = _marker_reason(warrant)
-        if marker_reason is not None:
-            self._emit_audit(tool_name, args, False, marker_reason,
+        # No pre decision to go by. Hermes reports a call that was blocked
+        # before its handler; that is never an allowed call.
+        if status == "blocked":
+            self._emit_audit(tool_name, args, False, "tenuo: blocked before the tool ran",
+                             session_id, task_id, tool_call_id, duration_ms)
+            return
+        # A call the pre hook would have blocked outright is still a denial.
+        warrant, signing_key = self._resolve_warrant(session_id)
+        denial = self._denial_before_enforcement(warrant, signing_key)
+        if denial is not None:
+            self._emit_audit(tool_name, args, False, denial,
                              session_id, task_id, tool_call_id, duration_ms)
             return
 
