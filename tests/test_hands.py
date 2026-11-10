@@ -1956,8 +1956,11 @@ def test_extra_read_does_not_expose_a_live_host_socket(tmp_path, monkeypatch):
         listener.listen(1)
         script = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({address!r})"
         for exposed in (runtime, tmp_path):
-            argv = sandbox.wrap(str(project), str(temp), [sys.executable, "-I", "-S", "-c", script],
-                                home_visible=False, tools=[str(exposed)])
+            python = os.path.realpath(sys.executable)
+            readable = sorted({os.path.realpath(path) for path in
+                               (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
+            argv = sandbox.wrap(str(project), str(temp), [python, "-I", "-S", "-c", script],
+                                home_visible=False, tools=[str(exposed)], readable=readable)
             result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
             assert result.returncode != 0 and "FileNotFoundError" in result.stderr, result.stderr
 
