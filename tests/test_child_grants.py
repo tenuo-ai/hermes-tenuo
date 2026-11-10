@@ -308,6 +308,26 @@ def test_marker_overflow_fails_closed_without_a_config_warrant(keys):
     assert _allowed(g, "web_search", {"query": "q"}, "user-3")
 
 
+def test_marker_overflow_blocks_the_staged_grant_fallback(keys):
+    # A Hermes build that never fires subagent_start: a new session id claims
+    # the next staged grant. After overflow, an untracked session must not.
+    root, agent = keys
+    g = _guard(keys)
+    g._MAX_DENIED_SESSIONS = 2
+    g.set_session_warrant("own", _parent(root, agent), agent)
+    assert _allowed(g, "web_search", {"query": "q"}, "own")  # becomes the primary session
+    for n in range(3):
+        g.set_session_warrant(f"user-{n}", _web_only(keys), agent)
+        g.clear_session_warrant(f"user-{n}")
+    assert g._denied_sessions_saturated and "user-0" not in g._session_warrants
+    assert g.pre_tool_call("delegate_task", {"goal": "g"}, session_id="own", tool_call_id="d") is None
+    assert not g._saw_subagent_start and len(g._planned_children["own"]) == 1
+    blocked = g.pre_tool_call("web_search", {"query": "q"}, session_id="user-0")
+    assert blocked and "holds no authority" in blocked["message"]
+    assert len(g._planned_children["own"]) == 1  # the grant was not consumed
+    assert "user-0" not in g._session_warrants
+
+
 def test_marker_overflow_leaves_an_unconfigured_guard_a_no_op():
     g = HermesGuard()
     g._denied_sessions_saturated = True

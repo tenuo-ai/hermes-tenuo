@@ -488,11 +488,24 @@ class HermesGuard:
            the first session_id seen is the primary; all subsequent different IDs are
            assumed children and claim the next pending warrant in FIFO order.
         3. Static warrant from plugin config (fallback for primary session)
+
+        Steps 2 and 3 are skipped once the denied-session record has overflowed.
         """
         with self._session_lock:
             entry = self._session_warrants.get(session_id)
         if entry is not None:
             return entry
+
+        # Once a marker has been evicted, a session with no warrant of its own
+        # may be one that was denied. It gets nothing: not a staged child grant
+        # below, and not the config warrant. This applies with or without a
+        # config warrant, since where unknown sessions pass through
+        # (require_session_warrant off) an evicted session would too. A guard
+        # that never used a warrant cannot be saturated and stays a no-op.
+        if self._denied_sessions_saturated and (
+            self._static_warrant is not None or self._uses_session_warrants
+        ):
+            return _UNTRACKED, None
 
         if self._planned_children and not self._saw_subagent_start:
             # Fallback for a Hermes build that does not fire subagent_start:
@@ -512,13 +525,6 @@ class HermesGuard:
                 self._attach_child(session_id, grant)
                 return grant.warrant, grant.key
 
-        # Applies with or without a config warrant: where unknown sessions pass
-        # through (require_session_warrant off), an evicted session would too.
-        # A guard that never used a warrant cannot be saturated and stays a no-op.
-        if self._denied_sessions_saturated and (
-            self._static_warrant is not None or self._uses_session_warrants
-        ):
-            return _UNTRACKED, None
         return self._static_warrant, self._static_signing_key
 
     # ------------------------------------------------------------------
