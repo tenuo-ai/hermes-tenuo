@@ -53,12 +53,12 @@ def private_host(host: str) -> bool:
     """True if `host` is this machine or on a private network: every address it has is a
     loopback, private, link-local or shared-space one. Commands and results are signed but
     not encrypted, so a plain connection is only for such a network. A name that cannot be
-    looked up is not judged here; the connection itself will fail and say so."""
+    looked up here is not private: something else (a proxy) may still reach it."""
     host = host.strip("[]")
     try:
         found = {info[4][0].split("%")[0] for info in socket.getaddrinfo(host, None)}
     except (OSError, UnicodeError):
-        return True
+        return False
     for text in found:
         try:
             address = ipaddress.ip_address(text)
@@ -72,10 +72,21 @@ def private_host(host: str) -> bool:
     return bool(found)
 
 
+def _through_proxy(host: str) -> bool:
+    """True if this machine would send a plain request for `host` through an HTTP proxy,
+    which then sees it whatever network the host is on."""
+    import urllib.request
+    try:
+        return bool(urllib.request.getproxies().get("http")) and not urllib.request.proxy_bypass(host)
+    except Exception:
+        return True
+
+
 def plain_and_public(url: str) -> bool:
     """True for an address that would carry commands unencrypted across the internet."""
     parts = urlsplit(url)
-    return parts.scheme == "http" and not private_host(parts.hostname or "")
+    host = parts.hostname or ""
+    return parts.scheme == "http" and (not private_host(host) or _through_proxy(host))
 
 
 def b64(data: bytes) -> str:

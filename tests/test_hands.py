@@ -1144,6 +1144,68 @@ def test_folders_shown_in_the_home_folder(tmp_path, monkeypatch):
             shown_in_home([bad])
 
 
+def test_swapping_the_invite_in_a_pairing_request_is_refused(hub, folder, monkeypatch):
+    """Whose machine it becomes follows from the invite, so the device signs the invite too."""
+    sent = {}
+    real = device_module._post
+    monkeypatch.setattr(device_module, "_post", lambda url, body, timeout: sent.update(body) or real(url, body, timeout))
+    Device(hub.invite("telegram:alice", "chat-a"), str(folder), 60, allow_unsandboxed=True).pair()
+    assert hub.sessions("telegram:alice")
+    hub._paired.clear()
+    taken = []
+    hub.joined = lambda conversation, name: taken.append(conversation)
+    other = wire.Invite.parse(hub.invite("telegram:mallory", "chat-m")).secret
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, invite=other))
+    assert hub.sessions("telegram:alice") and not hub.sessions("telegram:mallory") and not taken
+
+
+def test_a_protected_folder_is_never_shown(tmp_path, monkeypatch):
+    from hermes_tenuo.hands.device import shown_in_home
+    home = tmp_path / "home"
+    for sub in (".ssh/keys", ".aws", "notes", ".cargo/bin"):
+        (home / sub).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TENUO_HANDS_HOME", str(home / ".hermes-tenuo" / "hands"))
+    assert sandbox.protected(str(home / ".ssh")) and sandbox.protected(str(home / ".ssh" / "keys"))
+    assert not sandbox.protected(str(home / "notes")) and not sandbox.protected(str(home))
+    for bad in (home / ".ssh", home / ".ssh" / "keys", home / ".aws"):
+        with pytest.raises(HandsError, match="never shown"):
+            shown_in_home([str(bad)])
+    # Even handed one directly (a PATH entry inside a protected folder), the sandbox leaves it hidden.
+    monkeypatch.setattr(sandbox, "_probe", ["bwrap"])
+    real = os.path.realpath
+    argv = sandbox.wrap(str(home / "notes"), str(tmp_path / "t"), ["true"], home_visible=False,
+                        tools=[real(home / ".ssh" / "keys"), real(home / ".cargo" / "bin")])
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--ro-bind"]
+    assert real(home / ".cargo" / "bin") in binds and real(home / ".ssh" / "keys") not in binds
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])
+    profile = sandbox.wrap(str(home / "notes"), str(tmp_path / "t"), ["true"], home_visible=False,
+                           tools=[real(home / ".ssh" / "keys"), real(home / ".cargo" / "bin")])[2]
+    allowed = [line for line in profile.splitlines() if line.startswith("(allow file-read*") and ".cargo" in line]
+    assert allowed and ".ssh" not in allowed[0]
+
+
+def test_a_name_that_cannot_be_looked_up_or_a_proxy_is_not_private(monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    assert not wire.private_host("no-such-host.invalid")
+    assert wire.plain_and_public("http://no-such-host.invalid:8765")
+    assert not wire.plain_and_public("http://10.0.0.2:8765")
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": "http://proxy.example:3128"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    assert wire.plain_and_public("http://10.0.0.2:8765")      # the proxy would see it
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: True)
+    assert not wire.plain_and_public("http://10.0.0.2:8765")
+    assert not wire.plain_and_public("https://no-such-host.invalid")
+
+
+def test_process_results_are_not_given_a_machine():
+    result = json.dumps({"status": "running", "output": "x"})
+    for name in ("process", "process_manage"):
+        assert chat._marked(result, name, _Where()) == result
+
+
 def test_stopping_does_not_wait_out_a_retry_when_the_server_is_gone(hub, folder, monkeypatch):
     monkeypatch.setattr(wire, "POLL_SECONDS", 1)
     device = up(hub, folder, allow_unsandboxed=True)

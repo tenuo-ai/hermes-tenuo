@@ -226,6 +226,13 @@ def available() -> Optional[str]:
     return _probe[0]
 
 
+def protected(path: str, hidden: Sequence[str] = ()) -> bool:
+    """True if `path` is one of the protected paths or inside one (or inside `hidden`)."""
+    real = os.path.realpath(path)
+    return any(real == p or real.startswith(p.rstrip(os.sep) + os.sep)
+               for p in [os.path.realpath(q) for q in (*_private_paths(), *hidden)])
+
+
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
          shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
          writable: bool = True, home_visible: bool = True, tools: Sequence[str] = ()) -> List[str]:
@@ -236,6 +243,9 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
     `writable` off the command can read `folder` and change only its temp folder. With
     `home_visible` off the home folder cannot be read at all, except `tools`: real folders
     in it that hold toolchains, or that the person chose to show."""
+    # A folder to show that is itself protected, or inside something protected, is not
+    # shown: putting it back would uncover exactly what is hidden on purpose.
+    tools = [path for path in tools if not protected(path, hidden)]
     kind = available()
     if kind == "sandbox-exec":
         return ["/usr/bin/sandbox-exec", "-p",

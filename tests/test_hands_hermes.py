@@ -95,6 +95,18 @@ SCRIPT = textwrap.dedent('''
     tool("down", "terminal", {"command": "pwd"})
     device, serving = up(device_dir)
     tool("back", "terminal", {"command": "pwd"})
+    # Someone else's machine: neither the tool call nor the backend itself runs a stranger's command.
+    from hermes_tenuo.hands.backend import HandsEnvironment
+    from tools import terminal_tool
+    session, asking = get_hub().pick("laptop"), chat._owner
+    session.owner = "telegram:alice"
+    chat._owner = lambda: "telegram:bob"
+    tool("stranger", "terminal", {"command": "echo x > stranger.txt"})
+    shell = next(e for e in terminal_tool._active_environments.values() if isinstance(e, HandsEnvironment))
+    out["stranger_backend"] = str(shell.execute("echo x > stranger2.txt"))
+    chat._owner = lambda: "telegram:alice"
+    tool("owner", "terminal", {"command": "echo mine"})
+    chat._owner, session.owner = asking, ""
     if not whole_profile:
         out["status"] = chat.command("status")
         # A second machine: switching sends this conversation's commands there, and back.
@@ -166,8 +178,11 @@ def _on_the_device(out, project, server_dir):
     # Each result says which machine it ran on; a refusal there also says what it shares.
     for key in ("first", "pwd", "read", "write", "escape"):
         assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
-    for key in ("bg_poll", "bg_poll_named"):  # the process tool, under either of its names
-        assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"], (key, out[key])
+    for key in ("bg_poll", "bg_poll_named"):  # the process tool reports on an earlier process: not marked
+        assert out[key]["ran_on"] is None, (key, out[key])
+    assert not (project / "stranger.txt").exists() and not (project / "stranger2.txt").exists()
+    assert "belongs to the person who paired it" in out["stranger_backend"], out["stranger_backend"]
+    assert out["owner"]["text"].strip() == "mine", out["owner"]
     assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
     assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
     assert out["pwd"]["note"] is None

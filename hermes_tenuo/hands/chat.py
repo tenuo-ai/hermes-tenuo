@@ -241,8 +241,10 @@ def _inside(path: Any, folder: str) -> bool:
 
 
 # The tools whose work happens on the device once a conversation is switched. Others
-# (search, memory, delegation) still run on the server and are not marked.
-ON_DEVICE = {"terminal", "process", "process_manage", "read_file", "write_file", "patch", "search_files"}
+# (search, memory, delegation) still run on the server and are not marked. Neither is the
+# process tool: it reports on a process started earlier, which may have been started on the
+# server or on another machine, and naming the current one would be a guess.
+ON_DEVICE = {"terminal", "read_file", "write_file", "patch", "search_files"}
 
 
 # How a sandbox's refusal reads in a command's output: macOS denies the call, Linux shows

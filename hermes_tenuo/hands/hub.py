@@ -278,9 +278,10 @@ class Hub:
             raise
         except Exception as e:
             raise Refused(f"this pairing request isn't valid ({type(e).__name__})") from e
-        # How the device runs commands is part of what it signs, when it says so.
+        # How the device runs commands, and the invite it uses, are part of what it signs:
+        # the first is repeated to the agent, and the second decides whose machine it is.
         mode = str(body.get("mode") or "")
-        signed = (grant.to_base64(), folder, name, tmp, mode) if "mode" in body else (grant.to_base64(), folder, name, tmp)
+        signed = (grant.to_base64(), folder, name, tmp, mode, str(body.get("invite") or ""))
         if nonce != wire.digest(*signed) or mode not in ("", "sandboxed", "read-only", "none"):
             raise Refused("this pairing request doesn't match what was signed")
         if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):

@@ -83,10 +83,19 @@ class HandsEnvironment(BaseEnvironment):
                   stdin_data: Optional[str] = None):
         shown = self._plain(cmd_string)
         stopped = threading.Event()  # set when Hermes interrupts the call
+        # Who is asking is known here, in the call's own context, not in the thread that
+        # waits for the device. This is checked again where the command leaves the server,
+        # so it holds on a Hermes that cannot wrap tool calls and for a whole-profile backend.
+        from hermes_tenuo.hands import chat
+        asking = chat._owner()
 
         def run() -> tuple:
             try:
-                return self._hub.run(self._hub.pick(self._device), cmd_string, login=login, timeout=timeout,
+                session = self._hub.pick(self._device)
+                if session.owner and session.owner != asking:
+                    return (f"hands: '{session.name}' belongs to the person who paired it; this command was "
+                            "not run\n"), 126
+                return self._hub.run(session, cmd_string, login=login, timeout=timeout,
                                      stdin=stdin_data, shown=shown, cancelled=stopped)
             except HandsUnavailable as e:
                 return f"{e}\n", 127

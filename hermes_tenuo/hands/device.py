@@ -205,8 +205,9 @@ class HandsError(RuntimeError):
     pass
 
 
-UNENCRYPTED = ("{url} is not encrypted and is not on a private network: anyone between this machine and the "
-               "server could read the commands and their output. Put HTTPS in front of the server (its invite "
+UNENCRYPTED = ("{url} is not encrypted and is not known to be on a private network (its address is public, its "
+               "name cannot be looked up here, or requests go through a proxy): anyone between this machine and "
+               "the server could read the commands and their output. Put HTTPS in front of the server (its invite "
                "then starts with hands+https://), or reach it over a private network such as Tailscale or "
                "WireGuard. To connect anyway, pass --plain-http.")
 
@@ -323,6 +324,8 @@ def shown_in_home(extra: Any = ()) -> list:
             raise HandsError(f"--read {path}: not a folder")
         if real in ("/", real_home):
             raise HandsError(f"--read {path}: name a folder inside your home folder, or use --read-home for all of it")
+        if sandbox.protected(real, [os.path.realpath(home())]):
+            raise HandsError(f"--read {path}: that folder holds keys or credentials and is never shown to commands")
         if real not in found:
             found.append(real)
     return found
@@ -555,7 +558,8 @@ class Device:
     def pair(self) -> None:
         grant, identity = self.grant.to_base64(), self.identity.to_base64()
         mode = self.mode()
-        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode)
+        # The invite is signed too: whose machine this becomes follows from it.
+        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode, self.secret)
         _post(self.url + wire.API + "/pair", {
             "invite": self.secret, "device": self.me, "name": self.name, "folder": self.folder, "tmp": self.tmp,
             "mode": mode, "grant": grant, "identity": identity, "nonce": nonce,
