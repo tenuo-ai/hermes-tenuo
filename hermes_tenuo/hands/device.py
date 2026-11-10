@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,28 @@ def say(text: str) -> None:
 
 def _within(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def _read_plain(path: str, limit: int = 1024 * 1024) -> Optional[str]:
+    """The text of `path` if it is an ordinary file with one name, "" if nothing is there,
+    None for anything else (a link, a device, a file too large to be a profile). The file is
+    opened without following a link and checked through the open handle, so it cannot be
+    swapped for a link in between."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _run_quiet(argv: list) -> str:
@@ -458,8 +481,12 @@ class Device:
                 'case "$p" in *":/usr/bin:"*) p="${p/:\\/usr\\/bin:/:$d:/usr/bin:}";; *) p="$p$d:";; esac',
                 'p="${p#:}"; PATH="${p%:}"; export PATH; unset p d', ""]))
             source = f'[ -f "$HOME/{PROFILE}" ] && . "$HOME/{PROFILE}"\n'
+            # The stand-in home belongs to the commands: whatever is there under this name
+            # is read only if it is a plain file of its own, never through a link.
             profile = Path(tmp) / ".bash_profile"
-            had = profile.read_text() if profile.is_file() else ""
+            had = _read_plain(str(profile))
+            if had is None:
+                had = ""  # a link or something else: it is replaced, not followed
             if source not in had:
                 _private_write(profile, had + ("" if had.endswith("\n") or not had else "\n") + source)
 

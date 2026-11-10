@@ -1001,3 +1001,22 @@ def test_developer_tools_never_come_before_the_persons_own_path():
     placed = device_module._before_usr_bin("/opt/mine/bin:/usr/local/bin:/usr/bin:/bin", ["/dev/tools"])
     assert placed == "/opt/mine/bin:/usr/local/bin:/dev/tools:/usr/bin:/bin"
     assert device_module._before_usr_bin("/opt/mine/bin", ["/dev/tools"]) == "/opt/mine/bin:/dev/tools"
+
+
+def test_profile_left_as_a_link_is_replaced_not_followed(hub, folder, tmp_path, monkeypatch):
+    from hermes_tenuo.hands import device as device_module
+    monkeypatch.setattr(device_module, "_developer_tools", lambda: (["/dev/tools"], ""))
+    first = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    secret = Path(first.state) / "device.key"
+    profile = Path(first.tmp) / ".bash_profile"
+    profile.unlink()
+    profile.symlink_to(secret)  # what a command could leave behind
+    Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)  # `hands up` again
+    assert not profile.is_symlink() and secret.read_text().strip() not in profile.read_text()
+    assert device_module.PROFILE in profile.read_text()
+    # A profile a command wrote as an ordinary file is kept, with the one line added.
+    profile.write_text("export MINE=1\n")
+    Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    assert profile.read_text().startswith("export MINE=1\n") and device_module.PROFILE in profile.read_text()
+    assert device_module._read_plain(str(tmp_path / "nothing-here")) == ""
+    assert device_module._read_plain(str(tmp_path)) is None
