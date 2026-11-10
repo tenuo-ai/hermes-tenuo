@@ -23,6 +23,19 @@ from hermes_tenuo.hands.hub import HandsUnavailable, Hub, Refused
 sandboxed = pytest.mark.skipif(sandbox.available() is None, reason="needs sandbox-exec or bubblewrap")
 
 
+_PROXY_ENV = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_proxy(monkeypatch):
+    """Tests talk to servers directly, whatever proxy the caller's environment or system
+    names. A test about proxies sets its own."""
+    for name in _PROXY_ENV:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+
+
 @pytest.fixture
 def hub(tmp_path):
     h = Hub(state_dir=tmp_path / "server-state")
@@ -1278,6 +1291,17 @@ def test_a_name_that_cannot_be_looked_up_or_a_proxy_is_not_private(monkeypatch):
     monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: True)
     assert not wire.plain_and_public("http://10.0.0.2:8765")
     assert not wire.plain_and_public("https://no-such-host.invalid")
+
+
+def test_a_proxy_exception_is_matched_the_way_the_request_matches_it(monkeypatch):
+    """The request asks about the address as the URL writes it, port and brackets included."""
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
+    for bypass, direct in (("::1", False), ("[::1]", True), ("[::1]:8765", True), ("[::1]:9", False)):
+        monkeypatch.setenv("no_proxy", bypass)
+        assert wire.plain_and_public("http://[::1]:8765") is not direct, bypass
+    for bypass, direct in (("127.0.0.1", True), ("127.0.0.1:8765", True), ("127.0.0.1:9", False), ("", False)):
+        monkeypatch.setenv("no_proxy", bypass)
+        assert wire.plain_and_public("http://127.0.0.1:8765") is not direct, bypass
 
 
 def test_process_results_are_not_given_a_machine():

@@ -72,12 +72,14 @@ def private_host(host: str) -> bool:
     return bool(found)
 
 
-def _through_proxy(host: str) -> bool:
-    """True if this machine would send a plain request for `host` through an HTTP proxy,
-    which then sees it whatever network the host is on."""
+def _through_proxy(authority: str) -> bool:
+    """True if this machine would send a plain request for `authority` through an HTTP proxy,
+    which then sees it whatever network the host is on. `authority` is the host as the URL
+    writes it, with its port and an IPv6 address's brackets: the form the proxy rules of
+    the request itself are matched against."""
     import urllib.request
     try:
-        return bool(urllib.request.getproxies().get("http")) and not urllib.request.proxy_bypass(host)
+        return bool(urllib.request.getproxies().get("http")) and not urllib.request.proxy_bypass(authority)
     except Exception:
         return True
 
@@ -86,7 +88,7 @@ def plain_and_public(url: str) -> bool:
     """True for an address that would carry commands unencrypted across the internet."""
     parts = urlsplit(url)
     host = parts.hostname or ""
-    return parts.scheme == "http" and (not private_host(host) or _through_proxy(host))
+    return parts.scheme == "http" and (not private_host(host) or _through_proxy(parts.netloc))
 
 
 def b64(data: bytes) -> str:
