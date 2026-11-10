@@ -274,7 +274,9 @@ What your machine enforces, whatever the server asks:
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
-  Linux they do not get your session's sockets.
+  Linux they do not get your session's sockets. Commands receive a small shell
+  environment, not credentials or other variables exported by the process that
+  started Hands.
 - **A time window.** When it ends, your machine stops answering. Run `hands up`
   again to continue; the conversation picks the machine up again by itself.
 - **No late runs.** A command that reaches your machine after the server

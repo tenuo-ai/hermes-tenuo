@@ -158,6 +158,9 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
             return next_call()  # Hermes is refusing terminal use for this profile; leave that alone
         whole_profile = wanted is None and terminal_env("TERMINAL_ENV", "local") == NAME
     except Exception as e:
+        if wanted is not None:
+            logger.warning("hermes-tenuo hands: could not route tool call to the device (%s)", e)
+            raise HandsUnavailable("hands: could not route this tool call to the device; it was not run") from e
         logger.debug("hermes-tenuo hands: tool call left on the server (%s)", e)
         return next_call()
     if wanted is None and not whole_profile:

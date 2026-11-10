@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import subprocess
 import sys
@@ -10,9 +11,9 @@ import time
 
 import pytest
 
-from hermes_tenuo.hands import sandbox, wire
-from hermes_tenuo.hands.device import Device, HandsError
 from hermes_tenuo.hands import hub as hub_module
+from hermes_tenuo.hands import chat, sandbox, wire
+from hermes_tenuo.hands.device import Device, HandsError
 from hermes_tenuo.hands.hub import HandsUnavailable, Hub, Refused
 
 sandboxed = pytest.mark.skipif(sandbox.available() is None, reason="needs sandbox-exec or bubblewrap")
@@ -208,6 +209,14 @@ def test_device_refuses_a_replayed_command(hub, paired):
         paired.verify(job)
 
 
+def test_device_refuses_a_replayed_command_after_restart(hub, folder, paired):
+    job = _job(hub, paired)
+    paired.verify(job)
+    restarted = Device(None, str(folder), 600, allow_unsandboxed=True)
+    with pytest.raises(HandsError, match="old Hands session"):
+        restarted.verify(job)
+
+
 def test_device_refuses_another_folder(hub, paired, tmp_path):
     other = tmp_path / "other"
     other.mkdir()
@@ -238,6 +247,34 @@ def test_device_refuses_after_its_window(hub, paired):
     paired.expires = time.time() - 1
     with pytest.raises(HandsError, match="window has ended"):
         paired.verify(_job(hub, paired))
+
+
+def test_device_commands_do_not_inherit_exported_secrets(hub, paired, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-a-command")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "also-must-not-reach-a-command")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    env = paired._env()
+    assert env["PATH"] == "/safe/bin"
+    assert env["HOME"] == paired.tmp
+    assert env["TMPDIR"] == paired.tmp
+    assert "OPENAI_API_KEY" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+
+
+def test_selected_device_routing_failure_does_not_run_on_server(monkeypatch):
+    monkeypatch.setitem(chat._wanted, "", "laptop")
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "hermes_tenuo.hands.backend":
+            raise ImportError("simulated incompatible Hermes integration")
+        return real_import(name, *args, **kwargs)
+
+    called = []
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    with pytest.raises(HandsUnavailable, match="was not run"):
+        chat.around_tool(next_call=lambda: called.append(True))
+    assert not called
 
 
 @sandboxed

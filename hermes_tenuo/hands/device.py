@@ -27,6 +27,14 @@ from hermes_tenuo.hands import sandbox, wire
 
 MAX_OUTPUT = 8 * 1024 * 1024
 
+# Commands get a useful shell environment, but never inherit credentials exported by
+# the person who started Hands. Additions to this list are an expansion of authority:
+# unlike files, environment variables cannot be hidden by the OS sandbox.
+SAFE_ENV = {
+    "COLORTERM", "FORCE_COLOR", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+    "LOGNAME", "NO_COLOR", "PATH", "SHELL", "TERM", "USER", "__CF_USER_TEXT_ENCODING",
+}
+
 # Runs inside the sandbox for as long as the device is up and starts every command, so
 # commands share one sandbox: a later command can stop a server an earlier one started,
 # and nothing can signal a process outside it. Standard library only; it must start with
@@ -211,7 +219,10 @@ class Device:
         args = {"dir": where, "cmd": wire.digest(job_id, job["cmd"], bool(job.get("login")), job.get("stdin"),
                                                 int(job["timeout"]), job.get("shown") or "",
                                                 int(job.get("waited_ms") or 0))}
-        wire.check(wire.load_chain(job["chain"]), self.key.public_key, wire.TOOL, args, job["pop"])
+        chain = wire.load_chain(job["chain"])
+        if chain[0].to_base64() != self.grant.to_base64():
+            raise HandsError("this command belongs to an old Hands session")
+        wire.check(chain, self.key.public_key, wire.TOOL, args, job["pop"])
         real = os.path.realpath(where)
         if not (real == self.folder or real.startswith(self.folder + os.sep)) or not os.path.isdir(real):
             raise HandsError("the command is for a folder this device isn't serving")
@@ -232,9 +243,10 @@ class Device:
         return max(1, math.ceil(timeout - max(0.0, late)))
 
     def _env(self) -> Dict[str, str]:
-        env = dict(os.environ, TMPDIR=self.tmp)
-        for name in ("SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
-            env.pop(name, None)  # sockets the sandbox does not let a command reach
+        env = {name: value for name, value in os.environ.items() if name in SAFE_ENV}
+        env.setdefault("PATH", os.defpath)
+        env["HOME"] = self.tmp  # a login shell must not source the user's real dotfiles
+        env["TMPDIR"] = self.tmp
         return env
 
     def run(self, job: Dict[str, Any], folder: str, timeout: Optional[int] = None) -> tuple:
