@@ -103,18 +103,21 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
         elif os.path.exists(path):
             argv += ["--ro-bind", "/dev/null", path]
     # The user's session sockets (the desktop bus, the service manager, agents) can start
-    # programs outside the sandbox, so a command does not get them.
-    runtime = f"/run/user/{os.getuid()}"
+    # programs outside the sandbox, so a command does not get them. Paths are resolved
+    # first: bubblewrap cannot mount onto a path that goes through a symlink.
+    runtime = os.path.realpath(f"/run/user/{os.getuid()}")
     if os.path.isdir(runtime):
         argv += ["--tmpfs", runtime]
-    for socket_path in ("/run/docker.sock", "/var/run/docker.sock"):
-        if os.path.exists(socket_path):
+    sockets = {os.path.realpath(p) for p in ("/run/docker.sock", "/var/run/docker.sock") if os.path.exists(p)}
+    for socket_path in sorted(sockets):
+        if not socket_path.startswith(runtime + os.sep):
             argv += ["--ro-bind", "/dev/null", socket_path]
     # Last, so the folder and the temp folder stay usable even under a hidden path.
     # /tmp is the device's own temp folder too.
+    argv += ["--bind", tmp, "/tmp"]
     for path in readable:
         argv += ["--ro-bind", path, path]
-    argv += ["--bind", tmp, "/tmp", "--bind", folder, folder, "--bind", tmp, tmp]
+    argv += ["--bind", folder, folder, "--bind", tmp, tmp]
     return argv + ["--chdir", folder, "--", *command]
 
 
