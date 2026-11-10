@@ -167,6 +167,12 @@ class _Stopped(Exception):
     """Raised by the stop signal while the device is only waiting for work."""
 
 
+def printable(text: str) -> str:
+    """`text` safe to print: what a command is called comes from the server, and control
+    or invisible characters in it must not reach the terminal as instructions."""
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text)
+
+
 def say(text: str) -> None:
     print(text, flush=True)  # visible at once, also when the output goes to a file or a service log
 
@@ -249,7 +255,8 @@ class Device:
         self.server_key = wire.public_key(server)
         self.expires = time.time() + ttl_seconds
         self.grant = wire.mint_grant(self.key, self.server_key, self.folder, ttl_seconds)
-        self.identity = wire.mint_identity(self.key, ttl_seconds)
+        # Valid a little longer than the grant, so the last result can still be reported.
+        self.identity = wire.mint_identity(self.key, ttl_seconds + wire.REPORT_GRACE)
         self.me = wire.key_text(self.key.public_key)
         self._seen: set = set()
         self._stop = False
@@ -258,6 +265,8 @@ class Device:
         self._waiting = False
         self._talk = threading.Lock()                          # one writer to a runner at a time
         self._busy: Optional[tuple] = None                     # (runner, its job id) while a command runs
+        self._job: Optional[str] = None                        # the command being handled, by the server's id
+        self._stop_job: Optional[str] = None                   # the command that was asked to stop
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
         self._log = home() / "log.jsonl"
@@ -522,6 +531,8 @@ class Device:
                            "out": out_path}) + "\n"
         try:
             with self._talk:
+                if self._stop or (self._job is not None and self._stop_job == self._job):
+                    return 130  # stopped before it was started: it does not start
                 runner.stdin.write(line.encode())
                 runner.stdin.flush()
                 self._busy = (runner, job_id)
@@ -548,9 +559,14 @@ class Device:
             return None
         return int(answer.get("code", 127))
 
-    def cancel(self) -> None:
-        """Stop the command that is running now, with everything it started in its group."""
+    def cancel(self, job: Optional[str] = None) -> None:
+        """Stop the command being handled, with everything it started in its group. Given a
+        command's id, only that command: a request that arrives late must not stop the next
+        one. A command that has not started yet is kept from starting."""
         with self._talk:
+            if job is not None and job != self._job:
+                return
+            self._stop_job = self._job
             if self._busy is None:
                 return
             runner, job_id = self._busy
@@ -582,8 +598,7 @@ class Device:
                            {"dir": self.folder, "cmd": wire.digest("cancel", job_id)}, str(reply.get("pop", "")))
             except Exception:
                 return
-            if not done.is_set():
-                self.cancel()
+            self.cancel(job_id)
             return
 
     def handle(self, job: Dict[str, Any]) -> None:
@@ -598,11 +613,15 @@ class Device:
             self.report(job_id, f"hands: refused on the device: {reason}\n", 126)
             return
         done = threading.Event()
+        with self._talk:
+            self._job, self._stop_job = job_id, None
         threading.Thread(target=self._watch, args=(job_id, done), daemon=True).start()
         try:
             output, code = self.run(job, folder, timeout)
         finally:
             done.set()
+            with self._talk:
+                self._job = None
         if code == 130:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
@@ -614,7 +633,8 @@ class Device:
                 "exit": code, "note": note}
         with open(self._log, "a") as f:
             f.write(json.dumps(line) + "\n")
-        self.say(f"  {time.strftime('%H:%M:%S')}  {'refused' if code is None else f'exit {code}'}  {shown[:100]}")
+        self.say(f"  {time.strftime('%H:%M:%S')}  {'refused' if code is None else f'exit {code}'}  "
+                 f"{printable(shown[:100])}")
 
     # -- the loop ---------------------------------------------------------------
 

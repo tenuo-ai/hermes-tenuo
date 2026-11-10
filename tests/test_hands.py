@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import subprocess
 import sys
@@ -835,3 +836,78 @@ def test_switching_drops_the_device_shell_under_the_key_hermes_uses(monkeypatch)
     chat._drop_shell("task-1")
     assert "profile-a:task-1" not in cache  # the device shell is gone
     assert cache == {"default": server_shell, "task-1": server_shell}  # shells on the server are untouched
+
+
+# --- fourth review round ----------------------------------------------------------------------------
+
+def test_late_stop_request_cannot_stop_another_command(paired):
+    paired._job = "job-b"  # job-a is over; job-b is being handled now
+    paired.cancel("job-a")
+    assert paired._stop_job is None
+    paired.cancel("job-b")
+    assert paired._stop_job == "job-b"
+
+
+def test_command_stopped_before_it_started_does_not_start(hub, paired, folder):
+    job = _job(hub, paired, id="job-early")
+    where = paired.verify(job)
+    paired._job = "job-early"
+    paired.cancel("job-early")  # arrives while the sandbox is still starting
+    job["cmd"] = "echo ran > ran.txt"
+    out, code = paired.run(job, where)
+    assert code == 130 and not (folder / "ran.txt").exists()
+
+
+def test_what_a_command_is_called_cannot_drive_the_terminal(paired):
+    from hermes_tenuo.hands import device as device_module
+    hostile = "ls\x1b]52;c;aGk=\x07 \x1b[2J\u202e\r\nfake line"
+    shown = device_module.printable(hostile)
+    assert not any(ord(ch) < 32 or ch in "\x7f\u202e" for ch in shown) and shown.startswith("ls\\x1b")
+    lines = []
+    paired.say = lines.append
+    paired._record(hostile, 0, "")
+    assert "\x1b" not in lines[-1] and "\n" not in lines[-1]
+    assert json.loads(paired._log.read_text().splitlines()[-1])["command"] == hostile  # the record keeps the original
+
+
+def test_server_key_is_created_once(tmp_path):
+    h = Hub(state_dir=tmp_path / "server-state")
+    keys = []
+    threads = [threading.Thread(target=lambda: keys.append(wire.key_text(h.key.public_key))) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    again = Hub(state_dir=tmp_path / "server-state")
+    assert len(set(keys)) == 1 and wire.key_text(again.key.public_key) == keys[0]
+
+
+def test_display_text_counts_toward_the_size_limit(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "MAX_TEXT", 1000)
+    out, code = hub.run(hub.pick(paired.name), "echo x", login=False, timeout=5, stdin=None, shown="y" * 50_000)
+    assert code == 126 and "too large" in out
+
+
+def test_result_is_still_accepted_just_after_the_window_ends(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    session, result = hub.pick(paired.name), {}
+    waiter = threading.Thread(target=lambda: result.update(
+        r=hub.run(session, "echo x", login=False, timeout=60, stdin=None)))
+    waiter.start()
+    job = paired.poll()
+    session.expires = time.time() - 1  # the window ended while the command ran
+    paired.report(job["id"], "stopped at the end of the window\n", 124)
+    waiter.join(5)
+    assert result["r"] == ("stopped at the end of the window\n", 124)
+
+
+def test_caller_is_told_when_the_window_ends_without_a_result(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    session, result = hub.pick(paired.name), {}
+    waiter = threading.Thread(target=lambda: result.update(
+        r=hub.run(session, "echo x", login=False, timeout=600, stdin=None)))
+    waiter.start()
+    assert paired.poll() is not None
+    session.expires = time.time() - wire.REPORT_GRACE - 1
+    waiter.join(5)
+    assert not waiter.is_alive() and result["r"][1] == 125 and "end of its time window" in result["r"][0]

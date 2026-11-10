@@ -25,6 +25,7 @@ MAX_BODY = 32 * 1024 * 1024
 
 
 MAX_TEXT = 24 * 1024 * 1024  # room for one piece of text inside a message, as it is sent
+REPORT_GRACE = 120  # seconds after its time window in which a device may still report a result
 
 
 def sent_size(text: str) -> int:

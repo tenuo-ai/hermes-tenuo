@@ -784,7 +784,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
         for line in lines:
             entry = json.loads(line)
             what = entry["note"] or f"exit {entry['exit']}"
-            print(f"{entry['at']}  {what:<12}  {entry['command']}")
+            print(f"{entry['at']}  {device.printable(str(what)):<12}  {device.printable(str(entry['command']))}")
         if not lines:
             print("Nothing has run on this machine yet.")
         return 0

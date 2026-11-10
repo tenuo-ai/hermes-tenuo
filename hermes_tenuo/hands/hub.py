@@ -89,18 +89,22 @@ class Hub:
 
     @property
     def key(self):
-        if self._key is None:
-            from tenuo import SigningKey
-            path = self.dir / "server.key"
-            if path.is_file():
+        with self._lock:  # two first callers must end up with the one key that is on disk
+            if self._key is None:
+                from tenuo import SigningKey
+                path = self.dir / "server.key"
+                if not path.is_file():
+                    self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    created = SigningKey.generate()
+                    try:
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    except FileExistsError:
+                        pass  # another process made it first: use that one
+                    else:
+                        with os.fdopen(fd, "w") as f:
+                            f.write(wire.b64(bytes(created.secret_key_bytes())) + "\n")
                 self._key = SigningKey.from_bytes(wire.unb64(path.read_text()))
-            else:
-                self._key = SigningKey.generate()
-                self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as f:
-                    f.write(wire.b64(bytes(self._key.secret_key_bytes())) + "\n")
-        return self._key
+            return self._key
 
     def _known(self) -> Dict[str, Dict[str, Any]]:
         try:
@@ -169,7 +173,8 @@ class Hub:
         if not session.online:
             raise HandsUnavailable(f"hands: device '{session.name}' is not up any more. "
                                    "Run `hermes-tenuo hands up` on it again.")
-        if wire.sent_size(cmd) + wire.sent_size(stdin or "") > wire.MAX_TEXT:
+        shown = shown[:2000]  # only a label for the device's log
+        if wire.sent_size(cmd) + wire.sent_size(stdin or "") + wire.sent_size(shown) > wire.MAX_TEXT:
             return "hands: this command and its input are too large to send to the device in one piece\n", 126
         if cancelled is not None and cancelled.is_set():
             return "hands: stopped before it started\n", 130  # never put in line at all
@@ -186,10 +191,20 @@ class Hub:
         try:
             while True:
                 try:
-                    return answer.get(timeout=0.2 if cancelled is not None else max(0.0, give_up - time.monotonic()))
+                    return answer.get(timeout=0.2)
                 except queue.Empty:
                     pass
                 now = time.monotonic()
+                with self._lock:
+                    current = self._sessions.get(session.device, session)
+                    over = time.time() > current.expires + wire.REPORT_GRACE
+                    had = job_id in current.handed
+                if over:
+                    # The device's time window is over and its last chance to report has passed.
+                    return ((f"hands: device '{session.name}' reached the end of its time window while it had "
+                             "this command; it is not known whether it ran\n", 125) if had else
+                            (f"hands: device '{session.name}' reached the end of its time window before this "
+                             "command could run, so it was not run\n", 127))
                 if cancelled is not None and cancelled.is_set() and stop_by is None:
                     with self._lock:
                         current = self._sessions.get(session.device, session)
@@ -312,17 +327,17 @@ class Hub:
         logger.info("hermes-tenuo hands: device '%s' is up for %s", name, folder)
         return {"ok": True, "name": name}
 
-    def _session(self, body: Dict[str, Any]) -> Session:
+    def _session(self, body: Dict[str, Any], grace: float = 0.0) -> Session:
         with self._lock:
             session = self._sessions.get(str(body.get("device", "")))
-        if session is None or time.time() > session.expires or session.device not in self._known():
+        if session is None or time.time() > session.expires + grace or session.device not in self._known():
             raise Refused("this device has no session here: run `hermes-tenuo hands up` again", 410)
         return session
 
-    def _signed(self, body: Dict[str, Any], op: str) -> Tuple[Session, str]:
+    def _signed(self, body: Dict[str, Any], op: str, grace: float = 0.0) -> Tuple[Session, str]:
         """The session a device's request belongs to, once it is shown to be signed by the
         device for this operation and not used before."""
-        session = self._session(body)
+        session = self._session(body, grace)
         nonce = str(body.get("nonce", ""))
         try:
             wire.check([session.identity], session.device_key, wire.TOOL_POLL, wire.request(op, nonce),
@@ -385,7 +400,7 @@ class Hub:
 
     def bye(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """The device is going down: say so at once to anyone waiting for it."""
-        session, _ = self._signed(body, "bye")
+        session, _ = self._signed(body, "bye", wire.REPORT_GRACE)  # also right after its window ends
         with self._lock:
             session.gone = True
             waiting, session.waiting = dict(session.waiting), {}
@@ -403,7 +418,8 @@ class Hub:
         return {"ok": True}
 
     def result(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        session = self._session(body)
+        # A command stopped at the end of the window still gets to report, for a short while.
+        session = self._session(body, wire.REPORT_GRACE)
         job_id, output = str(body.get("job", "")), body.get("output", "")
         try:
             returncode = int(body.get("returncode"))
