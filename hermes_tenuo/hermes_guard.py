@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -332,10 +332,12 @@ class HermesGuard:
         # Session warrant registry: session_id → (warrant, signing_key)
         self._session_warrants: Dict[str, Tuple[Any, Optional[Any]]] = {}
         self._session_lock = threading.Lock()
+        # Both are queues: OrderedDict removes the front entry in constant
+        # time, where a plain dict rescans the slots of removed entries.
         # Delegated children that still hold a live grant, oldest first.
-        self._child_sessions: Dict[str, None] = {}
+        self._child_sessions: "OrderedDict[str, None]" = OrderedDict()
         # Sessions holding a no-authority marker, oldest first (bounded).
-        self._denied_sessions: Dict[str, None] = {}
+        self._denied_sessions: "OrderedDict[str, None]" = OrderedDict()
         # Set once a marker has been evicted. From then on a session with no
         # warrant of its own is denied instead of using the config warrant,
         # because it may be a session whose marker is gone.
@@ -442,8 +444,7 @@ class HermesGuard:
         self._denied_sessions.pop(session_id, None)
         self._denied_sessions[session_id] = None
         while len(self._denied_sessions) > self._MAX_DENIED_SESSIONS:
-            oldest = next(iter(self._denied_sessions))
-            del self._denied_sessions[oldest]
+            oldest, _ = self._denied_sessions.popitem(last=False)
             self._session_warrants.pop(oldest, None)
             if not self._denied_sessions_saturated:
                 self._denied_sessions_saturated = True
@@ -853,8 +854,7 @@ class HermesGuard:
             # Drop the key material of children whose grant has expired; they
             # stay denied instead of falling back to the config warrant.
             for _ in range(min(len(self._child_sessions), self._CHILD_SWEEP)):
-                session_id = next(iter(self._child_sessions))
-                del self._child_sessions[session_id]
+                session_id, _ = self._child_sessions.popitem(last=False)
                 warrant, _key = self._session_warrants.get(session_id, (None, None))
                 try:
                     expired = warrant is None or warrant.is_expired()
