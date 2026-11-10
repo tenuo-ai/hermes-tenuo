@@ -41,10 +41,17 @@ _NO_AUTHORITY = object()
 # Session marker: a session whose own warrant was cleared or has expired. It
 # stays denied; it must never fall back to the config warrant.
 _RETIRED = object()
+# Returned for a session with no warrant of its own once the marker table has
+# overflowed: it can no longer be told apart from a session that was denied.
+_UNTRACKED = object()
 
 _MARKER_REASONS = {
     _NO_AUTHORITY: "tenuo: this subagent was not started by an authorised delegation and holds no authority",
     _RETIRED: "tenuo: this session's warrant was cleared or has expired; it holds no authority",
+    _UNTRACKED: (
+        "tenuo: this session has no warrant of its own and too many sessions have been "
+        "denied to tell it from one of them; it holds no authority until Hermes restarts"
+    ),
 }
 
 
@@ -329,6 +336,10 @@ class HermesGuard:
         self._child_sessions: Dict[str, None] = {}
         # Sessions holding a no-authority marker, oldest first (bounded).
         self._denied_sessions: Dict[str, None] = {}
+        # Set once a marker has been evicted. From then on a session with no
+        # warrant of its own is denied instead of using the config warrant,
+        # because it may be a session whose marker is gone.
+        self._denied_sessions_saturated = False
 
         # Session warrant chains: session_id → parent_warrant for chain verification
         # session_id → ancestor warrants, root first (the holder presents them all)
@@ -404,6 +415,7 @@ class HermesGuard:
                 self._deny_session(session_id, _RETIRED)
 
     # Bounded so a long-lived process does not keep a marker per session for ever.
+    # Overflow fails closed: see ``_denied_sessions_saturated``.
     _MAX_DENIED_SESSIONS = 65536
 
     def _bind_session(
@@ -433,6 +445,13 @@ class HermesGuard:
             oldest = next(iter(self._denied_sessions))
             del self._denied_sessions[oldest]
             self._session_warrants.pop(oldest, None)
+            if not self._denied_sessions_saturated:
+                self._denied_sessions_saturated = True
+                logger.error(
+                    "hermes-tenuo: more than %d sessions have been denied; sessions with no "
+                    "warrant of their own are blocked until Hermes restarts",
+                    self._MAX_DENIED_SESSIONS,
+                )
 
     def _chain_for(self, session_id: str) -> List[Any]:
         """Ancestor warrants for *session_id*, root first; empty for a root session."""
@@ -493,6 +512,8 @@ class HermesGuard:
                 self._attach_child(session_id, grant)
                 return grant.warrant, grant.key
 
+        if self._denied_sessions_saturated and self._static_warrant is not None:
+            return _UNTRACKED, None
         return self._static_warrant, self._static_signing_key
 
     # ------------------------------------------------------------------

@@ -263,14 +263,35 @@ def test_expired_child_grant_is_denied_not_widened(keys):
     assert "old" not in g._child_sessions and "old" not in g._session_warrant_chains
 
 
-def test_denied_session_markers_are_bounded(keys):
+def test_denied_session_markers_are_bounded_and_overflow_fails_closed(keys):
+    root, agent = keys
     g = _guard(keys)
     g._MAX_DENIED_SESSIONS = 3
-    for n in range(5):
+    g.set_session_warrant("own", _web_only(keys), agent)
+    for n in range(3):
+        g.on_subagent_start("p", f"stray-{n}")
+    assert _allowed(g, "web_search", {"query": "q"}, "p")  # not yet overflowed
+    for n in range(3, 5):
         g.on_subagent_start("p", f"stray-{n}")
     assert len(g._denied_sessions) == 3
     assert sum(1 for s in g._session_warrants if s.startswith("stray-")) == 3
-    assert not _allowed(g, "web_search", {"query": "q"}, "stray-4")
+    # The oldest markers were evicted; those sessions must stay denied.
+    for n in range(5):
+        assert not _allowed(g, "web_search", {"query": "q"}, f"stray-{n}")
+    # So is any other session with no warrant of its own, sessionless calls included.
+    blocked = g.pre_tool_call("web_search", {"query": "q"}, session_id="p")
+    assert blocked and "until Hermes restarts" in blocked["message"]
+    assert g.pre_tool_call("web_search", {"query": "q"}) is not None
+    assert g.pre_tool_call("delegate_task", {"goal": "x"}, session_id="p") is not None
+    # A session that holds its own warrant is unaffected.
+    assert _allowed(g, "web_search", {"query": "q"}, "own")
+    assert not _allowed(g, "read_file", {"path": "/data/x"}, "own")
+
+
+def test_marker_overflow_leaves_an_unconfigured_guard_a_no_op():
+    g = HermesGuard()
+    g._denied_sessions_saturated = True
+    assert g.pre_tool_call("terminal", {"command": "ls"}, session_id="s1") is None
 
 
 @pytest.mark.parametrize('result', ['{"error":"spawn failed"}', '{"results":[]}'])

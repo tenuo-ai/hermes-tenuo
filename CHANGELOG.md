@@ -10,6 +10,8 @@
 - A session whose warrant was cleared with `clear_session_warrant`, or a child
   whose grant has expired, is denied. It does not use the config warrant. Call
   `set_session_warrant` again to give the session authority.
+- The record of denied sessions is bounded at 65,536 per process. Past that,
+  sessions with no warrant of their own are blocked until Hermes restarts.
 
 ## 0.3.0 - 2026-11-09
 
