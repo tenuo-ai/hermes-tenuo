@@ -1249,8 +1249,11 @@ class HermesGuard:
     ) -> Optional[Tuple[bool, str]]:
         """The pre-hook decision for this post event, removed from the pending set.
 
-        Without a tool-call id: this thread's own decision; failing that, for
-        a call Hermes reports as *blocked*, the newest denial; else the oldest.
+        Without a tool-call id the match is by the call itself: this thread's
+        own decision, else the oldest. A call Hermes reports as *blocked* did
+        not run, so it only ever takes a denial (this thread's, else the
+        newest); with none pending it takes nothing, and the caller records
+        the block.
         """
         with self._pre_decisions_lock:
             if tool_call_id:
@@ -1261,16 +1264,25 @@ class HermesGuard:
                 return None
             newest_first = range(len(pending) - 1, -1, -1)
             thread_id = threading.get_ident()
-            index = next((i for i in newest_first if pending[i][0] == thread_id), None)
-            if index is None and blocked:
+            own = next((i for i in newest_first if pending[i][0] == thread_id), None)
+            decision = None
+            if not blocked:
+                index = own if own is not None else 0
+            elif own is not None and not pending[own][1]:
+                index = own
+            else:
                 index = next((i for i in newest_first if not pending[i][1]), None)
-            if index is None:
-                index = 0
-            _, allowed, reason = pending[index]
-            del pending[index]
+            if index is not None:
+                _, allowed, reason = pending[index]
+                decision = (allowed, reason)
+                del pending[index]
+            elif own is not None:
+                # This thread allowed the call and something else blocked it.
+                # Drop the entry so it cannot be taken for a later call.
+                del pending[own]
             if not pending:
                 del self._unkeyed_decisions[key]
-            return allowed, reason
+            return decision
 
     # ------------------------------------------------------------------
     # Hook: post_tool_call

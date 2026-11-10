@@ -190,6 +190,41 @@ def test_stale_allow_from_another_thread_does_not_mask_a_denial(setup):
     assert [d for d, _ in _decisions(events)] == ["DENY"]
 
 
+def test_blocked_post_on_a_thread_holding_a_stale_allow_takes_the_denial(setup):
+    root, agent, warrant = setup
+    events: list = []
+    g = _guard(events, warrant=warrant, signing_key=agent, trusted_roots=[root.public_key])
+    call = ("read_file", {"path": "/data/x"})
+    # This thread allowed the call earlier and its post hook never arrived.
+    assert g.pre_tool_call(*call, session_id="s") is None
+    g._static_warrant = (
+        Warrant.mint_builder().holder(agent.public_key)
+        .capability("web_search", query=Wildcard()).ttl(600).mint(root)
+    )
+    # Another thread now denies the identical call; its post runs back here.
+    denied = []
+    worker = threading.Thread(target=lambda: denied.append(g.pre_tool_call(*call, session_id="s")))
+    worker.start()
+    worker.join()
+    assert denied[0] and denied[0]["action"] == "block"
+    events.clear()
+    g.post_tool_call(*call, "{}", session_id="s", status="blocked")
+    assert _decisions(events) == [("DENY", denied[0]["message"])]  # the denial's own reason
+
+
+def test_blocked_post_with_only_an_allow_pending_is_recorded_as_denied(setup):
+    # The warrant allowed it and something else blocked it: the call did not run.
+    root, agent, warrant = setup
+    events: list = []
+    g = _guard(events, warrant=warrant, signing_key=agent, trusted_roots=[root.public_key])
+    call = ("read_file", {"path": "/data/x"})
+    assert g.pre_tool_call(*call, session_id="s") is None
+    events.clear()
+    g.post_tool_call(*call, "{}", session_id="s", status="blocked")
+    assert [d for d, _ in _decisions(events)] == ["DENY"]
+    assert not g._unkeyed_decisions
+
+
 def test_post_reported_as_blocked_is_never_recorded_as_allowed(setup):
     root, agent, warrant = setup
     events: list = []
