@@ -260,10 +260,16 @@ plugins:
 uvx hermes-tenuo hands up 'hands://my-server:8765/…' --dir . --for 4h
 ```
 
-**Back in the chat**, type `/hands on`. From then on that conversation's
-`terminal`, `read_file`, `write_file` and the other file tools act on your
-machine. `/hands off` returns it to the server. Other conversations, bots and
-scheduled jobs are not affected.
+Commands on your machine have no internet. Add `--network` if the work needs
+to install dependencies or download anything.
+
+**Back in the chat**, the conversation that asked for the line starts using
+your machine as soon as it is up: its `terminal`, `read_file`, `write_file`
+and the other file tools act there. `/hands off` returns it to the server and
+`/hands on` switches it back. Other conversations, bots and scheduled jobs are
+not affected. On a chat platform that says who is writing, the machine is
+yours: other people cannot see it, use it or forget it, and a message from
+someone else in a shared chat does not run on it.
 
 | Command | Where | What it does |
 |---|---|---|
@@ -272,18 +278,30 @@ scheduled jobs are not affected.
 | `/hands off` | chat | This conversation runs on the server again. |
 | `/hands status` | chat | Which machines are up, and for how long. |
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
-| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. `--network` lets them use the internet. |
+| `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
 
 What your machine enforces, whatever the server asks:
 
 - **One folder.** Commands run in one sandbox (`sandbox-exec` on macOS,
   bubblewrap on Linux) that can write only to the shared folder and a private
-  temp folder. `~/.ssh`, `~/.aws`, cloud and package-manager credentials,
-  keychains, browser profiles and shell history are unreadable. Other files
-  stay readable. On macOS the network stays on; Linux commands have an isolated
-  loopback network with no host or internet access. The device itself can still
-  connect to the Hermes server.
+  temp folder. The rest of your home folder cannot be read: not your
+  documents, not other projects, not application data. Your toolchains stay
+  readable (rustup, pyenv, nvm, uv and similar, and folders on your `PATH`),
+  and `--read FOLDER` adds a folder of your choice. With `--read-home` the
+  home folder is readable except `~/.ssh`, `~/.aws`, cloud and package-manager
+  credentials, keychains, browser profiles and shell history, which are never
+  readable. System files stay readable.
+- **No internet unless you say so.** Commands cannot open connections to the
+  internet. Start with `--network` when the work needs it: installing
+  dependencies, cloning, calling an API. Without it, Linux commands have a
+  network of their own with nothing else on it, and macOS commands can reach
+  only programs listening on the machine itself, which includes a proxy if
+  one is running there. When an install fails for this reason the agent is
+  told why, and can ask you to restart with `--network`. This limits what
+  commands connect to, not what the server learns: the output of every
+  command still goes back to the Hermes server, over Hands's own connection.
 - **Nothing outside it.** Commands can signal only processes started through
   Hands. On macOS they cannot open apps, script other apps, start system jobs,
   or use the clipboard, the keychain, the SSH agent or the Docker socket; on
@@ -303,11 +321,19 @@ What your machine enforces, whatever the server asks:
   before it runs. A changed, replayed or forged command is refused.
 - **A record.** Each command and its exit code is printed where `hands up` runs
   and kept in `hermes-tenuo hands log`.
+- **You can tell where it ran.** Every result of a command or file tool that ran
+  on your machine names the machine and the folder. When the sandbox refuses
+  something, the result says what the machine shares.
+- **It survives a restart of Hermes.** A machine that is up pairs again by
+  itself when the server comes back, with the same folder and the time it had
+  left. A machine you revoked does not.
 
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
-network such as Tailscale or WireGuard. The listener serves a limited number
+network such as Tailscale or WireGuard. Your machine refuses a plain
+`http://` server that is not on a private network or the machine itself,
+unless you pass `--plain-http`. The listener serves a limited number
 of connections, and fewer from any one address, so put a reverse proxy in
 front of it if it is reachable from the internet.
 
@@ -317,9 +343,24 @@ leaves running (a dev server started with
 `hands up` stops. To stop it earlier, kill it by name or port from a later
 command.
 
-Limits today: macOS and Linux machines only; Linux commands cannot download
-dependencies or reach host services, and dev servers are reachable only from
-other commands in the same Hands sandbox; a machine with no sandbox refuses
+**Hands on Ubuntu.** Ubuntu 24.04 and later do not let bubblewrap start a
+sandbox for an ordinary user until one rule allows it. `hands check` says so.
+Install bubblewrap and add the rule once:
+
+```bash
+sudo apt install bubblewrap
+printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n  include if exists <local/bwrap>\n}\n' | sudo tee /etc/apparmor.d/bwrap
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+Limits today: macOS and Linux machines only; on macOS commands can reach
+services that listen on the machine itself (`localhost`), with or without
+`--network`; on Linux without `--network` a dev server is reachable only from
+other commands in the same Hands sandbox, and with it commands reach services
+on the machine too. Linux `--network` requires enabled Landlock ABI 6 or later
+(available starting with Linux 6.12) to block host abstract sockets; if the
+restriction cannot be installed, commands do not start. `--network` is all or nothing, not a list of allowed
+sites; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not
@@ -418,7 +459,8 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME]   # on your own machine
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home] [--network]   # on your own machine
+hermes-tenuo hands check [INVITE] [--dir FOLDER]
 hermes-tenuo hands log [--last N]
 ```
 

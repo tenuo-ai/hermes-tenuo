@@ -788,12 +788,24 @@ def cmd_hands(args: argparse.Namespace) -> int:
         if not lines:
             print("Nothing has run on this machine yet.")
         return 0
+    if args.hands_command == "check":
+        ok = True
+        for passed, text in device.check(args.invite, args.dir, read_only=args.read_only,
+                                         plain_http=args.plain_http, network=args.network):
+            ok = ok and passed is not False
+            print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {text}")
+        print("\n  Ready: run `hermes-tenuo hands up` with the same arguments." if ok else
+              "\n  Fix the lines marked ✗, then run this again.")
+        return 0 if ok else 1
     if args.hands_command != "up":
-        print("usage: hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h | hermes-tenuo hands log")
+        print("usage: hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h | hermes-tenuo hands check [INVITE] "
+              "--dir FOLDER | hermes-tenuo hands log")
         return 2
     try:
         dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
-                            allow_unsandboxed=args.no_sandbox)
+                            allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
+                            plain_http=args.plain_http, read_home=args.read_home, read=args.read or (),
+                            network=args.network)
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
         return dev.serve()
@@ -892,6 +904,22 @@ def main() -> None:
     up_p.add_argument("--name", metavar="NAME", help="What to call this machine (default: its hostname)")
     up_p.add_argument("--no-sandbox", action="store_true",
                       help="Run commands with your full access when this machine has no sandbox")
+    up_p.add_argument("--read-only", action="store_true",
+                      help="Let commands read the folder but not change it")
+    up_p.add_argument("--plain-http", action="store_true",
+                      help="Connect to a server on the internet without encryption (not recommended)")
+    up_p.add_argument("--network", action="store_true",
+                      help="Let commands use the internet, to install dependencies, clone or download (off by default)")
+    up_p.add_argument("--read", action="append", metavar="FOLDER",
+                      help="Also let commands read this folder in your home folder (repeatable)")
+    up_p.add_argument("--read-home", action="store_true",
+                      help="Let commands read your whole home folder, except keys, credentials and browser data")
+    check_p = hands_sub.add_parser("check", help="See whether this machine is ready for `hands up`, without pairing")
+    check_p.add_argument("invite", nargs="?", metavar="INVITE", help="The hands://... line, to test that its server is reachable")
+    check_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder you plan to share (default: here)")
+    check_p.add_argument("--read-only", action="store_true", help="Check for --read-only use")
+    check_p.add_argument("--network", action="store_true", help="Check for --network use")
+    check_p.add_argument("--plain-http", action="store_true", help="Check for --plain-http use")
     hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
         "--last", type=int, default=20, metavar="N")
 

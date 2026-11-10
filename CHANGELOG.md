@@ -17,6 +17,25 @@
 - A command that arrives after the server stopped waiting is refused instead
   of run late; a conversation follows its machine across restarts and new
   time windows, and `/hands on <name>` moves it to another machine.
+- Results of commands and file tools that ran on a machine name it and its
+  folder; a refusal by its sandbox says what the machine shares.
+- `hermes-tenuo hands check` says whether a machine is ready without pairing
+  it, and `hands up` prints what commands can and cannot do. `--read-only`
+  lets commands read the folder without changing it.
+- A machine that is up pairs again by itself when Hermes restarts.
+- Commands cannot read the home folder outside the shared folder, except
+  toolchains and folders on `PATH`. `--read FOLDER` shows one more folder and
+  `--read-home` shows the home folder except credentials and browser data.
+- Commands have no internet unless `hands up` is started with `--network`.
+  Results from a machine without it say so, and a failed download or install
+  tells the agent how the person can allow it.
+- The conversation that asked for an invite starts using the machine when it
+  comes up. Where the chat platform says who is writing, a machine belongs to
+  the person who invited it: others cannot see, use or forget it.
+- A machine refuses an unencrypted server that is not on a private network,
+  unless started with `--plain-http`.
+- On Linux a folder hidden from commands is read-only. `hands check` explains when bubblewrap is installed but not allowed to run,
+  as on Ubuntu 24.04.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
 

@@ -37,8 +37,10 @@ def register(ctx: Any) -> bool:
         return False
     from hermes_tenuo.hands import chat
     from hermes_tenuo.hands.hub import start_hub
-    if start_hub(listen, str(config.get("url") or "")) is None:
+    hub = start_hub(listen, str(config.get("url") or ""))
+    if hub is None:
         return False
+    hub.joined = chat.joined
     from hermes_tenuo.hands.backend import HandsProvider
     register_provider(HandsProvider())
     ctx.register_command("hands", chat.command, description="Run this conversation's commands on your own machine",

@@ -50,7 +50,8 @@ SCRIPT = textwrap.dedent('''
         except ValueError:
             data = {"output": raw}
         out[key] = {"exit": data.get("exit_code"), "text": str(data.get("output", data.get("content", data))),
-                    "pid": data.get("pid"), "session": data.get("session_id")}
+                    "pid": data.get("pid"), "session": data.get("session_id"),
+                    "ran_on": data.get("ran_on"), "note": data.get("hands_note")}
 
     def up(folder, name="laptop", invite=None, state=None):
         if state:
@@ -82,15 +83,52 @@ SCRIPT = textwrap.dedent('''
     tool("read", "read_file", {"path": "../README.md"})
     tool("write", "write_file", {"path": "made.txt", "content": "through Hermes\\n"})
     tool("escape", "terminal", {"command": f"echo x > {server_dir}/escape.txt"})
+    # A system folder: the sandbox refuses this in words on macOS and on Linux alike.
+    tool("refused", "terminal", {"command": "echo x > /usr/hands-refusal-probe"})
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
+    tool("bg_poll_named", "process_manage", {"action": "poll", "session_id": out["bg"]["session"]})
     tool("bg_stop", "terminal", {"command": f"kill {out['bg']['pid']} && echo stopped"})
     # The device goes down and comes back: the same conversation carries on.
     device.stop(); serving.join(20)
     tool("down", "terminal", {"command": "pwd"})
     device, serving = up(device_dir)
     tool("back", "terminal", {"command": "pwd"})
+    # Someone else's machine: neither the tool call nor the backend itself runs a stranger's command.
+    from hermes_tenuo.hands.backend import HandsEnvironment
+    session, asking = get_hub().pick("laptop"), chat._owner
+    session.owner = "telegram:alice"
+    chat._owner = lambda: "telegram:bob"
+    tool("stranger", "terminal", {"command": "echo x > stranger.txt"})
+    # A tool that only runs on the server is not theirs to lose.
+    out["stranger_server_tool"] = chat.around_tool(tool_name="web_search", args={}, next_call=lambda: "on the server",
+                                                   task_id="chat-1")
+    shell = HandsEnvironment(cwd=str(device_dir), timeout=30, device="laptop")
+    out["stranger_backend"] = str(shell.execute("echo x > stranger2.txt"))
+    chat._owner = lambda: "telegram:alice"
+    tool("owner", "terminal", {"command": "echo mine"})
+    if whole_profile:
+        # Each sender has exactly one usable default even with both machines online.
+        second, second_thread = up(base / "device-project-2", name="bobs-machine",
+                                   invite=get_hub().invite("telegram:bob"), state=base / "device-state-bob")
+        try:
+            default = HandsEnvironment(cwd=str(server_dir), timeout=30)
+            assert default._session.name == "laptop"
+            assert "alice-default" in str(default.execute("echo alice-default"))
+            chat._owner = lambda: "telegram:bob"
+            assert default._current().name == "bobs-machine"
+            assert "bob-default" in str(default.execute("echo bob-default"))
+            tool("bob_default", "terminal", {"command": "pwd"}, task="bob-chat")
+            assert "bobs-machine" in out["bob_default"]["ran_on"], out["bob_default"]
+            assert out["bob_default"]["text"].strip() == str(base / "device-project-2")
+            chat._owner = lambda: "telegram:alice"
+            assert default._current().name == "laptop"
+        finally:
+            second.stop(); second_thread.join(20)
+            get_hub().revoke("bobs-machine")
+            os.environ["TENUO_HANDS_HOME"] = str(base / "device-state")
+    chat._owner, session.owner = asking, ""
     if not whole_profile:
         out["status"] = chat.command("status")
         # A second machine: switching sends this conversation's commands there, and back.
@@ -159,6 +197,18 @@ def _on_the_device(out, project, server_dir):
     assert (project / "src" / "made.txt").read_text() == "through Hermes\n"
     assert out["escape"]["exit"] != 0
     assert not list(Path(server_dir).iterdir())
+    # Each result says which machine it ran on; a refusal there also says what it shares.
+    for key in ("first", "pwd", "read", "write", "escape"):
+        assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
+    for key in ("bg_poll", "bg_poll_named"):  # the process tool reports on an earlier process: not marked
+        assert out[key]["ran_on"] is None, (key, out[key])
+    assert not (project / "stranger.txt").exists() and not (project / "stranger2.txt").exists()
+    assert "belongs to the person who paired it" in out["stranger_backend"], out["stranger_backend"]
+    assert out["stranger_server_tool"] == "on the server"
+    assert out["owner"]["text"].strip() == "mine", out["owner"]
+    assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
+    assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
+    assert out["pwd"]["note"] is None
     log = (project.parent / "device-state" / "log.jsonl").read_text()
     assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log
     assert out["bg"]["pid"], out["bg"]
@@ -172,6 +222,8 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     out, project, server_dir = _run(tmp_path, "chat")
     here = os.path.realpath(server_dir)
     assert out["before"]["text"].strip() == here
+    assert out["before"]["ran_on"] is None and out["after"]["ran_on"] is None  # on the server: not marked
+    assert "desktop" in out["other"]["ran_on"], out["other"]
     assert "no device is up" in out["on_without_device"]
     assert "laptop" in out["on"]
     _on_the_device(out, project, server_dir)

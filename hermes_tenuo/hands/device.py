@@ -48,6 +48,13 @@ TOOL_HOMES = {
 }
 TOOL_PATHS = ("JAVA_HOME", "ANDROID_HOME", "GOROOT")  # passed on only if set
 
+# Commands cannot read the home folder. These folders in it stay readable when they exist,
+# because programs and interpreters live there; so does every folder on PATH. Places that
+# hold programs, not secrets: the protected paths are still refused inside them.
+TOOL_FOLDERS = (".local/share/uv", ".local/share/mise", ".local/share/pnpm", ".local/share/pipx", ".local/pipx",
+                "Library/Application Support/pipx", "Library/pnpm", ".bun", ".deno",
+                "miniconda3", "anaconda3", "miniforge3", "mambaforge")
+
 PROFILE = ".hands_profile"  # in the stand-in home; keeps this device's settings in login shells too
 
 # Runs inside a sandbox and starts the commands, so they share it: a later command can stop
@@ -114,6 +121,28 @@ def confined():
         return True
     except OSError:
         return False
+def keep_to_own_sockets():
+    # Required when sharing the host network: never announce readiness until abstract
+    # sockets are scoped. Namespace-isolated commands need no Landlock support.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    create, restrict = ctypes.c_long(444), ctypes.c_long(446)
+    if libc.syscall(create, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 6:
+        raise RuntimeError("Hands network access needs Landlock ABI 6")
+    attr = (ctypes.c_uint64 * 3)(0, 0, 1)  # scope: abstract Unix sockets
+    fd = libc.syscall(create, ctypes.byref(attr), ctypes.c_size_t(24), ctypes.c_uint32(0))
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "cannot create Hands socket restriction")
+    try:
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot set no_new_privs")
+        if libc.syscall(restrict, ctypes.c_int(fd), ctypes.c_uint32(0)) != 0:
+            raise OSError(ctypes.get_errno(), "cannot enforce Hands socket restriction")
+    finally:
+        os.close(fd)
+if sys.platform.startswith("linux") and "--scope-sockets" in sys.argv[1:]:
+    keep_to_own_sockets()
 sys.stdout.write("ready\n"); sys.stdout.flush()
 while True:
     while not inbox and not closed:
@@ -174,6 +203,13 @@ if sys.platform == "darwin" and confined():
 
 class HandsError(RuntimeError):
     pass
+
+
+UNENCRYPTED = ("{url} is not encrypted and is not known to be on a private network (its address is public, its "
+               "name cannot be looked up here, or requests go through a proxy): anyone between this machine and "
+               "the server could read the commands and their output. Put HTTPS in front of the server (its invite "
+               "then starts with hands+https://), or reach it over a private network such as Tailscale or "
+               "WireGuard. To connect anyway, pass --plain-http.")
 
 
 class _Stopped(Exception):
@@ -269,6 +305,48 @@ def _in_sandbox(tmp: str, state: str) -> list:
     return found
 
 
+def shown_in_home(extra: Any = ()) -> list:
+    """The real folders inside the home folder that commands may still read: toolchains,
+    folders on PATH, and `extra`, the ones the person named (those may be anywhere)."""
+    real_home = os.path.realpath(os.path.expanduser("~"))
+    wanted = [os.environ.get(name) or os.path.join(real_home, sub) for name, sub in TOOL_HOMES.items()]
+    wanted += [os.environ[name] for name in TOOL_PATHS if os.environ.get(name)]
+    wanted += [os.path.join(real_home, sub) for sub in TOOL_FOLDERS]
+    if os.environ.get("PIPX_HOME"):
+        wanted.append(os.environ["PIPX_HOME"])
+    if os.environ.get("XDG_DATA_HOME"):
+        wanted.append(os.path.join(os.environ["XDG_DATA_HOME"], "pipx"))
+    wanted += [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    found: list = []
+    for path in wanted:
+        real = os.path.realpath(os.path.expanduser(path))
+        if os.path.isdir(real) and _within(real, real_home) and real != real_home and real not in found:
+            found.append(real)
+    for path in extra:
+        real = os.path.realpath(os.path.expanduser(str(path)))
+        if not os.path.isdir(real):
+            raise HandsError(f"--read {path}: not a folder")
+        if real in ("/", real_home):
+            raise HandsError(f"--read {path}: name a folder inside your home folder, or use --read-home for all of it")
+        if sandbox.socket_overlap(real):
+            raise HandsError(f"--read {path}: that folder overlaps protected host service sockets")
+        if sandbox.protected(real, [os.path.realpath(home())]):
+            raise HandsError(f"--read {path}: that folder holds keys or credentials and is never shown to commands")
+        if real not in found:
+            found.append(real)
+    return found
+
+
+def _real_in_home(path: str) -> str:
+    """`path` with links followed, if it is a folder in the home folder; else as it is."""
+    home_folder = os.path.expanduser("~")
+    if not path or not os.path.isabs(path) or not os.path.isdir(path):
+        return path
+    if not (_within(path, home_folder) or _within(os.path.realpath(path), os.path.realpath(home_folder))):
+        return path
+    return os.path.realpath(path)
+
+
 def _run_quiet(argv: list) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
@@ -341,6 +419,10 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read(wire.MAX_BODY))
     except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            # A proxy in front of the server, or the server itself failing: not an answer
+            # about this device. It is tried again like any lost connection.
+            raise ConnectionError(f"the server answered {e.code}") from e
         try:
             detail = json.loads(e.read(65536)).get("error", "")
         except ValueError:
@@ -350,9 +432,79 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         raise ConnectionError(str(getattr(e, "reason", e))) from e
 
 
+def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
+          network: bool = False) -> list:
+    """What `hands up` needs, looked at without pairing or running anything. A list of
+    (ok, text): ok is True, False, or None for a line that is only information."""
+    found: list = []
+    real = os.path.realpath(os.path.expanduser(folder))
+    if not os.path.isdir(real):
+        found.append((False, f"{folder} is not a folder"))
+    elif real in ("/", os.path.realpath(os.path.expanduser("~"))):
+        found.append((False, "point Hands at a project folder, not your home folder or /"))
+    else:
+        found.append((True, f"folder to share: {real}"))
+    state = os.path.realpath(home())
+    if _within(state, real) or _within(real, state):
+        found.append((False, f"the shared folder and Hands's own folder ({state}) must be separate"))
+    kind = sandbox.available()
+    if kind:
+        found.append((True, f"sandbox: {kind}" + (" (read-only)" if read_only else "")))
+    else:
+        found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
+                             "commands your full access"))
+    if network and kind == "bwrap" and not sandbox.scopes_sockets():
+        found.append((False, "--network needs enabled Landlock ABI 6 or later; omit --network or upgrade the kernel"))
+    url = ""
+    saved = home() / "server.json"
+    if invite:
+        try:
+            url = wire.Invite.parse(invite).url
+        except ValueError as e:
+            found.append((False, str(e)))
+    elif saved.is_file():
+        try:
+            url = json.loads(saved.read_text())["url"]
+        except (OSError, ValueError, KeyError):
+            found.append((False, f"{saved} is damaged: pair again with a new `/hands invite` line"))
+    else:
+        found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
+    if url and wire.plain_and_public(url):
+        found.append((None if plain_http else False,
+                      UNENCRYPTED.format(url=url) if not plain_http else
+                      f"{url} is not encrypted (--plain-http): commands and output can be read on the way"))
+    if url:
+        # A Hands server answers a request from no device with "no session here" (410).
+        # Anything else that answers is a proxy, another service, or a wrong address.
+        request = urllib.request.Request(url + wire.API + "/poll", b"{}", {"Content-Type": "application/json"})
+        status: Optional[int] = None
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except (OSError, ValueError) as e:
+            found.append((False, f"cannot reach the server at {url} ({getattr(e, 'reason', e)}). If Hermes runs on "
+                                 "another machine, set hands.url there to an address this machine can reach"))
+        if status == 410:
+            found.append((True, f"server reachable: {url}"))
+        elif status is not None:
+            found.append((False, f"{url} answered (HTTP {status}), but not as a Hands server: check the address, "
+                                 "and that hands.listen is set in the plugin config on the server"))
+    real_home = os.path.expanduser("~")
+    tools = sorted(sub.lstrip(".") for name, sub in TOOL_HOMES.items()
+                   if os.path.isdir(os.environ.get(name) or os.path.join(real_home, sub)))
+    found.append((None, "toolchains commands will be told about: " + (", ".join(tools) if tools else "none found")))
+    name, email = _git_identity()
+    found.append((None, f"git commits will be authored as: {name} <{email}>" if name or email else
+                  "no git name or email set: commits made through Hands will need one"))
+    return found
+
+
 class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
-                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say):
+                 allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
+                 plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False):
         self.folder = os.path.realpath(os.path.expanduser(folder))
         if not os.path.isdir(self.folder):
             raise HandsError(f"{folder} is not a folder")
@@ -361,6 +513,13 @@ class Device:
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
         self.allow_unsandboxed = allow_unsandboxed
+        self.read_only = read_only  # commands may look at the folder and not change it
+        self.network = network      # commands may use the internet (to install, clone, download)
+        # Commands cannot read the home folder unless the person says so; what they need
+        # from it (toolchains, and any folder named with --read) is put back.
+        self.read_home = read_home
+        self.shown = shown_in_home(read)
+        self.named = [os.path.realpath(os.path.expanduser(str(path))) for path in read]
         # Where this device keeps its key, its log and the commands' temp folder. Commands
         # never see it (only the temp folder inside), so it cannot overlap what is shared.
         self.state = os.path.realpath(home())
@@ -373,7 +532,9 @@ class Device:
         self._tools = _developer_tools()
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
-        sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed)  # fail before pairing
+        sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
+                     writable=not read_only, home_visible=read_home, tools=self.shown,
+                     network=network)  # fail before pairing
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -386,6 +547,8 @@ class Device:
             self.url, self.secret, server = data["url"], "", data["server_key"]
         else:
             raise HandsError("no server paired yet: run `/hands invite` in a Hermes chat and pass the line it prints")
+        if not plain_http and wire.plain_and_public(self.url):
+            raise HandsError(UNENCRYPTED.format(url=self.url))
         self.server_key = wire.public_key(server)
         self.expires = time.time() + ttl_seconds
         self.grant = wire.mint_grant(self.key, self.server_key, self.folder, ttl_seconds)
@@ -415,14 +578,24 @@ class Device:
 
     def pair(self) -> None:
         grant, identity = self.grant.to_base64(), self.identity.to_base64()
-        nonce = wire.digest(grant, self.folder, self.name, self.tmp)
+        mode = self.mode()
+        network = "on" if self.network or mode == "none" else "off"  # with no sandbox nothing is held back
+        # The invite is signed too: whose machine this becomes follows from it.
+        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode, self.secret, network)
         _post(self.url + wire.API + "/pair", {
             "invite": self.secret, "device": self.me, "name": self.name, "folder": self.folder, "tmp": self.tmp,
-            "grant": grant, "identity": identity, "nonce": nonce,
+            "mode": mode, "network": network, "grant": grant, "identity": identity, "nonce": nonce,
             "sig": self._request("pair", nonce),
         }, timeout=30)
         _private_write(home() / "server.json", json.dumps(
             {"url": self.url, "server_key": wire.key_text(self.server_key)}) + "\n")
+
+    def mode(self) -> str:
+        """What holds commands on this machine. The server repeats it to the agent, so it
+        must never claim a sandbox that is not there."""
+        if sandbox.available() is None:
+            return "none"
+        return "read-only" if self.read_only else "sandboxed"
 
     def poll(self) -> Optional[Dict[str, Any]]:
         nonce = secrets.token_hex(16)
@@ -510,6 +683,14 @@ class Device:
         for name in TOOL_PATHS:
             if os.environ.get(name):
                 env[name] = os.environ[name]
+        if not self.read_home:
+            # The home folder is hidden except the real folders that hold tools. A name in it
+            # that is a link to one (~/bin -> ~/tools/bin, or -> /opt/tools) would lead
+            # nowhere, so commands get the folder it stands for.
+            env["PATH"] = os.pathsep.join(_real_in_home(part) for part in env["PATH"].split(os.pathsep))
+            for name in (*TOOL_HOMES, *TOOL_PATHS):
+                if name in env:
+                    env[name] = _real_in_home(env[name])
         dirs, sdk = self._tools
         if dirs:
             env["PATH"] = _before_usr_bin(env["PATH"], dirs)
@@ -620,9 +801,13 @@ class Device:
         # The interpreter and its standard library, wherever they are installed.
         own = sorted({os.path.realpath(p) for p in (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
         try:
-            argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
+            command = [python, "-I", "-S", "-c", RUNNER]
+            if self.network and sandbox.available() == "bwrap":
+                command.append("--scope-sockets")
+            argv = sandbox.wrap(folder, tmp, command,
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
-                                hidden=[self.state])
+                                hidden=[self.state], writable=not self.read_only,
+                                home_visible=self.read_home, tools=self.shown, network=self.network)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
@@ -851,6 +1036,38 @@ class Device:
 
     # -- the loop ---------------------------------------------------------------
 
+    def _pause(self, seconds: float) -> None:
+        """Wait, but not past a request to stop or the end of the time window."""
+        end = min(time.time() + seconds, self.expires)
+        while not self._stop and time.time() < end:
+            time.sleep(0.2)
+
+    def summary(self) -> list:
+        """What commands from the server can and cannot do here, in plain words."""
+        kind = sandbox.available()
+        if kind is None:
+            return ["No sandbox on this machine: commands run with your full access (--no-sandbox)."]
+        lines = ["Commands can read this folder and cannot change it (--read-only)." if self.read_only else
+                 "Commands can change files only in this folder."]
+        if self.read_home:
+            lines.append("They can read the rest of your home folder (--read-home), except your keys, credentials, "
+                         "browser data and shell history.")
+        else:
+            lines.append("They cannot read the rest of your home folder, except your toolchains"
+                         + (" and " + ", ".join(self.named) if self.named else "") + ".")
+        lines.append("They can read system files.")
+        if self.network:
+            lines.append("They can use the internet (--network), and reach programs listening on this machine.")
+        elif kind == "sandbox-exec":
+            lines.append("They have no internet (start with --network to let them install or download). "
+                         "They can reach programs listening on this machine.")
+        else:
+            lines.append("They have no network: no internet, and no programs on this machine "
+                         "(start with --network to let them install or download).")
+        if kind == "sandbox-exec":
+            lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        return lines
+
     def stop(self, *from_signal: Any) -> None:
         self._stop = True
         if from_signal and self._waiting:
@@ -860,8 +1077,10 @@ class Device:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
+        for line in self.summary():
+            self.say("  " + line)
         self.say("Press Ctrl-C to stop. Commands appear below as they run.")
-        failures = 0
+        failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
                 self._waiting = True
@@ -869,12 +1088,38 @@ class Device:
                     job = self.poll()
                 finally:
                     self._waiting = False
-                failures = 0
+                failures, rejoins = 0, 0
             except _Stopped:
                 break
             except HandsError as e:
+                # The server forgot this session, which is what a restart of Hermes looks
+                # like from here. A machine it still knows pairs again by itself, with the
+                # grant and time window it already has. Only the server refusing to pair
+                # it (it was revoked) ends the session; a server that cannot be reached
+                # is tried again, and one that keeps forgetting is given longer each time.
+                ended = str(e)
+                if rejoins < 6:
+                    rejoins += 1
+                    if rejoins > 1:
+                        self._pause(min(30, 2 ** rejoins))
+                    if self._stop or time.time() >= self.expires:
+                        break
+                    try:
+                        self.pair()
+                    except ConnectionError as lost:
+                        rejoins -= 1  # the server did not answer: not one of its refusals to remember
+                        failures += 1
+                        if failures == 1:
+                            self.say(f"Can't reach the server ({lost}); retrying.")
+                        self._pause(min(30, 2 ** min(failures, 5)))
+                        continue
+                    except HandsError as refused:
+                        ended = str(refused)
+                    else:
+                        self.say("The server restarted; this machine is paired with it again.")
+                        continue
                 self._stop_runner()
-                self.say(f"The server ended this session: {e}")
+                self.say(f"The server ended this session: {ended}")
                 return 1
             except ConnectionError as e:
                 if time.time() >= self.expires:
@@ -882,7 +1127,7 @@ class Device:
                 failures += 1
                 if failures == 1:
                     self.say(f"Can't reach the server ({e}); retrying.")
-                time.sleep(min(30, 2 ** min(failures, 5)))
+                self._pause(min(30, 2 ** min(failures, 5)))  # a request to stop is not kept waiting
                 continue
             if job:
                 try:

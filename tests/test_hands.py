@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,12 +15,26 @@ from pathlib import Path
 
 import pytest
 
+from hermes_tenuo.hands import device as device_module
 from hermes_tenuo.hands import hub as hub_module
 from hermes_tenuo.hands import chat, sandbox, wire
 from hermes_tenuo.hands.device import Device, HandsError
 from hermes_tenuo.hands.hub import HandsUnavailable, Hub, Refused
 
 sandboxed = pytest.mark.skipif(sandbox.available() is None, reason="needs sandbox-exec or bubblewrap")
+
+
+_PROXY_ENV = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_proxy(monkeypatch):
+    """Tests talk to servers directly, whatever proxy the caller's environment or system
+    names. A test about proxies sets its own."""
+    for name in _PROXY_ENV:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
+    monkeypatch.setenv("no_proxy", "*")
 
 
 @pytest.fixture
@@ -740,6 +755,726 @@ def test_own_folder_replaces_a_link_or_a_file_and_keeps_a_folder(tmp_path):
     assert (target / "keep").read_text() == "x"
 
 
+# --- easier to use -----------------------------------------------------------------------------
+
+class _Where:
+    name, folder, mode = "laptop", "/work/app", "sandboxed"
+
+
+def test_results_say_which_machine_they_ran_on():
+    marked = json.loads(chat._marked(json.dumps({"output": "ok", "exit_code": 0}), "terminal", _Where()))
+    assert marked["output"] == "ok" and marked["exit_code"] == 0
+    assert "laptop" in marked["ran_on"] and "/work/app" in marked["ran_on"] and "hands_note" not in marked
+    refused = json.loads(chat._marked(json.dumps({"output": "sh: x: Operation not permitted", "exit_code": 1}),
+                                      "terminal", _Where()))
+    assert "shares only /work/app" in refused["hands_note"]
+    error = json.loads(chat._marked(json.dumps({"error": "Permission denied: /etc/x"}), "write_file", _Where()))
+    assert "hands_note" in error
+    linux = json.loads(chat._marked(json.dumps({"output": "bash: /usr/x: Read-only file system", "exit_code": 1}),
+                                    "terminal", _Where()))
+    assert "hands_note" in linux
+    missing = json.loads(chat._marked(json.dumps({"output": "cat: nope: No such file or directory", "exit_code": 1}),
+                                      "terminal", _Where()))
+    assert "hands_note" not in missing  # an ordinary failure is not explained as a refusal
+
+
+@pytest.mark.parametrize("mode", ["none", ""])
+def test_no_sandbox_promise_for_a_machine_without_one(mode):
+    class Open(_Where):
+        pass
+    Open.mode = mode
+    denied = json.loads(chat._marked(json.dumps({"output": "sh: /etc/x: Permission denied", "exit_code": 1}),
+                                     "terminal", Open()))
+    assert "laptop" in denied["ran_on"] and "hands_note" not in denied
+
+
+def test_read_only_machine_is_described_as_such():
+    class Look(_Where):
+        mode = "read-only"
+    denied = json.loads(chat._marked(json.dumps({"output": "sh: new.txt: Operation not permitted", "exit_code": 1}),
+                                     "terminal", Look()))
+    assert "to read, not to change" in denied["hands_note"] and "shares only" not in denied["hands_note"]
+
+
+def test_a_failed_download_is_explained_where_commands_have_no_internet():
+    class Offline(_Where):
+        network = "off"
+
+    class Online(_Where):
+        network = "on"
+    failures = ("curl: (6) Could not resolve host: pypi.org",
+                "socket.gaierror: [Errno -3] Temporary failure in name resolution",
+                "npm error code ENOTFOUND",
+                "[Errno 8] nodename nor servname provided, or not known")
+    for output in failures:
+        result = json.dumps({"output": output, "exit_code": 1})
+        note = json.loads(chat._marked(result, "terminal", Offline()))["hands_note"]
+        assert "no internet access" in note and "--network" in note and "shares only" not in note
+        assert "hands_note" not in json.loads(chat._marked(result, "terminal", Online()))
+        assert "hands_note" not in json.loads(chat._marked(result, "terminal", _Where()))  # not said: not claimed
+    refused = json.dumps({"output": "PermissionError: [Errno 1] Operation not permitted", "exit_code": 1})
+    note = json.loads(chat._marked(refused, "terminal", Offline()))["hands_note"]
+    assert "shares only /work/app" in note and "--network" in note
+    assert "--network" not in json.loads(chat._marked(refused, "terminal", Online()))["hands_note"]
+    ordinary = json.loads(chat._marked(json.dumps({"output": "ERROR: No matching distribution found for six",
+                                                   "exit_code": 1}), "terminal", Offline()))
+    assert "hands_note" not in ordinary and "no internet" in ordinary["ran_on"]  # every result says it
+    assert "internet" not in json.loads(chat._marked(refused, "terminal", Online()))["ran_on"]
+
+
+def test_the_network_is_off_unless_asked(tmp_path):
+    project, temp = str(tmp_path / "p"), str(tmp_path / "t")
+    resolver = "/private/var/run/mDNSResponder"
+    offline, online = sandbox._mac_profile(project, temp), sandbox._mac_profile(project, temp, network=True)
+    assert '(remote ip "localhost:*")' in offline and "(allow network-outbound (remote ip))" not in offline
+    assert resolver not in offline
+    assert "(allow network-outbound (remote ip))" in online and resolver in online
+    assert "--unshare-net" in sandbox._bwrap(project, temp, ["true"])
+    assert "--unshare-net" not in sandbox._bwrap(project, temp, ["true"], network=True)
+
+
+CONNECT = ("import socket,sys\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.settimeout(2)\n"
+           "try:\n    s.connect((sys.argv[1], int(sys.argv[2])))\n    print('connected')\n"
+           "except Exception as e:\n    print(type(e).__name__, e)\n")
+
+
+@sandboxed
+@pytest.mark.parametrize("network", [False, True])
+def test_commands_reach_the_internet_only_with_network(hub, folder, monkeypatch, network):
+    """A numeric address that answers nobody stands in for the internet: without the network
+    the connection is refused at once, with it the command is left to try."""
+    import socket
+
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    (folder / "connect.py").write_text(CONNECT)
+    if network and sandbox.available() == "bwrap" and not sandbox.scopes_sockets():
+        with pytest.raises(sandbox.SandboxUnavailable, match="Landlock ABI 6"):
+            up(hub, folder, network=True)
+        return
+    device = up(hub, folder, network=network)
+    assert hub.pick("laptop").network == ("on" if network else "off")
+    assert ("internet on" if network else "no internet") in chat.command("status")
+    assert any("--network" in line for line in device.lines)
+    python = "python3 -I -S connect.py"
+    out, _ = run(hub, f"{python} 192.0.2.1 9")
+    if sys.platform == "darwin":
+        assert ("PermissionError" in out) is not network
+    elif not network:
+        assert "unreachable" in out
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:  # a program on this machine
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        out, _ = run(hub, f"{python} 127.0.0.1 {server.getsockname()[1]}")
+    # macOS commands share the machine's loopback either way; Linux ones only with the network.
+    assert ("connected" in out) is (network or sys.platform == "darwin")
+    device.stop()
+
+
+def test_a_machine_without_a_sandbox_is_not_called_offline(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, name="open", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert hub.pick("open").network == "on" and "internet" not in chat.command("status")
+
+
+def test_the_server_learns_how_a_machine_holds_commands(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, name="open", allow_unsandboxed=True).pair()
+    assert hub.pick("open").mode == "none"
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert "open: up" in chat.command("status") and "no sandbox" in chat.command("status")
+
+
+def test_a_pairing_request_cannot_claim_another_mode(hub, folder, monkeypatch):
+    sent = {}
+    real = device_module._post
+    monkeypatch.setattr(device_module, "_post", lambda url, body, timeout: sent.update(body) or real(url, body, timeout))
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, allow_unsandboxed=True).pair()
+    hub._paired.clear()
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, mode="sandboxed"))
+    assert sent["network"] == "on"
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, network="off"))
+
+
+def test_only_device_tools_and_plain_results_are_marked():
+    result = json.dumps({"results": []})
+    assert chat._marked(result, "web_search", _Where()) == result      # runs on the server
+    assert chat._marked(result, "terminal", None) == result           # no device took the call
+    assert chat._marked("not json", "terminal", _Where()) == "not json"
+    assert chat._marked(json.dumps([1, 2]), "terminal", _Where()) == "[1, 2]"
+    once = chat._marked(json.dumps({"output": "x"}), "terminal", _Where())
+    assert chat._marked(once, "terminal", _Where()) == once           # never marked twice
+
+
+@sandboxed
+def test_read_only_lets_commands_look_and_not_change(hub, folder):
+    device = up(hub, folder, read_only=True)
+    out, code = run(hub, "cat README.md && echo x > new.txt; echo write=$?; echo t > \"$TMPDIR/scratch\" && echo tmp-ok")
+    assert "device readme" in out and "write=0" not in out and "tmp-ok" in out, out
+    assert not (folder / "new.txt").exists()
+    out, _ = run(hub, "rm README.md; echo rm=$?")
+    assert "rm=0" not in out and (folder / "README.md").exists()
+    assert any("--read-only" in line for line in device.lines)
+    assert hub.pick("laptop").mode == "read-only"
+    device.stop()
+
+
+def test_read_only_needs_a_sandbox(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    with pytest.raises(sandbox.SandboxUnavailable, match="read-only"):
+        Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, read_only=True)
+
+
+@sandboxed
+def test_hands_up_says_what_commands_can_do(hub, folder):
+    device = up(hub, folder)
+    said = " ".join(device.lines)
+    assert "change files only in this folder" in said and "network" in said
+    assert "cannot read the rest of your home folder" in said
+    device.stop()
+
+
+@sandboxed
+def test_device_pairs_again_when_the_server_forgot_it(hub, folder, monkeypatch):
+    """What a restart of Hermes looks like to a device that is up."""
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    assert run(hub, "echo before")[0].strip() == "before"
+    with hub._lock:
+        hub._sessions.clear()  # the hub's memory is gone; its list of known devices is on disk
+        hub._paired.clear()
+    deadline = time.time() + 15
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert run(hub, "echo after")[0].strip() == "after"
+    assert any("paired with it again" in line for line in device.lines)
+    # And again straight away: a second restart is waited out, not taken as the end.
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 20
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert run(hub, "echo twice")[0].strip() == "twice"
+    assert device.thread.is_alive()
+    device.stop()
+
+
+@sandboxed
+def test_device_keeps_trying_when_pairing_again_cannot_reach_the_server(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    real, lost = device_module._post, {"n": 0}
+
+    def flaky(url, body, timeout):
+        if url.endswith("/pair") and lost["n"] < 2:
+            lost["n"] += 1
+            raise ConnectionError("timed out")
+        return real(url, body, timeout)
+
+    monkeypatch.setattr(device_module, "_post", flaky)
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 30
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert lost["n"] == 2 and device.thread.is_alive()
+    assert run(hub, "echo back")[0].strip() == "back"
+    device.stop()
+
+
+@sandboxed
+def test_a_proxy_error_while_pairing_again_is_not_a_refusal(hub, folder, monkeypatch):
+    import urllib.error
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    real, failed = device_module.urllib.request.urlopen, {"n": 0}
+
+    def flaky(request, timeout=None):
+        if request.full_url.endswith("/pair") and failed["n"] < 3:
+            failed["n"] += 1
+            raise urllib.error.HTTPError(request.full_url, 502 if failed["n"] % 2 else 503, "Bad Gateway", {}, None)
+        return real(request, timeout=timeout)
+
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", flaky)
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 40
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert failed["n"] == 3 and device.thread.is_alive()
+    assert run(hub, "echo back")[0].strip() == "back"
+    assert not any("ended this session" in line for line in device.lines)
+    device.stop()
+
+
+def test_a_server_error_is_a_lost_connection_and_a_refusal_is_not(monkeypatch):
+    import io
+    import urllib.error
+
+    def answer(code, body=b""):
+        def urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body))
+        return urlopen
+
+    for code in (500, 502, 503, 504):
+        monkeypatch.setattr(device_module.urllib.request, "urlopen", answer(code))
+        with pytest.raises(ConnectionError):
+            device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", answer(403, b'{"error": "this device is not paired"}'))
+    with pytest.raises(HandsError, match="not paired"):
+        device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
+
+
+@sandboxed
+def test_a_revoked_device_does_not_pair_again(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    assert hub.revoke("laptop")
+    device.thread.join(20)
+    assert not device.thread.is_alive()
+    assert not hub.sessions()
+    assert any("ended this session" in line for line in device.lines)
+
+
+def test_check_reports_what_is_missing_without_pairing(hub, folder, tmp_path, monkeypatch):
+    from hermes_tenuo.hands.device import check
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])  # the same on a machine with no sandbox
+    found = check(hub.invite(), str(folder))
+    assert all(ok is not False for ok, _ in found), found
+    assert any(ok and "server reachable" in text for ok, text in found)
+    assert not hub.sessions() and not (tmp_path / "device-state" / "device.key").exists()  # nothing was paired or made
+    missing = check(None, str(folder))
+    assert any(ok is False and "/hands invite" in text for ok, text in missing)
+    assert any(ok is False and "not a folder" in text for ok, text in check(hub.invite(), str(folder / "nope")))
+    assert any(ok is False and "home folder" in text for ok, text in check(hub.invite(), "~"))
+    assert any(ok is False and "damaged" in text for ok, text in check("hands://127.0.0.1:1/x#nope", str(folder)))
+    port_closed = hub.invite().replace(hub.public_url.split("//")[1], "127.0.0.1:1")
+    assert any(ok is False and "cannot reach" in text for ok, text in check(port_closed, str(folder)))
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    assert any(ok is False and "no sandbox" in text for ok, text in check(hub.invite(), str(folder)))
+
+
+def test_check_does_not_take_another_service_for_a_hands_server(hub, folder, monkeypatch):
+    """A proxy's 502, or some other program at that address, is not a server that is ready."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from hermes_tenuo.hands.device import check
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])
+
+    class Other(BaseHTTPRequestHandler):
+        status = 502
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(self.status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        invite = hub.invite().replace(hub.public_url.split("//")[1], f"127.0.0.1:{server.server_address[1]}")
+        for status in (502, 404, 200):
+            Other.status = status
+            found = check(invite, str(folder))
+            assert any(ok is False and f"HTTP {status}" in text and "not as a Hands server" in text
+                       for ok, text in found), (status, found)
+            assert not any(ok and "server reachable" in text for ok, text in found)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --- before strangers use it -------------------------------------------------------------------
+
+def test_private_and_public_addresses():
+    for host in ("127.0.0.1", "localhost", "10.1.2.3", "192.168.1.9", "172.20.0.4", "100.101.102.103",
+                 "169.254.1.1", "::1", "[::1]", "fd7a:115c:a1e0::1"):
+        assert wire.private_host(host), host
+    for host in ("8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"):
+        assert not wire.private_host(host), host
+    assert wire.plain_and_public("http://8.8.8.8:8765")
+    assert not wire.plain_and_public("https://8.8.8.8") and not wire.plain_and_public("http://10.0.0.2:8765")
+
+
+def test_device_refuses_an_unencrypted_public_server(hub, folder):
+    key = wire.key_text(hub.key.public_key)
+    public = wire.Invite("http://8.8.8.8:8765", "secret", key).render()
+    with pytest.raises(HandsError, match="not encrypted"):
+        Device(public, str(folder), 60, allow_unsandboxed=True)
+    Device(public, str(folder), 60, allow_unsandboxed=True, plain_http=True)   # the person said so
+    Device(wire.Invite("https://8.8.8.8", "secret", key).render(), str(folder), 60, allow_unsandboxed=True)
+    Device(wire.Invite("http://192.168.1.20:8765", "secret", key).render(), str(folder), 60, allow_unsandboxed=True)
+    from hermes_tenuo.hands.device import check
+    assert any(ok is False and "not encrypted" in text for ok, text in check(public, str(folder)))
+
+
+def test_invite_says_when_its_address_is_public_and_plain(hub, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert "not encrypted" not in chat.command("invite")   # the test hub listens on this machine
+    hub.public_url = "http://8.8.8.8:8765"
+    assert "not encrypted" in chat.command("invite")
+
+
+def test_a_machine_belongs_to_whoever_invited_it(hub, folder, monkeypatch):
+    switched = []
+    hub.joined = lambda conversation, name: switched.append((conversation, name))
+    device = Device(hub.invite("telegram:alice", "chat-a"), str(folder), 60, allow_unsandboxed=True)
+    device.pair()
+    assert switched == [("chat-a", device.name)]          # the conversation that asked starts using it
+    assert hub.pick(device.name).owner == "telegram:alice"
+    assert [s.name for s in hub.sessions("telegram:alice")] == [device.name]
+    assert hub.sessions("telegram:bob") == [] and hub.sessions("") == []
+    with pytest.raises(HandsUnavailable):
+        hub.pick(device.name, "telegram:bob")
+    assert not hub.revoke(device.name, "telegram:bob") and hub.sessions("telegram:alice")
+    # Coming up again with no invite, it is still hers, and nobody is switched again.
+    Device(None, str(folder), 60, allow_unsandboxed=True).pair()
+    assert hub.pick(device.name, "telegram:alice").owner == "telegram:alice" and len(switched) == 1
+    assert hub.revoke(device.name, "telegram:alice") and not hub.sessions()
+
+
+def test_a_machine_paired_with_no_one_asking_is_for_anyone(hub, folder):
+    device = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)   # a single-user Hermes
+    device.pair()
+    assert hub.pick(device.name, "telegram:bob").owner == "" and hub.sessions("")
+    assert hub.revoke(device.name, "telegram:bob")
+
+
+def test_chat_commands_only_see_your_own_machines(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "chat-a")
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:alice")
+    hub.joined = chat.joined
+    line = chat.command("invite")
+    assert "starts using the machine as soon as it is up" in line
+    Device(line.split("'")[1], str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert chat._wanted.get("chat-a") == "laptop"          # no /hands on needed
+    assert "laptop: up" in chat.command("status")
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:bob")
+    monkeypatch.setattr(chat, "_conversation", lambda: "chat-b")
+    assert "laptop" not in chat.command("status")
+    assert "no device named 'laptop'" in chat.command("on laptop") and "chat-b" not in chat._wanted
+    assert "No machine of yours" in chat.command("revoke laptop")
+    chat._wanted.pop("chat-a", None)
+
+
+def _hermes_says(monkeypatch, names_sender=True, **said):
+    """A stand-in for the part of Hermes that says who sent the current message."""
+    import types
+    context = types.ModuleType("gateway.session_context")
+    context.get_session_env = lambda name, default="": said.get(name, default)
+    if names_sender:
+        context.set_session_vars = lambda platform="", user_id="", actor_id=None: []
+        context.session_is_messaging_surface = lambda: said.get("HERMES_SESSION_PLATFORM", "") not in ("", "cli")
+    else:
+        context.set_session_vars = lambda platform="", user_id="": []
+    gateway = types.ModuleType("gateway")
+    gateway.session_context = context
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", context)
+
+
+def test_the_owner_is_whoever_sent_the_message(monkeypatch):
+    telegram = {"HERMES_SESSION_PLATFORM": "telegram"}
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="42", HERMES_SESSION_ACTOR_ID="42")
+    assert chat._owner() == "telegram:42"
+    # A shared chat is routed by no one user; the sender of each message is still named.
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="", HERMES_SESSION_ACTOR_ID="7")
+    assert chat._owner() == "telegram:7"
+    # A message with no one sender is nobody's, not a single-user session's.
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_USER_ID="42", HERMES_SESSION_ACTOR_ID="")
+    assert chat._owner() == chat.NOBODY
+    _hermes_says(monkeypatch, HERMES_SESSION_PLATFORM="cli")
+    assert chat._owner() == ""
+    _hermes_says(monkeypatch)
+    assert chat._owner() == ""
+    # A Hermes that does not name the sender: the user the conversation is routed by.
+    _hermes_says(monkeypatch, names_sender=False, **telegram, HERMES_SESSION_USER_ID="42")
+    assert chat._owner() == "telegram:42"
+    _hermes_says(monkeypatch, names_sender=False, **telegram)
+    assert chat._owner() == chat.NOBODY
+    _hermes_says(monkeypatch, names_sender=False, HERMES_SESSION_PLATFORM="cli")
+    assert chat._owner() == ""
+    monkeypatch.setitem(sys.modules, "gateway", None)   # not inside Hermes at all
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+    assert chat._owner() == ""
+
+
+def test_a_message_with_no_sender_cannot_set_up_or_take_a_machine(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    Device(hub.invite("telegram:alice"), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "_owner", lambda: chat.NOBODY)
+    for words in ("invite", "on laptop", "revoke laptop"):
+        assert "cannot tell who sent" in chat.command(words), words
+    assert not hub._invites and "group" not in chat._wanted and hub.sessions("telegram:alice")
+    assert "laptop" not in chat.command("status")
+    assert hub.sessions(chat.NOBODY) == []
+
+
+def test_the_one_conversation_of_a_cli_starts_using_the_machine(hub, folder):
+    switched = []
+    hub.joined = lambda conversation, name: switched.append((conversation, name))
+    Device(hub.invite("", ""), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert switched == [("", "laptop")]      # its conversation has an empty name, and is still one
+    Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    assert len(switched) == 1                # asked for by no conversation: nothing to switch
+
+
+def test_a_linked_tool_folder_is_given_to_commands_as_the_folder_it_stands_for(tmp_path, folder, hub, monkeypatch):
+    home = tmp_path / "home"
+    (home / "tools" / "bin").mkdir(parents=True)
+    outside = tmp_path / "opt-tools"
+    outside.mkdir()
+    (home / "bin").symlink_to(home / "tools" / "bin")
+    (home / "opt").symlink_to(outside)
+    (home / ".rustup-real").mkdir()
+    (home / ".rustup").symlink_to(home / ".rustup-real")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RUSTUP_HOME", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / "bin"), str(home / "opt"), "/usr/bin", "/bin"]))
+    real = os.path.realpath
+    hidden = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    parts = hidden._env()["PATH"].split(os.pathsep)
+    assert real(home / "tools" / "bin") in parts and real(outside) in parts
+    assert str(home / "bin") not in parts and str(home / "opt") not in parts and "/usr/bin" in parts
+    assert hidden._env()["RUSTUP_HOME"] == real(home / ".rustup-real")
+    assert real(home / "tools" / "bin") in hidden.shown
+    seen = Device(hub.invite(), str(folder), 60, allow_unsandboxed=True, read_home=True)
+    assert str(home / "bin") in seen._env()["PATH"].split(os.pathsep)   # readable as it is: left alone
+
+
+@sandboxed
+def test_a_tool_behind_a_link_in_the_home_folder_still_runs(hub, home_base, monkeypatch):
+    home = home_base / "home"
+    project = home / "work" / "app"
+    for path in (project, home / "tools" / "bin"):
+        path.mkdir(parents=True)
+    tool = home / "tools" / "bin" / "hands-linked-tool"
+    tool.write_text("#!/bin/sh\necho linked-tool-ran\n")
+    tool.chmod(0o755)
+    (home / "bin").symlink_to(home / "tools" / "bin")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TENUO_HANDS_HOME", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / "bin"), os.environ.get("PATH", os.defpath)]))
+    device = up(hub, project)
+    out, code = run(hub, "hands-linked-tool")
+    assert code == 0 and "linked-tool-ran" in out, out
+    device.stop()
+    device.thread.join(30)
+
+
+@pytest.fixture
+def home_base(tmp_path):
+    """Where a stand-in home folder can live. On Linux a sandbox has its own /tmp, so a
+    home folder under /tmp could not be told apart from a hidden one."""
+    if sys.platform != "linux":
+        yield tmp_path
+        return
+    import shutil
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="hands-test-", dir="/var/tmp"))
+    yield base
+    shutil.rmtree(base, ignore_errors=True)
+
+
+@sandboxed
+def test_commands_cannot_read_the_rest_of_the_home_folder(hub, home_base, monkeypatch):
+    home = home_base / "home"
+    project, shown = home / "work" / "app", home / "notes"
+    for path in (project, shown, home / "Documents", home / "work" / "other"):
+        path.mkdir(parents=True)
+    (home / "Documents" / "taxes.txt").write_text("papers")
+    (home / "work" / "other" / ".env").write_text("TOKEN=abc")
+    (shown / "ok.txt").write_text("fine")
+    (project / "README.md").write_text("project")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("TENUO_HANDS_HOME", raising=False)   # the default place, inside the home folder
+    device = up(hub, project)
+    out, code = run(hub, "cat README.md && echo t > \"$TMPDIR/x\" && cat \"$TMPDIR/x\"")
+    assert code == 0 and "project" in out
+    out, _ = run(hub, f"(cat {home}/Documents/taxes.txt {home}/work/other/.env {shown}/ok.txt; ls {home} {home}/work"
+                      ") 2>/dev/null")
+    assert not any(word in out for word in ("papers", "TOKEN", "fine", "Documents", "other")), out
+    assert any("cannot read the rest of your home folder" in line for line in device.lines)
+    device.stop()
+    device.thread.join(30)
+    # A folder the person names is readable (and still not writable); the rest stays hidden.
+    device = up(hub, project, invite=False, read=[str(shown)])
+    out, _ = run(hub, f"(cat {shown}/ok.txt; echo x > {shown}/new.txt; cat {home}/Documents/taxes.txt) 2>/dev/null")
+    assert "fine" in out and "papers" not in out and not (shown / "new.txt").exists()
+    # A write into the hidden home folder fails; it does not seem to work and then vanish.
+    out, _ = run(hub, f"echo x > {home}/stray.txt; echo write=$?; mkdir {home}/newdir; echo mkdir=$?")
+    assert "write=0" not in out and "mkdir=0" not in out and not (home / "stray.txt").exists()
+    device.stop()
+    device.thread.join(30)
+    # --read-home shows the home folder again, except the protected paths.
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id").write_text("KEYMATERIAL")
+    device = up(hub, project, invite=False, read_home=True)
+    out, _ = run(hub, f"(cat {home}/Documents/taxes.txt; cat {home}/.ssh/id) 2>/dev/null")
+    assert "papers" in out and "KEYMATERIAL" not in out
+    assert any("--read-home" in line for line in device.lines)
+    device.stop()
+
+
+def test_folders_shown_in_the_home_folder(tmp_path, monkeypatch):
+    from hermes_tenuo.hands.device import shown_in_home
+    home = tmp_path / "home"
+    for sub in (".rustup", ".cargo/bin", ".local/share/uv", "notes", "elsewhere"):
+        (home / sub).mkdir(parents=True)
+    outside = tmp_path / "opt-tools"
+    outside.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(home / ".cargo" / "bin"), str(outside), "/usr/bin"]))
+    for name in ("RUSTUP_HOME", "PYENV_ROOT", "NVM_DIR", "RBENV_ROOT", "ASDF_DATA_DIR", "VOLTA_HOME", "SDKMAN_DIR",
+                 "JAVA_HOME", "ANDROID_HOME", "GOROOT"):
+        monkeypatch.delenv(name, raising=False)
+    real = os.path.realpath
+    assert set(shown_in_home()) == {real(home / ".rustup"), real(home / ".cargo" / "bin"), real(home / ".local/share/uv")}
+    assert real(home / "notes") in shown_in_home([str(home / "notes")])
+    for bad in (str(home), "/", str(home / "missing")):
+        with pytest.raises(HandsError):
+            shown_in_home([bad])
+
+
+def test_swapping_the_invite_in_a_pairing_request_is_refused(hub, folder, monkeypatch):
+    """Whose machine it becomes follows from the invite, so the device signs the invite too."""
+    sent = {}
+    real = device_module._post
+    monkeypatch.setattr(device_module, "_post", lambda url, body, timeout: sent.update(body) or real(url, body, timeout))
+    Device(hub.invite("telegram:alice", "chat-a"), str(folder), 60, allow_unsandboxed=True).pair()
+    assert hub.sessions("telegram:alice")
+    hub._paired.clear()
+    taken = []
+    hub.joined = lambda conversation, name: taken.append(conversation)
+    other = wire.Invite.parse(hub.invite("telegram:mallory", "chat-m")).secret
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, invite=other))
+    assert hub.sessions("telegram:alice") and not hub.sessions("telegram:mallory") and not taken
+
+
+def test_a_protected_folder_is_never_shown(tmp_path, monkeypatch):
+    from hermes_tenuo.hands.device import shown_in_home
+    home = tmp_path / "home"
+    for sub in (".ssh/keys", ".aws", "notes", ".cargo/bin"):
+        (home / sub).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TENUO_HANDS_HOME", str(home / ".hermes-tenuo" / "hands"))
+    assert sandbox.protected(str(home / ".ssh")) and sandbox.protected(str(home / ".ssh" / "keys"))
+    assert not sandbox.protected(str(home / "notes")) and not sandbox.protected(str(home))
+    for bad in (home / ".ssh", home / ".ssh" / "keys", home / ".aws"):
+        with pytest.raises(HandsError, match="never shown"):
+            shown_in_home([str(bad)])
+    # Even handed one directly (a PATH entry inside a protected folder), the sandbox leaves it hidden.
+    monkeypatch.setattr(sandbox, "_probe", ["bwrap"])
+    real = os.path.realpath
+    argv = sandbox.wrap(str(home / "notes"), str(tmp_path / "t"), ["true"], home_visible=False,
+                        tools=[real(home / ".ssh" / "keys"), real(home / ".cargo" / "bin")])
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--ro-bind"]
+    assert real(home / ".cargo" / "bin") in binds and real(home / ".ssh" / "keys") not in binds
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])
+    profile = sandbox.wrap(str(home / "notes"), str(tmp_path / "t"), ["true"], home_visible=False,
+                           tools=[real(home / ".ssh" / "keys"), real(home / ".cargo" / "bin")])[2]
+    allowed = [line for line in profile.splitlines() if line.startswith("(allow file-read*") and ".cargo" in line]
+    assert allowed and ".ssh" not in allowed[0]
+
+
+def test_a_name_that_cannot_be_looked_up_or_a_proxy_is_not_private(monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    assert not wire.private_host("no-such-host.invalid")
+    assert wire.plain_and_public("http://no-such-host.invalid:8765")
+    assert not wire.plain_and_public("http://10.0.0.2:8765")
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": "http://proxy.example:3128"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    assert wire.plain_and_public("http://10.0.0.2:8765")      # the proxy would see it
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: True)
+    assert not wire.plain_and_public("http://10.0.0.2:8765")
+    assert not wire.plain_and_public("https://no-such-host.invalid")
+
+
+def test_a_proxy_exception_is_matched_the_way_the_request_matches_it(monkeypatch):
+    """The request asks about the address as the URL writes it, port and brackets included."""
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
+    for bypass, direct in (("::1", False), ("[::1]", True), ("[::1]:8765", True), ("[::1]:9", False)):
+        monkeypatch.setenv("no_proxy", bypass)
+        assert wire.plain_and_public("http://[::1]:8765") is not direct, bypass
+    for bypass, direct in (("127.0.0.1", True), ("127.0.0.1:8765", True), ("127.0.0.1:9", False), ("", False)):
+        monkeypatch.setenv("no_proxy", bypass)
+        assert wire.plain_and_public("http://127.0.0.1:8765") is not direct, bypass
+
+
+def test_process_results_are_not_given_a_machine():
+    result = json.dumps({"status": "running", "output": "x"})
+    for name in ("process", "process_manage"):
+        assert chat._marked(result, name, _Where()) == result
+
+
+def test_stopping_does_not_wait_out_a_retry_when_the_server_is_gone(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder, allow_unsandboxed=True)
+    hub.close()                      # the server goes away; the device starts retrying, slower each time
+    deadline = time.time() + 20
+    while time.time() < deadline and not any("retrying" in line for line in device.lines):
+        time.sleep(0.1)
+    time.sleep(7)                    # by now it is waiting 8 seconds or more between tries
+    asked = time.time()
+    device.stop()
+    device.thread.join(20)
+    assert not device.thread.is_alive() and time.time() - asked < 3, time.time() - asked
+
+
+def test_why_there_is_no_sandbox(monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    assert "not installed" in sandbox.why_not() and "apt install bubblewrap" in sandbox.why_not()
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_refusal", ["bwrap: setting up uid map: Permission denied"])
+    said = sandbox.why_not()
+    assert "is installed, but" in said and "uid map: Permission denied" in said and "Hands on Ubuntu" in said
+    with pytest.raises(sandbox.SandboxUnavailable, match="is installed, but"):
+        sandbox.wrap("/x", "/y", ["true"])
+    monkeypatch.setattr(sandbox, "_probe", ["bwrap"])
+    assert sandbox.why_not() == ""
+
+
+@pytest.mark.skipif(not sandbox.scopes_sockets() or sandbox.available() != "bwrap",
+                    reason="needs Linux 6.12 or later and bubblewrap")
+@pytest.mark.parametrize("network", [False, True])  # with the machine's network, the kernel holds them back
+def test_commands_cannot_reach_another_programs_named_socket(hub, folder, network):
+    import socket
+    name = f"hands-test-{os.getpid()}"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind("\0" + name)
+    listener.listen(1)
+    try:
+        device = up(hub, folder, network=network)
+        out, _ = run(hub, "python3 -c \"import socket\ns = socket.socket(socket.AF_UNIX)\n"
+                          f"try:\n    s.connect('\\0{name}'); print('reached')\n"
+                          "except OSError as e:\n    print('refused')\"")
+        assert "refused" in out and "reached" not in out, out
+        # Sockets made inside the sandbox still work between its own processes.
+        out, _ = run(hub, "python3 -c \"import socket\na = socket.socket(socket.AF_UNIX); a.bind('\\0inside'); a.listen(1)\n"
+                          "b = socket.socket(socket.AF_UNIX); b.connect('\\0inside'); print('own-ok')\"")
+        assert "own-ok" in out, out
+        device.stop()
+    finally:
+        listener.close()
+
+
 # --- the listener and protected paths ----------------------------------------------------------
 
 def test_connection_that_stops_sending_is_dropped(tmp_path, monkeypatch):
@@ -1137,3 +1872,117 @@ def test_linux_commands_cannot_reach_host_sockets(tmp_path, abstract):
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode != 0
         assert "ConnectionRefusedError" in result.stderr or "Network is unreachable" in result.stderr
+
+
+def test_linux_network_requires_socket_isolation(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "scopes_sockets", lambda: False)
+    with pytest.raises(sandbox.SandboxUnavailable, match="Landlock ABI 6"):
+        sandbox.wrap(str(tmp_path), str(tmp_path / "temp"), ["true"], network=True)
+    assert "--unshare-net" in sandbox.wrap(str(tmp_path), str(tmp_path / "temp"), ["true"])
+
+
+@pytest.mark.parametrize("failure", ["abi", "create", "privileges", "restrict"])
+def test_socket_restriction_failures_never_start_commands(monkeypatch, failure):
+    import ast
+    import ctypes
+
+    # Exercise the exact stdlib-only function embedded in the sandbox runner without
+    # installing a process-wide restriction in pytest itself.
+    tree = ast.parse(device_module.RUNNER)
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "keep_to_own_sockets")
+    calls, closed = [], []
+
+    class Syscall:
+        def __call__(self, number, *args):
+            if number.value == 444 and args[-1].value == 1:
+                return 5 if failure == "abi" else 6
+            if number.value == 444:
+                return -1 if failure == "create" else 123
+            calls.append("restrict")
+            return -1 if failure == "restrict" else 0
+
+    class Libc:
+        syscall = Syscall()
+
+        def prctl(self, *args):
+            return -1 if failure == "privileges" else 0
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: Libc())
+    import types
+    namespace = {"os": types.SimpleNamespace(close=closed.append)}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "runner", "exec"), namespace)
+    with pytest.raises((RuntimeError, OSError)):
+        namespace["keep_to_own_sockets"]()
+    assert closed == ([] if failure in ("abi", "create") else [123])
+    assert calls == (["restrict"] if failure == "restrict" else [])
+
+
+def test_check_network_reports_missing_socket_isolation(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "scopes_sockets", lambda: False)
+    checks = device_module.check(hub.invite(), str(folder), network=True)
+    assert any(ok is False and "Landlock ABI 6" in text for ok, text in checks)
+    assert not hub.sessions()
+
+
+@pytest.mark.parametrize("relative", ["runtime", "runtime/child", ".", "alias"])
+def test_extra_reads_cannot_restore_host_socket_masks(tmp_path, monkeypatch, relative):
+    runtime = tmp_path / "runtime"
+    (runtime / "child").mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(runtime)
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox, "_runtime_dir", lambda: str(runtime))
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    path = str(tmp_path / relative)
+    with pytest.raises(HandsError, match="host service sockets"):
+        device_module.shown_in_home([path])
+    argv = sandbox.wrap(str(tmp_path / "project"), str(tmp_path / "temp"), ["true"],
+                        home_visible=False, tools=[path])
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--ro-bind"]
+    assert path not in binds
+
+
+@sandboxed
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux pathname sockets")
+def test_extra_read_does_not_expose_a_live_host_socket(tmp_path, monkeypatch):
+    import socket
+    runtime, project, temp = [tmp_path / name for name in ("runtime", "project", "temp")]
+    for path in (runtime, project, temp):
+        path.mkdir()
+    monkeypatch.setattr(sandbox, "_runtime_dir", lambda: str(runtime))
+    with socket.socket(socket.AF_UNIX) as listener:
+        address = str(runtime / "service.sock")
+        listener.bind(address)
+        listener.listen(1)
+        script = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({address!r})"
+        # The system's Python: the one running the tests may live in the home folder, which is hidden here.
+        python = shutil.which("python3", path="/usr/bin:/bin") or sys.executable
+        for exposed in (runtime, tmp_path):
+            argv = sandbox.wrap(str(project), str(temp), [python, "-I", "-S", "-c", script],
+                                home_visible=False, tools=[str(exposed)])
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            assert result.returncode != 0 and "FileNotFoundError" in result.stderr, result.stderr
+
+
+@sandboxed
+@pytest.mark.parametrize("root", [".local/share/pipx", ".local/pipx", "Library/Application Support/pipx", "custom-pipx"])
+def test_pipx_executable_links_work_with_hidden_home(home_base, monkeypatch, root):
+    import shlex
+    home = home_base / "home"
+    project, temp, bin_dir = home / "project", home_base / "temp", home / ".local/bin"
+    package = home / root / "venvs/example/bin"
+    for path in (project, temp, bin_dir, package):
+        path.mkdir(parents=True, exist_ok=True)
+    executable = package / "example"
+    executable.write_text("#!/bin/sh\necho pipx-ok\n")
+    executable.chmod(0o755)
+    (bin_dir / "example").symlink_to(executable)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + "/usr/bin:/bin")
+    if root == "custom-pipx":
+        monkeypatch.setenv("PIPX_HOME", str(home / root))
+    argv = sandbox.wrap(str(project), str(temp), ["/bin/sh", "-c", shlex.quote(str(bin_dir / "example"))],
+                        home_visible=False, tools=device_module.shown_in_home())
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout.strip() == "pipx-ok", result.stderr

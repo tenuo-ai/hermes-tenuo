@@ -40,6 +40,10 @@ class SandboxUnavailable(RuntimeError):
     pass
 
 
+def _home() -> str:
+    return os.path.realpath(os.path.expanduser("~"))
+
+
 def _private_paths() -> List[str]:
     """Each protected path as named and as resolved: one that is a link to somewhere else
     is hidden at its real place too."""
@@ -61,7 +65,9 @@ def _ancestors(path: str) -> List[str]:
     return out
 
 
-def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> str:
+def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
+                 writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
+                 network: bool = False) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -69,11 +75,19 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
     private = [*_private_paths(), *hidden]
     hidden_rule = " ".join(f"(subpath {q(p)})" for p in private)
     own = f"(subpath {q(folder)}) (subpath {q(tmp)})"
+    may_change = own if writable else f"(subpath {q(tmp)})"  # look, don't touch: only its temp folder
     extra = " ".join(f"(subpath {q(p)})" for p in readable)
+    # With the home folder hidden, only `tools` (toolchains and folders the person named)
+    # stay readable in it. The protected paths are refused after that, so one inside a
+    # tool folder stays hidden.
+    home = _home()
+    closed = [] if home_visible else [home]
+    home_rule = [f"(deny file-read* (subpath {q(home)}))"] if closed else []
+    tool_rule = [f"(allow file-read* {' '.join(f'(subpath {q(p)})' for p in tools)})"] if tools else []
     # Folders on the way to an allowed one stay visible by name (not listable), so
     # `mkdir -p` and path lookups work when the allowed folder sits under a hidden one.
-    above = sorted({a for p in (folder, tmp, *readable) for a in _ancestors(p)
-                    if any(a == h or a.startswith(h + os.sep) for h in private)})
+    above = sorted({a for p in (folder, tmp, *readable, *tools) for a in _ancestors(p)
+                    if any(a == h or a.startswith(h + os.sep) for h in [*private, *closed])})
     on_the_way = " ".join(f"(literal {q(a)})" for a in above)
     services = " ".join(f'(global-name "{name}")' for name in _MAC_SERVICES)
     return "\n".join([
@@ -86,13 +100,17 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         "(allow ipc-posix-sem)", "(allow ipc-posix-shm*)", "(allow pseudo-tty)",
         '(allow iokit-open (iokit-registry-entry-class "RootDomainUserClient"))',
         f"(allow mach-lookup {services})",
-        # The network stays on; other programs' local sockets do not.
-        "(allow system-socket)", "(allow network-bind (local ip))", "(allow network-inbound (local ip))",
-        "(allow network-outbound (remote ip))",
-        '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
-        "(allow file-read*)", f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
+        # Without `network`, commands reach this machine only: a dev server and what talks
+        # to it work, the internet and name lookups do not. With it, the network is on.
+        # Other programs' local sockets are out of reach either way.
+        "(allow system-socket)", "(allow network-bind (local ip))",
+        *(["(allow network-inbound (local ip))", "(allow network-outbound (remote ip))",
+           '(allow network-outbound (literal "/private/var/run/mDNSResponder"))'] if network else
+          ['(allow network-inbound (local ip "localhost:*"))', '(allow network-outbound (remote ip "localhost:*"))']),
+        "(allow file-read*)", *home_rule, *tool_rule,
+        f"(deny file-read* {hidden_rule})", f"(allow file-read* {own} {extra})",
         *([f"(allow file-read-metadata {on_the_way})"] if on_the_way else []),
-        f"(allow file-write* {own}"
+        f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
         ' (regex #"^/dev/tty") (regex #"^/dev/fd/"))',
         '(allow file-ioctl (literal "/dev/null") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))',
@@ -100,14 +118,22 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
 
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
-           readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
+           readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True,
+           home_visible: bool = True, tools: Sequence[str] = (), network: bool = False) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
-            "--die-with-parent", "--unshare-net"]
-    # A private network namespace also hides abstract Unix sockets, which cannot be
-    # masked with filesystem mounts. Commands have loopback only; the device keeps
-    # its host network connection outside the sandbox.
+            "--die-with-parent"]
+    if not network:
+        # A private network namespace also hides abstract Unix sockets, which cannot be
+        # masked with filesystem mounts. Commands have loopback only; the device keeps
+        # its host network connection outside the sandbox. With `network` they share the
+        # machine's network, and newer kernels still keep them from those sockets.
+        argv += ["--unshare-net"]
+    emptied: List[str] = []  # folders shown empty; made read-only at the end, once what goes inside is in place
+    if not home_visible:
+        argv += ["--tmpfs", _home()]  # an empty home folder; what commands need from it is put back below
+        emptied.append(_home())
     masked: List[str] = []
     for path in [*_private_paths(), *hidden]:
         path = os.path.realpath(path)  # bubblewrap cannot mount onto a path through a link
@@ -116,14 +142,16 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
         masked.append(path)
         if os.path.isdir(path):
             argv += ["--tmpfs", path]
+            emptied.append(path)
         elif os.path.exists(path):
             argv += ["--ro-bind", "/dev/null", path]
     # The user's session sockets (the desktop bus, the service manager, agents) can start
     # programs outside the sandbox, so a command does not get them. Paths are resolved
     # first: bubblewrap cannot mount onto a path that goes through a symlink.
-    runtime = os.path.realpath(f"/run/user/{os.getuid()}")
+    runtime = _runtime_dir()
     if os.path.isdir(runtime):
         argv += ["--tmpfs", runtime]
+        emptied.append(runtime)
     sockets = {os.path.realpath(p) for p in ("/run/docker.sock", "/var/run/docker.sock") if os.path.exists(p)}
     for socket_path in sorted(sockets):
         if not socket_path.startswith(runtime + os.sep):
@@ -131,13 +159,60 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # Last, so the folder and the temp folder stay usable even under a hidden path.
     # /tmp is the device's own temp folder too.
     argv += ["--bind", tmp, "/tmp"]
+    if not home_visible:
+        # The toolchains and the folders the person named, read-only. A protected path
+        # inside one of them is masked again, since putting the folder back uncovered it.
+        for path in tools:
+            argv += ["--ro-bind", path, path]
+        for path in masked:
+            if any(path.startswith(tool.rstrip(os.sep) + os.sep) for tool in tools):
+                if os.path.isdir(path):
+                    argv += ["--tmpfs", path]
+                    emptied.append(path)
+                elif os.path.exists(path):
+                    argv += ["--ro-bind", "/dev/null", path]
     for path in readable:
         argv += ["--ro-bind", path, path]
-    argv += ["--bind", folder, folder, "--bind", tmp, tmp]
+    argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
+    # An emptied folder is not a place to write: a write there would seem to work and be
+    # lost when the sandbox ends. What was put back inside it keeps its own setting.
+    shared_tmp = os.path.realpath("/tmp")
+    for path in emptied:
+        # One under /tmp is no longer there to change: the temp folder took /tmp's place.
+        if path != shared_tmp and not path.startswith(shared_tmp + os.sep):
+            argv += ["--remount-ro", path]
     return argv + ["--chdir", folder, "--", *command]
 
 
+def scopes_sockets() -> bool:
+    """True if this Linux kernel can keep commands from other programs' named local
+    sockets (Landlock, 6.12 and later). Asking changes nothing."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        return libc.syscall(ctypes.c_long(444), None, ctypes.c_size_t(0), ctypes.c_uint32(1)) >= 6
+    except Exception:
+        return False
+
+
 _probe: List[Optional[str]] = []
+_refusal: List[str] = []  # what bubblewrap said when the system would not let it start
+
+
+def why_not() -> str:
+    """Why this machine has no sandbox, for the person at it. Empty if it has one."""
+    if available() is not None:
+        return ""
+    if sys.platform.startswith("linux"):
+        if not shutil.which("bwrap"):
+            return "bubblewrap is not installed (on Debian and Ubuntu: sudo apt install bubblewrap)"
+        said = f" ({_refusal[0]})" if _refusal and _refusal[0] else ""
+        return ("bubblewrap is installed, but this system does not let it start a sandbox for your user" + said
+                + ". Ubuntu 24.04 and later need one rule that allows it: see \"Hands on Ubuntu\" in the README")
+    return "this system has no sandbox Hands can use (macOS sandbox-exec or Linux bubblewrap)"
 
 
 def available() -> Optional[str]:
@@ -149,8 +224,11 @@ def available() -> Optional[str]:
             kind = "sandbox-exec"
         elif sys.platform.startswith("linux") and shutil.which("bwrap"):
             try:
-                ok = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--unshare-net", "--", "true"], capture_output=True,
-                                    timeout=10).returncode == 0
+                tried = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-pid", "--unshare-net", "--", "true"],
+                                       capture_output=True, text=True, timeout=10)
+                ok = tried.returncode == 0
+                if not ok:
+                    _refusal.append((tried.stderr or "").strip().splitlines()[-1][:200] if tried.stderr.strip() else "")
             except (OSError, subprocess.SubprocessError):
                 ok = False
             kind = "bwrap" if ok else None
@@ -158,19 +236,55 @@ def available() -> Optional[str]:
     return _probe[0]
 
 
+def _runtime_dir() -> str:
+    return os.path.realpath(f"/run/user/{os.getuid()}")
+
+
+def socket_overlap(path: str) -> bool:
+    """An extra read mount must not restore a masked host service or its parent."""
+    if not sys.platform.startswith("linux"):
+        return False
+    real = os.path.realpath(path)
+    masks = (_runtime_dir(), "/run/docker.sock", "/var/run/docker.sock")
+    return any(real == mask or real.startswith(mask.rstrip(os.sep) + os.sep)
+               or mask.startswith(real.rstrip(os.sep) + os.sep)
+               for mask in map(os.path.realpath, masks))
+
+
+def protected(path: str, hidden: Sequence[str] = ()) -> bool:
+    """True if `path` is one of the protected paths or inside one (or inside `hidden`)."""
+    real = os.path.realpath(path)
+    return any(real == p or real.startswith(p.rstrip(os.sep) + os.sep)
+               for p in [os.path.realpath(q) for q in (*_private_paths(), *hidden)])
+
+
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
-         shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = ()) -> List[str]:
+         shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
+         writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
+         network: bool = False) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
-    `hidden` names more folders a command must not read (the device's own state)."""
+    `hidden` names more folders a command must not read (the device's own state). With
+    `writable` off the command can read `folder` and change only its temp folder. With
+    `home_visible` off the home folder cannot be read at all, except `tools`: real folders
+    in it that hold toolchains, or that the person chose to show. Without `network` the
+    command has no internet: on Linux a network of its own, on macOS this machine only."""
+    # A folder to show that is itself protected, or inside something protected, is not
+    # shown: putting it back would uncover exactly what is hidden on purpose.
+    tools = [path for path in tools if not protected(path, hidden) and not socket_overlap(path)]
     kind = available()
     if kind == "sandbox-exec":
-        return ["/usr/bin/sandbox-exec", "-p", _mac_profile(folder, tmp, readable, hidden), *command]
+        return ["/usr/bin/sandbox-exec", "-p",
+                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network), *command]
     if kind == "bwrap":
-        return _bwrap(folder, tmp, command, shared, readable, hidden)
+        if network and not scopes_sockets():
+            raise SandboxUnavailable("--network needs Landlock ABI 6 or later to isolate host abstract sockets. "
+                                     "Enable Landlock on a supported Linux kernel, or omit --network.")
+        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools, network)
     if allow_unsandboxed:
+        if not writable:
+            raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")
         return command
-    raise SandboxUnavailable(
-        "no sandbox on this machine (macOS sandbox-exec or Linux bubblewrap). "
-        "Install bubblewrap, or pass --no-sandbox to run commands with your full access.")
+    raise SandboxUnavailable(f"no sandbox on this machine: {why_not()}. "
+                             "Or pass --no-sandbox to run commands with your full access.")
