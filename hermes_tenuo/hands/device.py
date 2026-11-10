@@ -385,17 +385,23 @@ def check(invite: Optional[str], folder: str, read_only: bool = False) -> list:
     else:
         found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
     if url:
+        # A Hands server answers a request from no device with "no session here" (410).
+        # Anything else that answers is a proxy, another service, or a wrong address.
+        request = urllib.request.Request(url + wire.API + "/poll", b"{}", {"Content-Type": "application/json"})
+        status: Optional[int] = None
         try:
-            _post(url + wire.API + "/poll", {}, timeout=10)
-            reached = True
-        except HandsError:
-            reached = True   # it answered, and refused a request that was not from a device
-        except ConnectionError as e:
-            reached = False
-            found.append((False, f"cannot reach the server at {url} ({e}). If Hermes runs on another machine, "
-                                 "set hands.url there to an address this machine can reach"))
-        if reached:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except (OSError, ValueError) as e:
+            found.append((False, f"cannot reach the server at {url} ({getattr(e, 'reason', e)}). If Hermes runs on "
+                                 "another machine, set hands.url there to an address this machine can reach"))
+        if status == 410:
             found.append((True, f"server reachable: {url}"))
+        elif status is not None:
+            found.append((False, f"{url} answered (HTTP {status}), but not as a Hands server: check the address, "
+                                 "and that hands.listen is set in the plugin config on the server"))
     real_home = os.path.expanduser("~")
     tools = sorted(sub.lstrip(".") for name, sub in TOOL_HOMES.items()
                    if os.path.isdir(os.environ.get(name) or os.path.join(real_home, sub)))
@@ -473,14 +479,22 @@ class Device:
 
     def pair(self) -> None:
         grant, identity = self.grant.to_base64(), self.identity.to_base64()
-        nonce = wire.digest(grant, self.folder, self.name, self.tmp)
+        mode = self.mode()
+        nonce = wire.digest(grant, self.folder, self.name, self.tmp, mode)
         _post(self.url + wire.API + "/pair", {
             "invite": self.secret, "device": self.me, "name": self.name, "folder": self.folder, "tmp": self.tmp,
-            "grant": grant, "identity": identity, "nonce": nonce,
+            "mode": mode, "grant": grant, "identity": identity, "nonce": nonce,
             "sig": self._request("pair", nonce),
         }, timeout=30)
         _private_write(home() / "server.json", json.dumps(
             {"url": self.url, "server_key": wire.key_text(self.server_key)}) + "\n")
+
+    def mode(self) -> str:
+        """What holds commands on this machine. The server repeats it to the agent, so it
+        must never claim a sandbox that is not there."""
+        if sandbox.available() is None:
+            return "none"
+        return "read-only" if self.read_only else "sandboxed"
 
     def poll(self) -> Optional[Dict[str, Any]]:
         nonce = secrets.token_hex(16)
@@ -909,12 +923,11 @@ class Device:
 
     # -- the loop ---------------------------------------------------------------
 
-    def _rejoin(self) -> bool:
-        try:
-            self.pair()
-            return True
-        except (HandsError, ConnectionError):
-            return False
+    def _pause(self, seconds: float) -> None:
+        """Wait, but not past a request to stop or the end of the time window."""
+        end = min(time.time() + seconds, self.expires)
+        while not self._stop and time.time() < end:
+            time.sleep(0.2)
 
     def summary(self) -> list:
         """What commands from the server can and cannot do here, in plain words."""
@@ -941,7 +954,7 @@ class Device:
         for line in self.summary():
             self.say("  " + line)
         self.say("Press Ctrl-C to stop. Commands appear below as they run.")
-        failures, rejoined = 0, 0.0
+        failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
                 self._waiting = True
@@ -949,19 +962,37 @@ class Device:
                     job = self.poll()
                 finally:
                     self._waiting = False
-                failures = 0
+                failures, rejoins = 0, 0
             except _Stopped:
                 break
             except HandsError as e:
                 # The server forgot this session, which is what a restart of Hermes looks
                 # like from here. A machine it still knows pairs again by itself, with the
-                # grant and time window it already has; a revoked one is refused and stops.
-                if time.time() - rejoined > 30 and time.time() < self.expires and self._rejoin():
-                    rejoined = time.time()
-                    self.say("The server restarted; this machine is paired with it again.")
-                    continue
+                # grant and time window it already has. Only the server refusing to pair
+                # it (it was revoked) ends the session; a server that cannot be reached
+                # is tried again, and one that keeps forgetting is given longer each time.
+                ended = str(e)
+                if rejoins < 6:
+                    rejoins += 1
+                    if rejoins > 1:
+                        self._pause(min(30, 2 ** rejoins))
+                    if self._stop or time.time() >= self.expires:
+                        break
+                    try:
+                        self.pair()
+                    except ConnectionError as lost:
+                        failures += 1
+                        if failures == 1:
+                            self.say(f"Can't reach the server ({lost}); retrying.")
+                        self._pause(min(30, 2 ** min(failures, 5)))
+                        continue
+                    except HandsError as refused:
+                        ended = str(refused)
+                    else:
+                        self.say("The server restarted; this machine is paired with it again.")
+                        continue
                 self._stop_runner()
-                self.say(f"The server ended this session: {e}")
+                self.say(f"The server ended this session: {ended}")
                 return 1
             except ConnectionError as e:
                 if time.time() >= self.expires:

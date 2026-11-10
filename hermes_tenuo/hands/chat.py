@@ -113,7 +113,8 @@ def command(raw_args: str = "") -> str:
             return (f"'{words[1]}' is forgotten; it needs a new invite to come back." if hub.revoke(words[1])
                     else f"No machine called '{words[1]}'.")
         if verb == "status":
-            rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}, "
+            how = {"read-only": ", read-only", "none": ", no sandbox"}
+            rows = [f"  {s.name}: {'up' if s.online else 'not answering'}, {s.folder}{how.get(s.mode, '')}, "
                     f"{max(0, int((s.expires - time.time()) / 60))} min left" for s in hub.sessions()]
             here = _wanted.get(_conversation())
             if here is None:
@@ -236,9 +237,15 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
         return result
     data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
     text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
-    if any(refusal in text for refusal in REFUSALS):
-        data["hands_note"] = (f"'{session.name}' shares only {session.folder}: commands there cannot change "
-                              "anything outside it, and the user's keys, credentials and browser data cannot be read.")
+    # Only what the machine said holds its commands is repeated. One that runs them with
+    # no sandbox, or did not say, gets no explanation: the failure is an ordinary one.
+    mode = getattr(session, "mode", "")
+    if mode in ("sandboxed", "read-only") and any(refusal in text for refusal in REFUSALS):
+        shares = (f"shares {session.folder} to read, not to change: commands there cannot change it or anything else"
+                  if mode == "read-only" else
+                  f"shares only {session.folder}: commands there cannot change anything outside it")
+        data["hands_note"] = (f"'{session.name}' {shares}, and the user's keys, credentials and browser data "
+                              "cannot be read.")
     return json.dumps(data, ensure_ascii=False)
 
 

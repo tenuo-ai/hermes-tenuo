@@ -57,6 +57,7 @@ class Session:
     device_key: Any
     expires: float
     tmp: str = ""                # where the device keeps temp files for this session
+    mode: str = ""               # what holds commands there: "sandboxed", "read-only", "none"; "" = not said
     running_until: float = 0.0   # a command is with the device until about then
     gone: bool = False           # the device said it is going down
     last_seen: float = field(default_factory=time.time)
@@ -268,7 +269,10 @@ class Hub:
             raise
         except Exception as e:
             raise Refused(f"this pairing request isn't valid ({type(e).__name__})") from e
-        if nonce != wire.digest(grant.to_base64(), folder, name, tmp):
+        # How the device runs commands is part of what it signs, when it says so.
+        mode = str(body.get("mode") or "")
+        signed = (grant.to_base64(), folder, name, tmp, mode) if "mode" in body else (grant.to_base64(), folder, name, tmp)
+        if nonce != wire.digest(*signed) or mode not in ("", "sandboxed", "read-only", "none"):
             raise Refused("this pairing request doesn't match what was signed")
         if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):
             raise Refused("this device's temp folder has a path Hands can't use")
@@ -298,7 +302,7 @@ class Hub:
             known[device] = {"name": name, "paired": known.get(device, {}).get("paired") or time.strftime("%Y-%m-%d")}
             self._save_known(known)
             new = Session(device, name, folder, grant, identity, device_key,
-                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp)
+                          time.time() + grant.ttl_remaining.total_seconds(), tmp=tmp, mode=mode)
             new.nonces = [nonce]
             self._paired[nonce] = now
             old = self._sessions.get(device)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_tenuo.hands import device as device_module
 from hermes_tenuo.hands import hub as hub_module
 from hermes_tenuo.hands import chat, sandbox, wire
 from hermes_tenuo.hands.device import Device, HandsError
@@ -743,7 +744,7 @@ def test_own_folder_replaces_a_link_or_a_file_and_keeps_a_folder(tmp_path):
 # --- easier to use -----------------------------------------------------------------------------
 
 class _Where:
-    name, folder = "laptop", "/work/app"
+    name, folder, mode = "laptop", "/work/app", "sandboxed"
 
 
 def test_results_say_which_machine_they_ran_on():
@@ -761,6 +762,43 @@ def test_results_say_which_machine_they_ran_on():
     missing = json.loads(chat._marked(json.dumps({"output": "cat: nope: No such file or directory", "exit_code": 1}),
                                       "terminal", _Where()))
     assert "hands_note" not in missing  # an ordinary failure is not explained as a refusal
+
+
+@pytest.mark.parametrize("mode", ["none", ""])
+def test_no_sandbox_promise_for_a_machine_without_one(mode):
+    class Open(_Where):
+        pass
+    Open.mode = mode
+    denied = json.loads(chat._marked(json.dumps({"output": "sh: /etc/x: Permission denied", "exit_code": 1}),
+                                     "terminal", Open()))
+    assert "laptop" in denied["ran_on"] and "hands_note" not in denied
+
+
+def test_read_only_machine_is_described_as_such():
+    class Look(_Where):
+        mode = "read-only"
+    denied = json.loads(chat._marked(json.dumps({"output": "sh: new.txt: Operation not permitted", "exit_code": 1}),
+                                     "terminal", Look()))
+    assert "to read, not to change" in denied["hands_note"] and "shares only" not in denied["hands_note"]
+
+
+def test_the_server_learns_how_a_machine_holds_commands(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, name="open", allow_unsandboxed=True).pair()
+    assert hub.pick("open").mode == "none"
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    assert "open: up" in chat.command("status") and "no sandbox" in chat.command("status")
+
+
+def test_a_pairing_request_cannot_claim_another_mode(hub, folder, monkeypatch):
+    sent = {}
+    real = device_module._post
+    monkeypatch.setattr(device_module, "_post", lambda url, body, timeout: sent.update(body) or real(url, body, timeout))
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    Device(hub.invite(), str(folder), 60, allow_unsandboxed=True).pair()
+    hub._paired.clear()
+    with pytest.raises(Refused, match="doesn't match"):
+        hub.pair(dict(sent, mode="sandboxed"))
 
 
 def test_only_device_tools_and_plain_results_are_marked():
@@ -782,6 +820,7 @@ def test_read_only_lets_commands_look_and_not_change(hub, folder):
     out, _ = run(hub, "rm README.md; echo rm=$?")
     assert "rm=0" not in out and (folder / "README.md").exists()
     assert any("--read-only" in line for line in device.lines)
+    assert hub.pick("laptop").mode == "read-only"
     device.stop()
 
 
@@ -813,6 +852,39 @@ def test_device_pairs_again_when_the_server_forgot_it(hub, folder, monkeypatch):
         time.sleep(0.1)
     assert run(hub, "echo after")[0].strip() == "after"
     assert any("paired with it again" in line for line in device.lines)
+    # And again straight away: a second restart is waited out, not taken as the end.
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 20
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert run(hub, "echo twice")[0].strip() == "twice"
+    assert device.thread.is_alive()
+    device.stop()
+
+
+@sandboxed
+def test_device_keeps_trying_when_pairing_again_cannot_reach_the_server(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    real, lost = device_module._post, {"n": 0}
+
+    def flaky(url, body, timeout):
+        if url.endswith("/pair") and lost["n"] < 2:
+            lost["n"] += 1
+            raise ConnectionError("timed out")
+        return real(url, body, timeout)
+
+    monkeypatch.setattr(device_module, "_post", flaky)
+    with hub._lock:
+        hub._sessions.clear()
+        hub._paired.clear()
+    deadline = time.time() + 30
+    while time.time() < deadline and not any(s.online for s in hub.sessions()):
+        time.sleep(0.1)
+    assert lost["n"] == 2 and device.thread.is_alive()
+    assert run(hub, "echo back")[0].strip() == "back"
     device.stop()
 
 
@@ -827,8 +899,9 @@ def test_a_revoked_device_does_not_pair_again(hub, folder, monkeypatch):
     assert any("ended this session" in line for line in device.lines)
 
 
-def test_check_reports_what_is_missing_without_pairing(hub, folder, tmp_path):
+def test_check_reports_what_is_missing_without_pairing(hub, folder, tmp_path, monkeypatch):
     from hermes_tenuo.hands.device import check
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])  # the same on a machine with no sandbox
     found = check(hub.invite(), str(folder))
     assert all(ok is not False for ok, _ in found), found
     assert any(ok and "server reachable" in text for ok, text in found)
@@ -840,6 +913,41 @@ def test_check_reports_what_is_missing_without_pairing(hub, folder, tmp_path):
     assert any(ok is False and "damaged" in text for ok, text in check("hands://127.0.0.1:1/x#nope", str(folder)))
     port_closed = hub.invite().replace(hub.public_url.split("//")[1], "127.0.0.1:1")
     assert any(ok is False and "cannot reach" in text for ok, text in check(port_closed, str(folder)))
+    monkeypatch.setattr(sandbox, "_probe", [None])
+    assert any(ok is False and "no sandbox" in text for ok, text in check(hub.invite(), str(folder)))
+
+
+def test_check_does_not_take_another_service_for_a_hands_server(hub, folder, monkeypatch):
+    """A proxy's 502, or some other program at that address, is not a server that is ready."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from hermes_tenuo.hands.device import check
+    monkeypatch.setattr(sandbox, "_probe", ["sandbox-exec"])
+
+    class Other(BaseHTTPRequestHandler):
+        status = 502
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.send_response(self.status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        invite = hub.invite().replace(hub.public_url.split("//")[1], f"127.0.0.1:{server.server_address[1]}")
+        for status in (502, 404, 200):
+            Other.status = status
+            found = check(invite, str(folder))
+            assert any(ok is False and f"HTTP {status}" in text and "not as a Hands server" in text
+                       for ok, text in found), (status, found)
+            assert not any(ok and "server reachable" in text for ok, text in found)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 # --- the listener and protected paths ----------------------------------------------------------
