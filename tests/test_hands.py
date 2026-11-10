@@ -2266,3 +2266,11 @@ def test_stopped_command_gets_only_one_short_immediate_report(hub, folder, monke
         device._deliver("stopped", "cancelled", 130)
     device._drain_results()
     assert len(attempts) == 1 and not device._waiting
+
+
+@pytest.mark.parametrize("fields", [
+    {"status": "pending_approval"}, {"approval_pending": True}, {"status": "blocked"},
+])
+def test_commands_awaiting_or_refused_approval_are_not_called_executed(fields):
+    result = json.dumps({"output": "Permission denied", "exit_code": -1, **fields})
+    assert chat._marked(result, "terminal", _Where()) == result

@@ -91,18 +91,44 @@ class HandsEnvironment(BaseEnvironment):
         from hermes_tenuo.hands import chat
         asking = chat._owner()
 
+        reply = {}  # per command, including when multiple waits share this environment
+
         def run() -> tuple:
             try:
                 session = self._hub.pick(self._device, None if self._device else asking)
                 if session.owner and session.owner != asking:
                     return (f"hands: '{session.name}' belongs to the person who paired it; this command was "
                             "not run\n"), 126
-                return self._hub.run(session, cmd_string, login=login, timeout=timeout,
-                                     stdin=stdin_data, shown=shown, cancelled=stopped)
+                result = self._hub.run(session, cmd_string, login=login, timeout=timeout,
+                                       stdin=stdin_data, shown=shown, cancelled=stopped)
+                reply["result"] = result
+                return result
             except HandsUnavailable as e:
                 return f"{e}\n", 127
 
-        return _ThreadedProcessHandle(run, cancel_fn=stopped.set)
+        proc = _ThreadedProcessHandle(run, cancel_fn=stopped.set)
+        proc._hands_reply = reply
+        return proc
+
+    def _wait_for_process(self, proc, timeout: int = 120, **kwargs: Any) -> dict:
+        result = super()._wait_for_process(proc, timeout=timeout, **kwargs)
+        if result.get("returncode") != 124:
+            return result
+        # Hermes cancels at its deadline, then briefly drains output. The hub can
+        # report during that drain, but Hermes still stamps the result as 124.
+        # Use the actual reply, never command-controlled text, to decide whether
+        # a timeout (and the terminal tool's retry advice) is justified.
+        reply = proc._hands_reply.get("result")
+        if reply is None:
+            return {"output": "hands: no confirmed result arrived before the wait ended. "
+                    "The command may have run, or still be running on the device: "
+                    "check before running it again\n", "returncode": 125}
+        if reply[1] != 124:
+            result["returncode"] = reply[1]
+            suffix = f"\n[Command timed out after {timeout}s]"
+            if result["output"].endswith(suffix):
+                result["output"] = result["output"][:-len(suffix)]
+        return result
 
     def _plain(self, script: str) -> str:
         """The command as Hermes was asked to run it. Hermes wraps each command in session

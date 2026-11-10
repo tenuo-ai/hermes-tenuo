@@ -51,7 +51,8 @@ SCRIPT = textwrap.dedent('''
             data = {"output": raw}
         out[key] = {"exit": data.get("exit_code"), "text": str(data.get("output", data.get("content", data))),
                     "pid": data.get("pid"), "session": data.get("session_id"),
-                    "ran_on": data.get("ran_on"), "note": data.get("hands_note")}
+                    "ran_on": data.get("ran_on"), "note": data.get("hands_note"),
+                    "hint": data.get("hint"), "status": data.get("status")}
 
     def up(folder, name="laptop", invite=None, state=None):
         if state:
@@ -85,6 +86,29 @@ SCRIPT = textwrap.dedent('''
     tool("escape", "terminal", {"command": f"echo x > {server_dir}/escape.txt"})
     # A system folder: the sandbox refuses this in words on macOS and on Linux alike.
     tool("refused", "terminal", {"command": "echo x > /usr/hands-refusal-probe"})
+    # The actual Hermes guard stops these calls before the backend sees them.
+    import tools.terminal_tool as terminal_module
+    real_guards = terminal_module._check_all_guards
+    try:
+        for status in ("pending_approval", "blocked"):
+            terminal_module._check_all_guards = lambda *a, **kw: {"approved": False, "status": status}
+            tool(status, "terminal", {"command": "touch never-approved"})
+    finally:
+        terminal_module._check_all_guards = real_guards
+    assert not (device_dir / "src" / "never-approved").exists()
+    # A real device executes once, but its result cannot reach Hermes before the deadline.
+    from hermes_tenuo.hands import device as device_module
+    real_post = device_module._post
+    def lose_result(url, body, timeout):
+        if url.endswith("/result"):
+            raise ConnectionError("test: result connection dropped")
+        return real_post(url, body, timeout)
+    try:
+        device_module._post = lose_result
+        tool("unknown", "terminal", {"command": "echo once >> once.txt", "timeout": 3})
+    finally:
+        device_module._post = real_post
+    assert (device_dir / "src" / "once.txt").read_text() == "once\\n"
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
@@ -209,6 +233,13 @@ def _on_the_device(out, project, server_dir):
     assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
     assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
     assert out["pwd"]["note"] is None
+    for key in ("pending_approval", "blocked"):
+        assert out[key]["status"] == key and out[key]["ran_on"] is None, out[key]
+        assert out[key]["note"] is None, out[key]
+    assert out["unknown"]["exit"] == 125, out["unknown"]
+    assert "check before running it again" in out["unknown"]["text"], out["unknown"]
+    assert "Command timed out" not in out["unknown"]["text"], out["unknown"]
+    assert not out["unknown"]["hint"], out["unknown"]
     log = (project.parent / "device-state" / "log.jsonl").read_text()
     assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log
     assert out["bg"]["pid"], out["bg"]
@@ -245,3 +276,30 @@ def test_a_profile_whose_backend_is_hands(tmp_path):
     assert "cannot move" in out["off"] and "server again" not in out["off"], out["off"]
     assert out["after"]["text"].strip().startswith(os.path.realpath(project)), out["after"]
     assert "the server" not in out["status"].splitlines()[-1], out["status"]
+
+
+@pytest.mark.parametrize("reply, expected", [
+    (("lost reply", 125), 125),
+    (("finished", 0), 0),
+    (("device timed out", 124), 124),
+    (None, 125),
+])
+def test_adapter_preserves_confirmed_outcome_after_outer_timeout(monkeypatch, reply, expected):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    # Exercise the deadline/drain race without depending on OS scheduling. The
+    # full tool-dispatch tests above also drop actual HTTP result submissions.
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": "captured\n[Command timed out after 3s]", "returncode": 124,
+        "full_output_path": "/tmp/retained-output", "output_total_chars": 10000,
+    })
+    proc = SimpleNamespace(_hands_reply={} if reply is None else {"result": reply})
+    env = object.__new__(HandsEnvironment)
+    result = env._wait_for_process(proc, timeout=3, bounded_capture=True)
+    assert result["returncode"] == expected
+    if expected != 124:
+        assert "Command timed out" not in result["output"]
+    if reply is None:
+        assert "check before running it again" in result["output"]
+    else:
+        assert result["full_output_path"] == "/tmp/retained-output"

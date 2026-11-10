@@ -329,6 +329,8 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
         return result
     if not isinstance(data, dict) or "ran_on" in data:
         return result
+    if data.get("approval_pending") or data.get("status") in ("pending_approval", "blocked"):
+        return result  # Hermes stopped this call before it reached the device
     data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
     text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
     # Only what the machine said holds its commands is repeated. One that runs them with
