@@ -357,7 +357,9 @@ Limits today: macOS and Linux machines only; on macOS commands can reach
 services that listen on the machine itself (`localhost`), with or without
 `--network`; on Linux without `--network` a dev server is reachable only from
 other commands in the same Hands sandbox, and with it commands reach services
-on the machine too; `--network` is all or nothing, not a list of allowed
+on the machine too. Linux `--network` requires enabled Landlock ABI 6 or later
+(available starting with Linux 6.12) to block host abstract sockets; if the
+restriction cannot be installed, commands do not start. `--network` is all or nothing, not a list of allowed
 sites; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process

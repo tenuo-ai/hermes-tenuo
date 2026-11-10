@@ -71,10 +71,8 @@ def _owner() -> str:
         person = str(read("HERMES_SESSION_ACTOR_ID" if names_sender else "HERMES_SESSION_USER_ID", "") or "")
         if person:
             return f"{platform}:{person}"
-        if not names_sender:
-            return ""
         messaging = getattr(context, "session_is_messaging_surface", None)
-        return NOBODY if (messaging() if callable(messaging) else bool(platform)) else ""
+        return NOBODY if (messaging() if callable(messaging) else platform not in ("", "cli", "desktop")) else ""
     except Exception:
         return NOBODY
 

@@ -791,7 +791,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
     if args.hands_command == "check":
         ok = True
         for passed, text in device.check(args.invite, args.dir, read_only=args.read_only,
-                                         plain_http=args.plain_http):
+                                         plain_http=args.plain_http, network=args.network):
             ok = ok and passed is not False
             print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {text}")
         print("\n  Ready: run `hermes-tenuo hands up` with the same arguments." if ok else
@@ -918,6 +918,7 @@ def main() -> None:
     check_p.add_argument("invite", nargs="?", metavar="INVITE", help="The hands://... line, to test that its server is reachable")
     check_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder you plan to share (default: here)")
     check_p.add_argument("--read-only", action="store_true", help="Check for --read-only use")
+    check_p.add_argument("--network", action="store_true", help="Check for --network use")
     check_p.add_argument("--plain-http", action="store_true", help="Check for --plain-http use")
     hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
         "--last", type=int, default=20, metavar="N")

@@ -263,6 +263,9 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
         return ["/usr/bin/sandbox-exec", "-p",
                 _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network), *command]
     if kind == "bwrap":
+        if network and not scopes_sockets():
+            raise SandboxUnavailable("--network needs Landlock ABI 6 or later to isolate host abstract sockets. "
+                                     "Enable Landlock on a supported Linux kernel, or omit --network.")
         return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools, network)
     if allow_unsandboxed:
         if not writable:

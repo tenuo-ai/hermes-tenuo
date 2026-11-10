@@ -121,27 +121,26 @@ def confined():
     except OSError:
         return False
 def keep_to_own_sockets():
-    # Linux 6.12 and later: everything started from here can connect only to local sockets
-    # made inside this sandbox. A socket that is a file is already out of reach; one that
-    # is only a name (the kind desktop services use) is not, because commands share the
-    # machine's network. Older kernels do not have this and are left as they are.
+    # Required when sharing the host network: never announce readiness until abstract
+    # sockets are scoped. Namespace-isolated commands need no Landlock support.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    create, restrict = ctypes.c_long(444), ctypes.c_long(446)
+    if libc.syscall(create, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 6:
+        raise RuntimeError("Hands network access needs Landlock ABI 6")
+    attr = (ctypes.c_uint64 * 3)(0, 0, 1)  # scope: abstract Unix sockets
+    fd = libc.syscall(create, ctypes.byref(attr), ctypes.c_size_t(24), ctypes.c_uint32(0))
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "cannot create Hands socket restriction")
     try:
-        import ctypes
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.syscall.restype = ctypes.c_long
-        create, restrict = ctypes.c_long(444), ctypes.c_long(446)
-        if libc.syscall(create, None, ctypes.c_size_t(0), ctypes.c_uint32(1)) < 6:
-            return
-        attr = (ctypes.c_uint64 * 3)(0, 0, 1)  # no file or network rules; scope: named local sockets
-        fd = libc.syscall(create, ctypes.byref(attr), ctypes.c_size_t(24), ctypes.c_uint32(0))
-        if fd < 0:
-            return
-        libc.prctl(38, 1, 0, 0, 0)  # required first: no process here can gain privileges
-        libc.syscall(restrict, ctypes.c_int(fd), ctypes.c_uint32(0))
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "cannot set no_new_privs")
+        if libc.syscall(restrict, ctypes.c_int(fd), ctypes.c_uint32(0)) != 0:
+            raise OSError(ctypes.get_errno(), "cannot enforce Hands socket restriction")
+    finally:
         os.close(fd)
-    except Exception:
-        pass
-if sys.platform.startswith("linux"):
+if sys.platform.startswith("linux") and "--scope-sockets" in sys.argv[1:]:
     keep_to_own_sockets()
 sys.stdout.write("ready\n"); sys.stdout.flush()
 while True:
@@ -426,7 +425,8 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         raise ConnectionError(str(getattr(e, "reason", e))) from e
 
 
-def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False) -> list:
+def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
+          network: bool = False) -> list:
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
@@ -446,6 +446,8 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
     else:
         found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
                              "commands your full access"))
+    if network and kind == "bwrap" and not sandbox.scopes_sockets():
+        found.append((False, "--network needs enabled Landlock ABI 6 or later; omit --network or upgrade the kernel"))
     url = ""
     saved = home() / "server.json"
     if invite:
@@ -792,7 +794,10 @@ class Device:
         # The interpreter and its standard library, wherever they are installed.
         own = sorted({os.path.realpath(p) for p in (sys.base_prefix, sys.base_exec_prefix, os.path.dirname(python))})
         try:
-            argv = sandbox.wrap(folder, tmp, [python, "-I", "-S", "-c", RUNNER],
+            command = [python, "-I", "-S", "-c", RUNNER]
+            if self.network and sandbox.available() == "bwrap":
+                command.append("--scope-sockets")
+            argv = sandbox.wrap(folder, tmp, command,
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
                                 hidden=[self.state], writable=not self.read_only,
                                 home_visible=self.read_home, tools=self.shown, network=self.network)
@@ -1046,9 +1051,6 @@ class Device:
         lines.append("They can read system files.")
         if self.network:
             lines.append("They can use the internet (--network), and reach programs listening on this machine.")
-            if kind == "bwrap" and not sandbox.scopes_sockets():
-                lines.append("On this Linux kernel (before 6.12) that includes other programs' local sockets that "
-                             "are not files; share this machine only with a server you trust.")
         elif kind == "sandbox-exec":
             lines.append("They have no internet (start with --network to let them install or download). "
                          "They can reach programs listening on this machine.")

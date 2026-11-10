@@ -846,6 +846,10 @@ def test_commands_reach_the_internet_only_with_network(hub, folder, monkeypatch,
 
     monkeypatch.setattr(chat, "get_hub", lambda: hub)
     (folder / "connect.py").write_text(CONNECT)
+    if network and sandbox.available() == "bwrap" and not sandbox.scopes_sockets():
+        with pytest.raises(sandbox.SandboxUnavailable, match="Landlock ABI 6"):
+            up(hub, folder, network=True)
+        return
     device = up(hub, folder, network=network)
     assert hub.pick("laptop").network == ("on" if network else "off")
     assert ("internet on" if network else "no internet") in chat.command("status")
@@ -1197,6 +1201,8 @@ def test_the_owner_is_whoever_sent_the_message(monkeypatch):
     _hermes_says(monkeypatch, names_sender=False, **telegram, HERMES_SESSION_USER_ID="42")
     assert chat._owner() == "telegram:42"
     _hermes_says(monkeypatch, names_sender=False, **telegram)
+    assert chat._owner() == chat.NOBODY
+    _hermes_says(monkeypatch, names_sender=False, HERMES_SESSION_PLATFORM="cli")
     assert chat._owner() == ""
     monkeypatch.setitem(sys.modules, "gateway", None)   # not inside Hermes at all
     monkeypatch.setitem(sys.modules, "gateway.session_context", None)
@@ -1865,3 +1871,55 @@ def test_linux_commands_cannot_reach_host_sockets(tmp_path, abstract):
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode != 0
         assert "ConnectionRefusedError" in result.stderr or "Network is unreachable" in result.stderr
+
+
+def test_linux_network_requires_socket_isolation(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "scopes_sockets", lambda: False)
+    with pytest.raises(sandbox.SandboxUnavailable, match="Landlock ABI 6"):
+        sandbox.wrap(str(tmp_path), str(tmp_path / "temp"), ["true"], network=True)
+    assert "--unshare-net" in sandbox.wrap(str(tmp_path), str(tmp_path / "temp"), ["true"])
+
+
+@pytest.mark.parametrize("failure", ["abi", "create", "privileges", "restrict"])
+def test_socket_restriction_failures_never_start_commands(monkeypatch, failure):
+    import ast
+    import ctypes
+
+    # Exercise the exact stdlib-only function embedded in the sandbox runner without
+    # installing a process-wide restriction in pytest itself.
+    tree = ast.parse(device_module.RUNNER)
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "keep_to_own_sockets")
+    calls, closed = [], []
+
+    class Syscall:
+        def __call__(self, number, *args):
+            if number.value == 444 and args[-1].value == 1:
+                return 5 if failure == "abi" else 6
+            if number.value == 444:
+                return -1 if failure == "create" else 123
+            calls.append("restrict")
+            return -1 if failure == "restrict" else 0
+
+    class Libc:
+        syscall = Syscall()
+
+        def prctl(self, *args):
+            return -1 if failure == "privileges" else 0
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: Libc())
+    import types
+    namespace = {"os": types.SimpleNamespace(close=closed.append)}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "runner", "exec"), namespace)
+    with pytest.raises((RuntimeError, OSError)):
+        namespace["keep_to_own_sockets"]()
+    assert closed == ([] if failure in ("abi", "create") else [123])
+    assert calls == (["restrict"] if failure == "restrict" else [])
+
+
+def test_check_network_reports_missing_socket_isolation(hub, folder, monkeypatch):
+    monkeypatch.setattr(sandbox, "available", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "scopes_sockets", lambda: False)
+    checks = device_module.check(hub.invite(), str(folder), network=True)
+    assert any(ok is False and "Landlock ABI 6" in text for ok, text in checks)
+    assert not hub.sessions()
