@@ -500,8 +500,10 @@ def test_device_state_is_hidden_wherever_it_is_kept(hub, folder, tmp_path):
     up(hub, folder)
     key = tmp_path / "device-state" / "device.key"
     assert key.exists()
-    out, code = run(hub, f"cat {key}; ls {key.parent}")
-    assert code != 0 and key.read_text().strip() not in out
+    # macOS refuses to open the folder; Linux shows it with only the temp folder inside.
+    out, _ = run(hub, f"cat {key}; echo cat=$?; ls {key.parent} 2>/dev/null")
+    assert "cat=0" not in out and key.read_text().strip() not in out
+    assert "device.key" not in out.split("cat=")[1] and "log.jsonl" not in out
 
 
 def test_shared_folder_and_state_folder_must_be_separate(hub, folder, monkeypatch):
