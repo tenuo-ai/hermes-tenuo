@@ -82,13 +82,19 @@ class DelegationPlan:
         for tool, args in ancestry[-1].tools.items():
             if any(tool not in lvl.tools for lvl in ancestry):
                 raise DelegationPlanError(f"{tool} at depth {depth} is not held by every ancestor")
-            named = {a: v for a, v in (args or {}).items() if a != ALLOW_UNKNOWN}
+            named = {
+                arg
+                for lvl in ancestry
+                for arg in (lvl.tools[tool] or {})
+                if arg != ALLOW_UNKNOWN
+            }
             open_world = all((lvl.tools[tool] or {}).get(ALLOW_UNKNOWN) is True for lvl in ancestry)
             if not named and not open_world:
                 result[tool] = None
                 continue
             caps: Dict[str, Any] = {
-                arg: All([m for lvl in ancestry for m in _members(lvl.tools[tool].get(arg, {}))]) for arg in named
+                arg: All([m for lvl in ancestry for m in _members(lvl.tools[tool].get(arg, {}))])
+                for arg in named
             }
             # Other arguments stay allowed only if every ancestor level allows them.
             if open_world:

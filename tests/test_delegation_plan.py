@@ -347,6 +347,31 @@ def test_range_must_be_min_max():
         parse_plan(bad)
 
 
+def test_child_level_preserves_ancestor_arguments_it_does_not_restate():
+    plan = parse_plan(
+        {
+            "version": 1,
+            "root": {
+                "tools": {
+                    "terminal": {
+                        "command": {"patterns": [r"^echo ok$"]},
+                        "timeout": {"range": [1, 60]},
+                    }
+                }
+            },
+            "levels": [
+                {
+                    "ttl_seconds": 30,
+                    "tools": {
+                        "terminal": {"command": {"patterns": [r"^echo ok$"]}}
+                    },
+                }
+            ],
+        }
+    )
+    assert set(plan.constraints_for(1)["terminal"]) == {"command", "timeout"}
+
+
 # --- _allow_unknown in plan levels -------------------------------------------
 
 _SPEC = {"binaries": ["kubectl"], "patterns": ["^kubectl get pods -n shop$"]}

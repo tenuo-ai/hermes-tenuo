@@ -169,6 +169,25 @@ def _allows_unknown_args(warrant: Any, tool: str) -> bool:
     return not (reason and probe in str(reason) and "unknown field" in str(reason))
 
 
+def _alias_is_no_broader(warrant: Any, exact: str, alternate: str) -> bool:
+    """Whether *alternate* is a safe substitute for *exact* in one warrant."""
+    capabilities = warrant.capabilities or {}
+    exact_args = capabilities.get(exact)
+    alternate_args = capabilities.get(alternate)
+    if exact_args is None or alternate_args is None:
+        return False
+    if not _allows_unknown_args(warrant, exact) and _allows_unknown_args(warrant, alternate):
+        return False
+    if not set(exact_args).issubset(alternate_args):
+        return False
+    try:
+        for name, parent_constraint in exact_args.items():
+            parent_constraint.validate_attenuation(alternate_args[name])
+    except Exception:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Audit event
 # ---------------------------------------------------------------------------
@@ -297,6 +316,9 @@ class HermesGuard:
         # task id → session ids seen with it (attributes sessionless execute_code calls)
         self._task_sessions: Dict[str, set] = {}
         self._task_lock = threading.Lock()
+        # Once the table is full, unknown task IDs remain fail-closed instead
+        # of evicting live ambiguity information and later trusting a singleton.
+        self._task_attribution_saturated = False
 
         # Pre-hook decisions: tool_call_id → (allowed, reason)
         # Stored by pre_tool_call so post_tool_call can record the accurate outcome.
@@ -653,19 +675,27 @@ class HermesGuard:
         return None
 
     def _finish_delegation(
-        self, session_id: str, invocation_id: str, status: str = "", args: Optional[dict] = None
+        self,
+        session_id: str,
+        invocation_id: str,
+        status: str = "",
+        args: Optional[dict] = None,
+        error_type: str = "",
     ) -> None:
         # Normal returns occur after child construction. Cancellation/timeout
         # posts can precede worker exit, so reserve those goals permanently for
         # this guard. Session-end must not erase protection against late hooks.
+        abandoned = status in {"cancelled", "timeout"} or (
+            status == "error" and error_type != "tool_error"
+        )
         with self._pending_lock:
             pending = self._planned_children.get(session_id)
-            if status in {"cancelled", "timeout", "error"}:
+            if abandoned:
                 self._cancelled_invocations.add((session_id, invocation_id))
                 goals = {goal for goal, _ in _delegated_tasks(args or {})}
                 self._cancelled_goals.setdefault(session_id, set()).update(goals)
             if pending is not None:
-                if status in {"cancelled", "timeout", "error"}:
+                if abandoned:
                     goals = {g.goal for g in pending if g.invocation_id == invocation_id}
                     if goals:
                         self._cancelled_goals.setdefault(session_id, set()).update(goals)
@@ -802,9 +832,14 @@ class HermesGuard:
 
     def _remember_task(self, task_id: str, session_id: str) -> None:
         with self._task_lock:
-            self._task_sessions.setdefault(task_id, set()).add(session_id)
-            while len(self._task_sessions) > self._MAX_TASKS:
-                self._task_sessions.pop(next(iter(self._task_sessions)))
+            sessions = self._task_sessions.get(task_id)
+            if sessions is not None:
+                sessions.add(session_id)
+                return
+            if len(self._task_sessions) >= self._MAX_TASKS:
+                self._task_attribution_saturated = True
+                return
+            self._task_sessions[task_id] = {session_id}
 
     def _attribute_session(self, session_id: str, task_id: str) -> Tuple[str, Optional[str]]:
         """Return (session_id, block_reason) for a tool call.
@@ -930,12 +965,17 @@ class HermesGuard:
             # warrant in the chain being verified. Deriving trust from the
             # credential under test accepts any chain an attacker signs. Without
             # a configured trusted_root, enforce_tool_call fails closed.
-            # Preserve exact matches; accept the conventional tool: alias only
-            # when the warrant has no capability under the incoming name.
+            # Preserve exact matches across the entire chain. If an ancestor
+            # had an exact capability that the leaf dropped, falling back to a
+            # broader alias would bypass the ancestor's restriction.
             authorization_tool = tool_name
-            if tool_name not in (warrant.tools or []):
-                alternate = tool_name.removeprefix("tool:") if tool_name.startswith("tool:") else f"tool:{tool_name}"
-                if alternate in (warrant.tools or []):
+            alternate = tool_name.removeprefix("tool:") if tool_name.startswith("tool:") else f"tool:{tool_name}"
+            exact_ancestors = [item for item in chain if tool_name in (item.tools or [])]
+            if tool_name not in (warrant.tools or []) and alternate in (warrant.tools or []):
+                if not exact_ancestors or all(
+                    _alias_is_no_broader(item, tool_name, alternate)
+                    for item in exact_ancestors
+                ):
                     authorization_tool = alternate
             result = enforce_tool_call(
                 tool_name=authorization_tool,
@@ -1019,18 +1059,24 @@ class HermesGuard:
         tool_call_id: str = "",
         duration_ms: int = 0,
         status: str = "",
+        error_type: str = "",
     ) -> None:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
-        if not session_id and task_id:
-            session_id, _ = self._attribute_session(session_id, task_id)
-        if _is_delegation_spawn(tool_name, args):
-            self._finish_delegation(session_id, tool_call_id, status, args)
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
         pre = None
         if tool_call_id:
             with self._pre_decisions_lock:
                 pre = self._pre_decisions.pop(tool_call_id, None)
+        session_id, unattributed = self._attribute_session(session_id, task_id)
+        if pre is None and unattributed is not None:
+            self._emit_audit(
+                tool_name, args, False, unattributed,
+                session_id, task_id, tool_call_id, duration_ms,
+            )
+            return
+        if _is_delegation_spawn(tool_name, args) and unattributed is None:
+            self._finish_delegation(session_id, tool_call_id, status, args, error_type)
         if pre is not None:
             allowed, reason = pre
             self._emit_audit(tool_name, args, allowed, reason, session_id, task_id, tool_call_id, duration_ms)

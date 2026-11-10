@@ -181,6 +181,24 @@ def test_exact_capability_is_not_bypassed_by_a_broader_prefixed_alias():
     assert g.pre_tool_call('read_file', {'path': '/public/x'}, session_id='p') is None
 
 
+def test_child_alias_cannot_bypass_an_ancestor_exact_capability():
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    parent = (Warrant.mint_builder().holder(holder.public_key)
+              .capability('read_file', path=Subpath('/public'))
+              .capability('tool:read_file', path=Subpath('/'))
+              .capability('delegate_task').ttl(600).mint(issuer))
+    child_scope = (Warrant.mint_builder().holder(holder.public_key)
+                   .capability('tool:read_file', path=Subpath('/'))
+                   .ttl(300).mint(issuer))
+    g = HermesGuard(warrant=parent, signing_key=holder,
+                    child_warrant=child_scope, trusted_roots=[issuer.public_key])
+    assert g.pre_tool_call('delegate_task', {}, session_id='p') is None
+    g.on_subagent_start('p', 'c')
+    child, _ = g._resolve_warrant('c')
+    assert 'read_file' not in child.tools and 'tool:read_file' in child.tools
+    assert g.pre_tool_call('read_file', {'path': '/secret'}, session_id='c')
+
+
 def test_log_only_denied_spawn_cannot_compete_for_pending_authority():
     from tenuo import Exact
     issuer, holder = SigningKey.generate(), SigningKey.generate()
@@ -197,6 +215,44 @@ def test_log_only_denied_spawn_cannot_compete_for_pending_authority():
                     session_id='p', tool_call_id='bad')
     g.on_subagent_start('p', 'authorized-child', child_goal='same')
     assert g.pre_tool_call('read_file', {'path': '/data/x'}, session_id='authorized-child') is None
+
+
+def test_completed_tool_error_releases_goal_for_retry():
+    from hermes_tenuo._guard import PluginGuard
+    g, _ = guard()
+    adapter = PluginGuard(g)
+    assert adapter.pre_tool_call_hook(
+        'delegate_task', {'goal': 'same'}, session_id='p', tool_call_id='old'
+    ) is None
+    adapter.post_tool_call_hook(
+        'delegate_task', {'goal': 'same'}, 'validation failed',
+        session_id='p', tool_call_id='old', status='error', error_type='tool_error',
+    )
+    assert adapter.pre_tool_call_hook(
+        'delegate_task', {'goal': 'same'}, session_id='p', tool_call_id='retry'
+    ) is None
+
+
+def test_uncorrelated_post_keeps_sessionless_attribution_denial():
+    g, events = guard()
+    g.set_session_warrant('gateway', g._static_warrant, g._static_signing_key)
+    g._static_warrant = None
+    g.post_tool_call('read_file', {'path': '/data/x'}, '{}')
+    assert events and events[-1].decision == 'DENY'
+    assert 'no session id' in events[-1].reason
+
+
+def test_task_table_saturation_preserves_existing_ambiguity():
+    g, _ = guard()
+    g._MAX_TASKS = 2
+    g.set_session_warrant('p', g._static_warrant, g._static_signing_key)
+    g._remember_task('shared', 'p')
+    g._remember_task('shared', 'c')
+    g._remember_task('other', 'p')
+    g._remember_task('overflow', 'p')
+    g._remember_task('shared', 'p')
+    _, reason = g._attribute_session('', 'shared')
+    assert reason and 'does not identify one session' in reason
 
 
 @pytest.mark.parametrize('action', ['', '   ', '\t\n', ' SpAwN '])
