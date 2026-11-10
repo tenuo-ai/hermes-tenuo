@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import stat
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -413,7 +414,14 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
             detail = ""
         raise HandsError(detail or f"the server answered {e.code}") from e
     except (OSError, ValueError) as e:
-        raise ConnectionError(str(getattr(e, "reason", e))) from e
+        reason = getattr(e, "reason", e)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise ConnectionError(
+                f"this machine does not trust the server's certificate "
+                f"({getattr(reason, 'verify_message', '') or reason}). If the server "
+                "uses its own certificate authority or a self-signed certificate, set SSL_CERT_FILE to that "
+                "certificate file and run this again") from e
+        raise ConnectionError(str(reason)) from e
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False) -> list:
@@ -544,6 +552,7 @@ class Device:
         self._talk = threading.Lock()                          # one writer to a runner at a time
         self._busy: Optional[tuple] = None                     # (runner, its job id) while a command runs
         self._job: Optional[str] = None                        # the command being handled, by the server's id
+        self._unsent: list = []  # results the server has not received yet: (command id, output, exit code)
         self._stop_job: Optional[str] = None                   # the command that was asked to stop
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
@@ -603,6 +612,27 @@ class Device:
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
             "sig": self._signed(wire.TOOL_RESULT, args),
         }, timeout=60)
+
+    def _deliver(self, job_id: str, output: str, returncode: int) -> None:
+        """Report a result; if the server cannot be reached, keep it to send later."""
+        try:
+            self.report(job_id, output, returncode)
+        except ConnectionError:
+            self._unsent.append((job_id, output, returncode))
+            raise
+
+    def _send_unsent(self) -> None:
+        """Send results held while the server could not be reached, before asking for more
+        work. A lost connection leaves them for the next try. A refusal means the server no
+        longer waits for that command (it restarted, or the caller stopped waiting)."""
+        while self._unsent:
+            job_id, output, returncode = self._unsent[0]
+            try:
+                self.report(job_id, output, returncode)
+            except HandsError:
+                pass
+            self._unsent.pop(0)
+            self.say("Sent a result that was held while the server could not be reached.")
 
     # -- checking and running one command ----------------------------------------
 
@@ -978,7 +1008,7 @@ class Device:
         except Exception as e:  # a refusal is reported, never run
             reason = str(e) or type(e).__name__
             self._record(shown, None, f"refused: {reason}")
-            self.report(job_id, f"hands: refused on the device: {reason}\n", 126)
+            self._deliver(job_id, f"hands: refused on the device: {reason}\n", 126)
             return
         done = threading.Event()
         with self._talk:
@@ -994,7 +1024,7 @@ class Device:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
-        self.report(job_id, output, code)
+        self._deliver(job_id, output, code)
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": shown,
@@ -1056,6 +1086,7 @@ class Device:
         failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
+                self._send_unsent()
                 self._waiting = True
                 try:
                     job = self.poll()
@@ -1105,9 +1136,16 @@ class Device:
             if job:
                 try:
                     self.handle(job)
-                except (HandsError, ConnectionError) as e:
+                except ConnectionError as e:
+                    self.say(f"Couldn't reach the server to report a result ({e}); it is kept and sent when "
+                             "the connection is back.")
+                except HandsError as e:
                     self.say(f"Couldn't report a result: {e}")
         self._stop_runner()
+        try:
+            self._send_unsent()  # the server still takes a result for a short while after the window
+        except ConnectionError:
+            pass
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         return 0

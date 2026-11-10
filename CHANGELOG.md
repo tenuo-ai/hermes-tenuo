@@ -22,7 +22,15 @@
 - `hermes-tenuo hands check` says whether a machine is ready without pairing
   it, and `hands up` prints what commands can and cannot do. `--read-only`
   lets commands read the folder without changing it.
-- A machine that is up pairs again by itself when Hermes restarts.
+- A machine that is up pairs again by itself when Hermes restarts, and each
+  conversation keeps the machine it was using.
+- A result that cannot be reported because the connection dropped is kept and
+  sent when it is back. A command whose result never arrives is reported as
+  outcome unknown.
+- A certificate the machine does not trust is explained, with `SSL_CERT_FILE`
+  for a private certificate authority.
+- Behind a reverse proxy on the same host, connection limits apply to each
+  caller's forwarded address.
 - Commands cannot read the home folder outside the shared folder, except
   toolchains and folders on `PATH`. `--read FOLDER` shows one more folder and
   `--read-home` shows the home folder except credentials and browser data.

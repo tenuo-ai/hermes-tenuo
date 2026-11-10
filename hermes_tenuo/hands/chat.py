@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict
@@ -23,6 +24,7 @@ _devices: Dict[str, str] = {}  # task -> device name
 _saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
+MAX_REMEMBERED = 2000  # conversations whose machine is kept across a restart
 
 HELP = """Hands runs this conversation's commands on your own machine.
   /hands invite        print the line to run on your machine
@@ -62,11 +64,49 @@ def _owner() -> str:
     return f"{platform}:{person}" if person else ""
 
 
+def _remember() -> None:
+    """Write down which machine each conversation uses, so a restart of Hermes does not
+    quietly move a conversation back to the server. Called with `_lock` held."""
+    hub = get_hub()
+    if hub is None:
+        return
+    try:
+        hub.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = hub.dir / f".conversations.{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(_wanted, indent=1) + "\n")
+        os.replace(tmp, hub.dir / "conversations.json")
+    except OSError as e:
+        logger.warning("hermes-tenuo hands: could not save which machine conversations use (%s)", e)
+
+
+def restore() -> None:
+    """Pick up, when Hermes starts, which machine each conversation was using. A machine that
+    is not back yet makes that conversation's commands fail with a message saying so; they
+    never run on the server instead. Machines that were forgotten are dropped."""
+    hub = get_hub()
+    if hub is None:
+        return
+    try:
+        saved = json.loads((hub.dir / "conversations.json").read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(saved, dict):
+        return
+    names = {str(entry.get("name", "")) for entry in hub._known().values() if isinstance(entry, dict)}
+    with _lock:
+        for conversation, name in list(saved.items())[:MAX_REMEMBERED]:
+            if isinstance(conversation, str) and isinstance(name, str) and (not name or name in names):
+                _wanted.setdefault(conversation, name)
+
+
 def joined(conversation: str, name: str) -> None:
     """A machine came up on the invite this conversation asked for: use it from now on."""
     if can_switch:
         with _lock:
             _wanted[conversation] = name
+            _remember()
 
 
 def _whole_profile() -> bool:
@@ -121,12 +161,14 @@ def command(raw_args: str = "") -> str:
             session = hub.pick(name, _owner())
             with _lock:
                 _wanted[_conversation()] = session.name
+                _remember()
             left = max(0, int((session.expires - time.time()) / 60))
             return (f"This conversation now runs commands on '{session.name}' in {session.folder} "
                     f"({left} min left). /hands off switches back to the server.")
         if verb == "off":
             with _lock:
                 _wanted.pop(_conversation(), None)
+                _remember()
             _release(_conversation())
             if _whole_profile():
                 return ("This profile runs every conversation's commands on your machine (terminal.backend: "

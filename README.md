@@ -315,6 +315,10 @@ What your machine enforces, whatever the server asks:
   stopped waiting for it (the machine slept, the network stalled) is refused,
   not run. If your machine restarts with a command in hand, the server reports
   that the outcome is unknown rather than sending it again.
+- **A dropped connection does not lose a result.** If the server cannot be
+  reached when a command ends, your machine keeps the result and sends it when
+  the connection is back. If it never arrives in the command's time, the agent
+  is told the outcome is unknown and to check before running it again.
 - **Only your server.** Your machine signs a warrant for the server's key.
   Every command arrives signed by that key and is checked on your machine
   before it runs. A changed, replayed or forged command is refused.
@@ -325,14 +329,17 @@ What your machine enforces, whatever the server asks:
   something, the result says what the machine shares.
 - **It survives a restart of Hermes.** A machine that is up pairs again by
   itself when the server comes back, with the same folder and the time it had
-  left. A machine you revoked does not.
+  left, and each conversation keeps the machine it was using. A machine you
+  revoked does not.
 
 The connection goes from your machine to the server, so a laptop behind a home
 router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
 network such as Tailscale or WireGuard. Your machine refuses a plain
 `http://` server that is not on a private network or the machine itself,
-unless you pass `--plain-http`. The listener serves a limited number
+unless you pass `--plain-http`. If the server's certificate comes from your own
+certificate authority, set `SSL_CERT_FILE` to that certificate on your machine
+before `hands up`. The listener serves a limited number
 of connections, and fewer from any one address, so put a reverse proxy in
 front of it if it is reachable from the internet.
 
