@@ -18,7 +18,7 @@ PRIVATE = (".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".azure", "
            ".netrc", ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains", ".hermes", ".hermes-tenuo",
            ".claude", ".claude.json", ".codex", ".config/op", ".password-store", ".tenuo", ".vault-token",
            ".terraform.d", ".cargo/credentials", ".cargo/credentials.toml", ".config/stripe",
-           ".zsh_history", ".bash_history", "Library/Cookies",
+           ".zsh_history", ".bash_history", ".Xauthority", ".ICEauthority", "Library/Cookies",
            "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
            "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
            ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware")
@@ -41,8 +41,16 @@ class SandboxUnavailable(RuntimeError):
 
 
 def _private_paths() -> List[str]:
+    """Each protected path as named and as resolved: one that is a link to somewhere else
+    is hidden at its real place too."""
     home = os.path.realpath(os.path.expanduser("~"))
-    return [os.path.join(home, p) for p in PRIVATE]
+    paths: List[str] = []
+    for name in PRIVATE:
+        named = os.path.join(home, name)
+        for path in (named, os.path.realpath(named)):
+            if path not in paths:
+                paths.append(path)
+    return paths
 
 
 def _ancestors(path: str) -> List[str]:
@@ -97,7 +105,12 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
             "--die-with-parent"]
+    masked: List[str] = []
     for path in [*_private_paths(), *hidden]:
+        path = os.path.realpath(path)  # bubblewrap cannot mount onto a path through a link
+        if path in masked or path in (os.sep, os.path.realpath(os.path.expanduser("~"))):
+            continue
+        masked.append(path)
         if os.path.isdir(path):
             argv += ["--tmpfs", path]
         elif os.path.exists(path):

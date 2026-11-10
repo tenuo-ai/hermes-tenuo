@@ -7,6 +7,7 @@ this class only decides where one bash command runs.
 from __future__ import annotations
 
 import collections
+import threading
 from typing import Any, Optional
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
@@ -81,15 +82,16 @@ class HandsEnvironment(BaseEnvironment):
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: Optional[str] = None):
         shown = self._plain(cmd_string)
+        stopped = threading.Event()  # set when Hermes interrupts the call
 
         def run() -> tuple:
             try:
                 return self._hub.run(self._hub.pick(self._device), cmd_string, login=login, timeout=timeout,
-                                     stdin=stdin_data, shown=shown)
+                                     stdin=stdin_data, shown=shown, cancelled=stopped)
             except HandsUnavailable as e:
                 return f"{e}\n", 127
 
-        return _ThreadedProcessHandle(run)
+        return _ThreadedProcessHandle(run, cancel_fn=stopped.set)
 
     def _plain(self, script: str) -> str:
         """The command as Hermes was asked to run it. Hermes wraps each command in session
@@ -128,4 +130,8 @@ class HandsProvider(TerminalEnvironmentProvider):
 
     def create_environment(self, *, cwd: str, timeout: int, task_id: str = "default", **kwargs: Any):
         from hermes_tenuo.hands import chat
-        return HandsEnvironment(cwd, timeout, device=chat.device_for(task_id), task_id=task_id)
+        # The device chosen for the call in progress; Hermes's key for the environment is
+        # not always the conversation's task id, so it is not looked up by that alone.
+        chosen = chat.current_device()
+        return HandsEnvironment(cwd, timeout, device=chosen if chosen is not None else chat.device_for(task_id),
+                                task_id=task_id)

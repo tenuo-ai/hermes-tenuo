@@ -90,8 +90,14 @@ def mint_identity(device_key: Any, ttl_seconds: int):
     """A warrant the device holds itself, so the server can check what the device sends."""
     from tenuo import Warrant, Wildcard
     return (Warrant.mint_builder().holder(device_key.public_key).ttl(ttl_seconds)
-            .capability(TOOL_POLL, nonce=Wildcard())
+            .capability(TOOL_POLL, nonce=Wildcard(), op=Wildcard())
             .capability(TOOL_RESULT, job=Wildcard(), digest=Wildcard()).mint(device_key))
+
+
+def request(op: str, nonce: str) -> Dict[str, str]:
+    """What a device signs for one request: which operation it is, and a value used once.
+    A signature made for one operation is no use for another."""
+    return {"nonce": nonce, "op": op}
 
 
 def sign(warrant: Any, key: Any, tool: str, args: Dict[str, str], now: Optional[int] = None) -> str:

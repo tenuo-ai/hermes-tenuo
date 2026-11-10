@@ -294,12 +294,15 @@ router needs no open port. Commands and results are signed but not encrypted
 by Hands: use an `https://` address behind a reverse proxy, or a private
 network such as Tailscale or WireGuard.
 
-A process a command leaves running (a dev server started with
+Interrupting a command in Hermes stops it on your machine. A process a command
+leaves running (a dev server started with
 `terminal(background=true)`) keeps running between commands and stops when
 `hands up` stops. To stop it earlier, kill it by name or port from a later
 command.
 
-Limits today: macOS and Linux machines only; a machine with no sandbox refuses
+Limits today: macOS and Linux machines only; on Linux, commands share your
+machine's network, including local sockets that are not files, so run Hands
+on a desktop Linux session only for a server you trust; a machine with no sandbox refuses
 to start unless you pass `--no-sandbox`; on macOS `mktemp` needs an explicit
 template under `$TMPDIR`; Hands lives in one Hermes process
 (the gateway), so a separate `hermes` CLI process on the same server does not

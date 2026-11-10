@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -41,15 +42,48 @@ SAFE_ENV = {
 # everything that runs in the sandbox, including what detached itself or ignores a polite
 # request to stop.
 RUNNER = r"""
-import json, os, signal, subprocess, sys, time
+import json, os, select, signal, subprocess, sys, threading, time
 outside = os.getppid()
 groups = []
+inbox, buf, closed = [], b"", False
+wake_r, wake_w = os.pipe()
+os.set_blocking(wake_w, False)
+signal.signal(signal.SIGCHLD, lambda *a: None)
+signal.set_wakeup_fd(wake_w)  # a finished command wakes the wait below at once
 def stop(group, sig):
     try:
         os.killpg(group, sig)
         return True
     except OSError:
         return False
+def pump(wait):
+    # Read what the device has sent, waiting at most `wait` seconds.
+    global buf, closed
+    try:
+        ready = select.select([wake_r] if closed else [0, wake_r], [], [], wait)[0]
+    except InterruptedError:
+        return
+    if wake_r in ready:
+        try:
+            os.read(wake_r, 4096)
+        except OSError:
+            pass
+    if 0 in ready:
+        chunk = os.read(0, 65536)
+        if not chunk:
+            closed = True
+            return
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line.strip():
+                inbox.append(json.loads(line))
+def feed(pipe, text):
+    try:
+        pipe.write(text.encode())
+        pipe.close()
+    except OSError:
+        pass
 def confined():
     # True only when this process provably cannot touch anything outside the sandbox.
     try:
@@ -67,8 +101,14 @@ def confined():
     except OSError:
         return False
 sys.stdout.write("ready\n"); sys.stdout.flush()
-for line in sys.stdin:
-    job = json.loads(line)
+while True:
+    while not inbox and not closed:
+        pump(5)
+    if not inbox:
+        break
+    job = inbox.pop(0)
+    if "argv" not in job:
+        continue  # a request to stop a command that has already ended
     code = 127
     try:
         text = job.get("stdin")
@@ -76,14 +116,23 @@ for line in sys.stdin:
             p = subprocess.Popen(job["argv"], cwd=job["cwd"], stdout=out, stderr=subprocess.STDOUT,
                                  stdin=subprocess.PIPE if text is not None else subprocess.DEVNULL,
                                  start_new_session=True)
-            groups.append(p.pid)
-            try:
-                p.communicate(text.encode() if text is not None else None, timeout=job["timeout"])
-                code = p.returncode
-            except subprocess.TimeoutExpired:
+        groups.append(p.pid)
+        sys.stdout.write(json.dumps({"started": p.pid}) + "\n"); sys.stdout.flush()
+        if text is not None:
+            threading.Thread(target=feed, args=(p.stdin, text), daemon=True).start()
+        end = time.time() + job["timeout"]
+        while True:
+            code = p.poll()
+            if code is not None:
+                break
+            asked = [m for m in inbox if m.get("stop") == job["id"]]
+            if asked or closed or time.time() >= end:
+                inbox[:] = [m for m in inbox if m not in asked]
                 stop(p.pid, signal.SIGKILL)
                 p.wait()
-                code = 124
+                code = 130 if asked else 124
+                break
+            pump(max(0.0, min(1.0, end - time.time())))
     except Exception as e:
         try:
             with open(job["out"], "ab") as out:
@@ -204,7 +253,11 @@ class Device:
         self._seen: set = set()
         self._stop = False
         self._polled_at: Optional[float] = None
+        self._poll_nonce: Optional[str] = None
         self._waiting = False
+        self._talk = threading.Lock()                          # one writer to a runner at a time
+        self._busy: Optional[tuple] = None                     # (runner, its job id) while a command runs
+        self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
         self._log = home() / "log.jsonl"
 
@@ -213,22 +266,25 @@ class Device:
     def _signed(self, tool: str, args: Dict[str, str]) -> str:
         return wire.sign(self.identity, self.key, tool, args)
 
+    def _request(self, op: str, nonce: str) -> str:
+        return self._signed(wire.TOOL_POLL, wire.request(op, nonce))
+
     def pair(self) -> None:
         grant, identity = self.grant.to_base64(), self.identity.to_base64()
         nonce = wire.digest(grant, self.folder, self.name, self.tmp)
         _post(self.url + wire.API + "/pair", {
             "invite": self.secret, "device": self.me, "name": self.name, "folder": self.folder, "tmp": self.tmp,
             "grant": grant, "identity": identity, "nonce": nonce,
-            "sig": self._signed(wire.TOOL_POLL, {"nonce": nonce}),
+            "sig": self._request("pair", nonce),
         }, timeout=30)
         _private_write(home() / "server.json", json.dumps(
             {"url": self.url, "server_key": wire.key_text(self.server_key)}) + "\n")
 
     def poll(self) -> Optional[Dict[str, Any]]:
         nonce = secrets.token_hex(16)
-        self._polled_at = time.time()
+        self._polled_at, self._poll_nonce = time.time(), nonce
         reply = _post(self.url + wire.API + "/poll", {
-            "device": self.me, "nonce": nonce, "sig": self._signed(wire.TOOL_POLL, {"nonce": nonce}),
+            "device": self.me, "nonce": nonce, "sig": self._request("poll", nonce),
         }, timeout=min(wire.POLL_SECONDS + 15, max(1.0, self.expires - time.time() + 1)))
         return reply.get("job")
 
@@ -237,7 +293,7 @@ class Device:
         nonce = secrets.token_hex(16)
         try:
             _post(self.url + wire.API + "/bye", {
-                "device": self.me, "nonce": nonce, "sig": self._signed(wire.TOOL_POLL, {"nonce": nonce}),
+                "device": self.me, "nonce": nonce, "sig": self._request("bye", nonce),
             }, timeout=5)
         except (HandsError, ConnectionError):
             pass
@@ -258,9 +314,12 @@ class Device:
             raise HandsError("this command was already run")
         if time.time() > self.expires:
             raise HandsError("the time window has ended")
+        poll = str(job.get("poll") or "")
+        if self._poll_nonce is not None and poll != self._poll_nonce:
+            raise HandsError("this command does not answer this device's request")
         args = {"dir": where, "cmd": wire.digest(job_id, job["cmd"], bool(job.get("login")), job.get("stdin"),
                                                 int(job["timeout"]), job.get("shown") or "",
-                                                int(job.get("waited_ms") or 0))}
+                                                int(job.get("waited_ms") or 0), poll)}
         chain = wire.load_chain(job["chain"])
         if chain[0].to_base64() != self.grant.to_base64():
             raise HandsError("this command belongs to an old Hands session")
@@ -303,7 +362,11 @@ class Device:
         fd, out_path = tempfile.mkstemp(prefix=".hands-out-", dir=self.tmp)
         try:
             if folder == self.folder:
-                if self._runner is None or self._runner.poll() is not None:
+                if self._runner is not None and self._runner.poll() is not None:
+                    self.say("  A command ended Hands's own supervisor. What it left running was stopped where "
+                             "it could be found; check for stray processes if this was not expected.")
+                    self._stop_runner()  # clear what it left, start again
+                if self._runner is None:
                     self._runner = self._start_runner(self.folder, shared=True)
                 runner, own = self._runner, False
             else:
@@ -312,10 +375,10 @@ class Device:
             if runner is None:
                 return "hands: this machine could not start its sandbox, so the command was not run\n", 126
             code = self._ask(runner, shell, folder, job.get("stdin"), timeout, out_path)
-            if own or code is None:
+            if own:
                 self._close(runner)  # stops whatever the command left behind
-                if not own:
-                    self._runner = None
+            elif code is None:
+                self._stop_runner()
             os.lseek(fd, 0, os.SEEK_SET)
             data = b""
             while len(data) <= MAX_OUTPUT:
@@ -393,6 +456,40 @@ class Device:
     def _stop_runner(self) -> None:
         runner, self._runner = self._runner, None
         self._close(runner)
+        self._sweep()
+
+    def _sweep(self) -> None:
+        """Stop what commands left behind when their sandbox could not do it itself (a
+        command ended the runner). macOS only: there the device sees the same process
+        numbers as its commands, and each command ran in a process group of its own. On
+        Linux the sandbox's process list ends with it. A process that also left its
+        command's group is not found this way."""
+        groups, self._groups = self._groups, {}
+        if sys.platform != "darwin" or not groups:
+            return
+        try:
+            listing = subprocess.run(["/bin/ps", "-axo", "pid=,pgid=,lstart="], capture_output=True, text=True,
+                                     timeout=10, env={"LC_ALL": "C", "PATH": os.defpath}).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        rows = []
+        for line in listing.splitlines():
+            parts = line.split(None, 2)
+            try:
+                rows.append((int(parts[0]), int(parts[1]), time.mktime(time.strptime(parts[2].strip(), "%c"))))
+            except (IndexError, ValueError):
+                continue
+        born_now = {pid: born for pid, _, born in rows}
+        for group, began in groups.items():
+            leader = born_now.get(group)
+            if leader is not None and abs(leader - began) > 5:
+                continue  # that number belongs to another program now
+            for pid, pgid, _ in rows:
+                if pgid == group and pid != os.getpid():
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
 
     def _ask(self, runner: subprocess.Popen, shell: list, folder: str, stdin: Optional[str], timeout: int,
              out_path: str) -> Optional[int]:
@@ -401,15 +498,64 @@ class Device:
         line = json.dumps({"id": job_id, "argv": shell, "cwd": folder, "stdin": stdin, "timeout": timeout,
                            "out": out_path}) + "\n"
         try:
-            runner.stdin.write(line.encode())
-            runner.stdin.flush()
+            with self._talk:
+                runner.stdin.write(line.encode())
+                runner.stdin.flush()
+                self._busy = (runner, job_id)
             reply = self._line(runner, timeout + 20)
             answer = json.loads(reply) if reply else {}
+            if "started" in answer:
+                self._groups[int(answer["started"])] = time.time()
+                while len(self._groups) > 2000:
+                    self._groups.pop(next(iter(self._groups)))
+                reply = self._line(runner, timeout + 20)
+                answer = json.loads(reply) if reply else {}
         except (OSError, ValueError):
             answer = {}
+        finally:
+            with self._talk:
+                self._busy = None
         if answer.get("id") != job_id:
             return None
         return int(answer.get("code", 127))
+
+    def cancel(self) -> None:
+        """Stop the command that is running now, with everything it started in its group."""
+        with self._talk:
+            if self._busy is None:
+                return
+            runner, job_id = self._busy
+            try:
+                runner.stdin.write((json.dumps({"stop": job_id}) + "\n").encode())
+                runner.stdin.flush()
+            except OSError:
+                pass
+
+    def _watch(self, job_id: str, done: threading.Event) -> None:
+        """While a command runs, ask the server whether to stop it. Only an answer signed by
+        the server, for this command, stops it."""
+        if done.wait(0.3):
+            return  # most commands are over before anyone could want them stopped
+        while not done.is_set():
+            nonce = secrets.token_hex(16)
+            try:
+                reply = _post(self.url + wire.API + "/watch", {
+                    "device": self.me, "job": job_id, "nonce": nonce, "sig": self._request("watch", nonce),
+                }, timeout=45)
+            except (HandsError, ConnectionError):
+                if done.wait(2):
+                    return
+                continue
+            if not reply.get("cancel"):
+                continue
+            try:
+                wire.check([self.grant], self.key.public_key, wire.TOOL,
+                           {"dir": self.folder, "cmd": wire.digest("cancel", job_id)}, str(reply.get("pop", "")))
+            except Exception:
+                return
+            if not done.is_set():
+                self.cancel()
+            return
 
     def handle(self, job: Dict[str, Any]) -> None:
         job_id = str(job.get("id", ""))
@@ -422,8 +568,15 @@ class Device:
             self._record(shown, None, f"refused: {reason}")
             self.report(job_id, f"hands: refused on the device: {reason}\n", 126)
             return
-        output, code = self.run(job, folder, timeout)
-        self._record(shown, code, "")
+        done = threading.Event()
+        threading.Thread(target=self._watch, args=(job_id, done), daemon=True).start()
+        try:
+            output, code = self.run(job, folder, timeout)
+        finally:
+            done.set()
+        if code == 130:
+            output += "\nhands: stopped at the server's request\n"
+        self._record(shown, code, "stopped" if code == 130 else "")
         self.report(job_id, output, code)
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:

@@ -103,9 +103,14 @@ SCRIPT = textwrap.dedent('''
         tool("first_again", "terminal", {"command": "pwd"})
         # A conversation that has only ever run on a device still returns to the server.
         tool("fresh", "terminal", {"command": "pwd"}, task="chat-2")
+        # A conversation with settings of its own gets them back when Hands is switched off.
+        from tools.terminal_tool import register_task_env_overrides, resolve_task_overrides
+        register_task_env_overrides("chat-3", {"cwd": str(server_dir)})
+        tool("kept", "terminal", {"command": "pwd"}, task="chat-3")
         out["off"] = chat.command("off")
         tool("after", "terminal", {"command": "pwd"})
         tool("fresh_after", "terminal", {"command": "pwd"}, task="chat-2")
+        out["restored"] = resolve_task_overrides("chat-3")
         other.stop()
     device.stop()
     print("RESULT " + json.dumps(out))
@@ -173,6 +178,8 @@ def test_one_conversation_switches_to_the_device_and_back(tmp_path):
     assert out["fresh"]["text"].strip() == os.path.realpath(project)
     assert out["after"]["text"].strip() == here
     assert out["fresh_after"]["text"].strip() == here, out["fresh_after"]
+    assert out["kept"]["text"].strip() == os.path.realpath(project), out["kept"]
+    assert out["restored"] == {"cwd": str(server_dir)}, out["restored"]
 
 
 def test_a_profile_whose_backend_is_hands(tmp_path):

@@ -178,7 +178,7 @@ def _job(hub: Hub, device: Device, **changes):
     session = hub.pick(device.name)
     job_id = changes.pop("id", "job-1")
     cmd = "echo ok"
-    args = {"dir": session.folder, "cmd": wire.digest(job_id, cmd, False, None, 30, "", 0)}
+    args = {"dir": session.folder, "cmd": wire.digest(job_id, cmd, False, None, 30, "", 0, "")}
     job = {"id": job_id, "cmd": cmd, "login": False, "timeout": 30, "stdin": None, "shown": "",
            "dir": session.folder, "chain": [session.grant.to_base64()],
            "pop": wire.sign(session.grant, hub.key, wire.TOOL, args)}
@@ -227,7 +227,7 @@ def test_device_refuses_another_folder(hub, paired, tmp_path):
 def test_device_refuses_a_command_signed_by_someone_else(hub, paired):
     from tenuo import SigningKey
     session = hub.pick(paired.name)
-    args = {"dir": session.folder, "cmd": wire.digest("job-9", "echo ok", False, None, 30, "", 0)}
+    args = {"dir": session.folder, "cmd": wire.digest("job-9", "echo ok", False, None, 30, "", 0, "")}
     forged = wire.sign(session.grant, SigningKey.generate(), wire.TOOL, args)
     with pytest.raises(Exception):
         paired.verify(_job(hub, paired, id="job-9", pop=forged))
@@ -237,7 +237,7 @@ def test_device_refuses_a_grant_it_did_not_sign(hub, paired):
     from tenuo import SigningKey
     stranger = SigningKey.generate()
     grant = wire.mint_grant(stranger, hub.key.public_key, paired.folder, 600)
-    args = {"dir": paired.folder, "cmd": wire.digest("job-8", "echo ok", False, None, 30, "", 0)}
+    args = {"dir": paired.folder, "cmd": wire.digest("job-8", "echo ok", False, None, 30, "", 0, "")}
     job = _job(hub, paired, id="job-8", chain=[grant.to_base64()], pop=wire.sign(grant, hub.key, wire.TOOL, args))
     with pytest.raises(Exception):
         paired.verify(job)
@@ -289,14 +289,14 @@ def test_subfolder_grant_limits_writes_to_the_subfolder(hub, folder):
     builder.with_capability(wire.TOOL, {"dir": Subpath(sub), "cmd": Wildcard()})
     child = builder.delegate(hub.key)
     cmd = "echo in > inside.txt; echo out > ../outside.txt; true"
-    args = {"dir": sub, "cmd": wire.digest("job-sub", cmd, False, None, 30, "", 0)}
+    args = {"dir": sub, "cmd": wire.digest("job-sub", cmd, False, None, 30, "", 0, "")}
     job = {"id": "job-sub", "cmd": cmd, "login": False, "timeout": 30, "stdin": None, "shown": "", "dir": sub,
            "chain": [session.grant.to_base64(), child.to_base64()], "pop": wire.sign(child, hub.key, wire.TOOL, args)}
     where = device.verify(job)
     device.run(job, where)
     assert (folder / "src" / "inside.txt").exists() and not (folder / "outside.txt").exists()
     # The narrowed warrant cannot be used for the parent folder.
-    args = {"dir": session.folder, "cmd": wire.digest("job-up", cmd, False, None, 30, "", 0)}
+    args = {"dir": session.folder, "cmd": wire.digest("job-up", cmd, False, None, 30, "", 0, "")}
     wider = dict(job, id="job-up", dir=session.folder, pop=wire.sign(child, hub.key, wire.TOOL, args))
     with pytest.raises(Exception):
         device.verify(wider)
@@ -313,7 +313,7 @@ def test_server_refuses_unsigned_polls_and_results(hub, paired):
 
 def test_server_refuses_a_reused_poll(hub, paired, monkeypatch):
     monkeypatch.setattr(wire, "POLL_SECONDS", 0.05)
-    body = {"device": paired.me, "nonce": "once", "sig": wire.sign(paired.identity, paired.key, wire.TOOL_POLL, {"nonce": "once"})}
+    body = {"device": paired.me, "nonce": "once", "sig": wire.sign(paired.identity, paired.key, wire.TOOL_POLL, wire.request("poll", "once"))}
     assert hub.poll(dict(body)) == {"job": None}
     with pytest.raises(Refused, match="already used"):
         hub.poll(dict(body))
@@ -561,3 +561,127 @@ def test_goodbye_reports_unknown_for_a_command_the_device_had(hub, paired, monke
     paired.bye()
     waiter.join(5)
     assert result["r"][1] == 125 and "not known whether it ran" in result["r"][0]
+
+
+# --- requests and commands are tied to what they are for ------------------------------------
+
+def test_signature_for_one_request_is_no_use_for_another(hub, paired):
+    nonce = "fresh-value"
+    for_a_poll = wire.sign(paired.identity, paired.key, wire.TOOL_POLL, wire.request("poll", nonce))
+    with pytest.raises(Refused, match="isn't signed"):
+        hub.bye({"device": paired.me, "nonce": nonce, "sig": for_a_poll})
+    assert hub.pick(paired.name).online
+
+
+def test_pairing_request_cannot_be_replayed_as_another_request(hub, folder):
+    sent = {}
+    from hermes_tenuo.hands import device as device_module
+    real = device_module._post
+    device = Device(hub.invite(), str(folder), 600, allow_unsandboxed=True)
+
+    def capture(url, body, timeout):
+        sent.update(body)
+        return real(url, body, timeout)
+
+    device_module._post = capture
+    try:
+        device.pair()
+    finally:
+        device_module._post = real
+    replay = {"device": sent["device"], "nonce": sent["nonce"], "sig": sent["sig"]}
+    for request in (hub.bye, hub.poll):
+        with pytest.raises(Refused):
+            request(dict(replay))
+    assert hub.pick(device.name).online
+
+
+def test_command_must_answer_the_devices_open_request(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    session = hub.pick(paired.name)
+    waiter = threading.Thread(target=lambda: hub.run(session, "echo x", login=False, timeout=5, stdin=None))
+    waiter.start()
+    job = paired.poll()
+    assert job is not None and job["poll"]
+    paired.poll()  # a later request is open now; the earlier command arrives as its answer
+    with pytest.raises(HandsError, match="does not answer"):
+        paired.verify(job)
+    waiter.join(10)
+
+
+# --- stopping a command ------------------------------------------------------------------------
+
+def test_stopped_before_it_started_never_runs(hub, paired, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 0.2)
+    stop = threading.Event()
+    stop.set()
+    out, code = hub.run(hub.pick(paired.name), "echo never", login=False, timeout=30, stdin=None, cancelled=stop)
+    assert code == 130 and "before it started" in out
+    assert paired.poll() is None
+
+
+@sandboxed
+def test_stopping_a_running_command_stops_it_on_the_device(hub, folder):
+    up(hub, folder)
+    stop, result = threading.Event(), {}
+    waiter = threading.Thread(target=lambda: result.update(r=hub.run(
+        hub.pick("laptop"), "sleep 3; echo late > late.txt", login=False, timeout=60, stdin=None, cancelled=stop)))
+    started = time.time()
+    waiter.start()
+    time.sleep(1)
+    stop.set()
+    waiter.join(15)
+    assert result["r"][1] == 130 and time.time() - started < 12, result
+    time.sleep(3)
+    assert not (folder / "late.txt").exists()
+    assert run(hub, "echo next")[0].strip() == "next"
+
+
+@sandboxed
+def test_leftovers_are_cleared_when_a_command_ends_the_runner(hub, folder, monkeypatch):
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    device = up(hub, folder)
+    run(hub, "(while true; do date +%s%N > tick.txt; sleep 0.2; done) >/dev/null 2>&1 & kill -KILL $PPID", timeout=5)
+    assert run(hub, "echo again")[0].strip() == "again"  # a new sandbox; the old one's leftovers are gone
+    time.sleep(0.5)
+    seen = (folder / "tick.txt").read_text() if (folder / "tick.txt").exists() else ""
+    time.sleep(1)
+    assert ((folder / "tick.txt").read_text() if (folder / "tick.txt").exists() else "") == seen
+    device.stop()
+
+
+# --- the listener and protected paths ----------------------------------------------------------
+
+def test_connection_that_stops_sending_is_dropped(tmp_path, monkeypatch):
+    import socket
+    monkeypatch.setattr(hub_module, "READ_SECONDS", 0.5)
+    h = Hub(state_dir=tmp_path / "server-state")
+    h.listen("127.0.0.1:0")
+    try:
+        host, port = h.public_url.split("//")[1].split(":")
+        with socket.create_connection((host, int(port)), timeout=5) as s:
+            s.sendall(b"POST /hands/v1/poll HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n")
+            started = time.time()
+            s.settimeout(5)
+            try:
+                data = s.recv(4096)
+            except OSError:
+                data = b""
+            assert time.time() - started < 4
+            assert data == b"" or b" 4" in data.split(b"\r\n")[0] or b" 5" in data.split(b"\r\n")[0]
+    finally:
+        h.close()
+
+
+def test_protected_path_that_is_a_link_is_hidden_at_its_real_place(tmp_path, monkeypatch):
+    home, elsewhere = tmp_path / "home", tmp_path / "vault" / "keys"
+    home.mkdir()
+    elsewhere.mkdir(parents=True)
+    (home / ".ssh").symlink_to(elsewhere)
+    monkeypatch.setenv("HOME", str(home))
+    paths = sandbox._private_paths()
+    assert os.path.realpath(elsewhere) in paths and os.path.join(os.path.realpath(home), ".ssh") in paths
+    if sys.platform == "darwin":
+        assert os.path.realpath(elsewhere) in sandbox._mac_profile(str(tmp_path / "p"), str(tmp_path / "t"))
+    else:
+        argv = sandbox._bwrap(str(tmp_path / "p"), str(tmp_path / "t"), ["true"])
+        assert os.path.realpath(elsewhere) in argv and os.path.join(str(home), ".ssh") not in argv

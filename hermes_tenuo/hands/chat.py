@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 import time
@@ -15,6 +16,8 @@ _lock = threading.Lock()
 _wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one up), set by /hands on
 _applied: Dict[str, str] = {}  # Hermes task id -> conversation it was switched for
 _devices: Dict[str, str] = {}  # Hermes task id -> device name
+_saved: Dict[str, Dict[str, Any]] = {}  # Hermes task id -> the overrides it had before /hands on
+_route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
 
 HELP = """Hands runs this conversation's commands on your own machine.
@@ -37,6 +40,11 @@ def _conversation() -> str:
 def device_for(task_id: str) -> str:
     with _lock:
         return _devices.get(task_id, "")
+
+
+def current_device() -> Any:
+    """The device the tool call in progress was routed to, or None outside one."""
+    return _route.get()
 
 
 def command(raw_args: str = "") -> str:
@@ -101,7 +109,37 @@ def _release(conversation: str) -> None:
             _devices.pop(task, None)
     for task in tasks:
         _drop_shell(task)  # while the task still has its own slot, so the server's shell is untouched
-        clear_task_env_overrides(task)
+        with _lock:
+            before = _saved.pop(task, None)
+        clear_task_env_overrides(task)  # also forgets the device folder as this task's directory
+        if before:
+            try:
+                from tools.terminal_tool import register_task_env_overrides
+                register_task_env_overrides(task, before)  # what the task had before /hands on
+            except Exception as e:
+                logger.warning("hermes-tenuo hands: could not restore the task's settings (%s)", e)
+
+
+def _own_overrides(task: str) -> Dict[str, Any]:
+    """The overrides Hermes holds for this task itself (registering replaces them all)."""
+    try:
+        from tools import terminal_tool
+        return dict(terminal_tool._task_env_overrides.get(terminal_tool._qualify_task_key(task)) or {})
+    except Exception:
+        return {}
+
+
+def _other_shell(task: str) -> bool:
+    """True if this task already has a shell of its own that is not on a device. Hermes
+    would keep using it, so the call must not go ahead as if it ran on the device."""
+    try:
+        from hermes_tenuo.hands.backend import HandsEnvironment
+        from tools import terminal_tool
+        cached = terminal_tool._active_environments
+        env = cached.get(terminal_tool._qualify_task_key(task)) or cached.get(task)
+        return env is not None and not isinstance(env, HandsEnvironment)
+    except Exception:
+        return False
 
 
 def _drop_shell(task: str) -> None:
@@ -178,15 +216,24 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
             _applied[task] = conversation
             _devices[task] = wanted
         if fresh:
-            register_task_env_overrides(task, {"env_type": NAME})
+            before = _own_overrides(task)
+            with _lock:
+                _saved[task] = before
+            register_task_env_overrides(task, {**before, "env_type": NAME})
         elif switched:
             _drop_shell(task)  # /hands on <another machine>: never keep running on the first one
+        if _other_shell(task):
+            raise HandsUnavailable("hands: this conversation already has its own sandbox on the server, so its "
+                                   "commands cannot move to your machine. Start a new conversation and type "
+                                   "/hands on there; this call was not run")
     if folder and not _inside(get_session_cwd(task), folder):
         record_session_cwd(task, folder)
     if whole_profile:
         return next_call()
     token = set_terminal_scope(_policy_with_hands())
+    chosen = _route.set(wanted)
     try:
         return next_call()
     finally:
+        _route.reset(chosen)
         reset_terminal_scope(token)
