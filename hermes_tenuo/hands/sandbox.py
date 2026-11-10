@@ -120,8 +120,10 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
             "--die-with-parent"]
+    emptied: List[str] = []  # folders shown empty; made read-only at the end, once what goes inside is in place
     if not home_visible:
         argv += ["--tmpfs", _home()]  # an empty home folder; what commands need from it is put back below
+        emptied.append(_home())
     masked: List[str] = []
     for path in [*_private_paths(), *hidden]:
         path = os.path.realpath(path)  # bubblewrap cannot mount onto a path through a link
@@ -130,6 +132,7 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
         masked.append(path)
         if os.path.isdir(path):
             argv += ["--tmpfs", path]
+            emptied.append(path)
         elif os.path.exists(path):
             argv += ["--ro-bind", "/dev/null", path]
     # The user's session sockets (the desktop bus, the service manager, agents) can start
@@ -138,6 +141,7 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     runtime = os.path.realpath(f"/run/user/{os.getuid()}")
     if os.path.isdir(runtime):
         argv += ["--tmpfs", runtime]
+        emptied.append(runtime)
     sockets = {os.path.realpath(p) for p in ("/run/docker.sock", "/var/run/docker.sock") if os.path.exists(p)}
     for socket_path in sorted(sockets):
         if not socket_path.startswith(runtime + os.sep):
@@ -154,11 +158,19 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
             if any(path.startswith(tool.rstrip(os.sep) + os.sep) for tool in tools):
                 if os.path.isdir(path):
                     argv += ["--tmpfs", path]
+                    emptied.append(path)
                 elif os.path.exists(path):
                     argv += ["--ro-bind", "/dev/null", path]
     for path in readable:
         argv += ["--ro-bind", path, path]
     argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
+    # An emptied folder is not a place to write: a write there would seem to work and be
+    # lost when the sandbox ends. What was put back inside it keeps its own setting.
+    shared_tmp = os.path.realpath("/tmp")
+    for path in emptied:
+        # One under /tmp is no longer there to change: the temp folder took /tmp's place.
+        if path != shared_tmp and not path.startswith(shared_tmp + os.sep):
+            argv += ["--remount-ro", path]
     return argv + ["--chdir", folder, "--", *command]
 
 

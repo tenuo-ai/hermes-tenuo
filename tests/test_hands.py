@@ -1070,9 +1070,23 @@ def test_chat_commands_only_see_your_own_machines(hub, folder, monkeypatch):
     chat._wanted.pop("chat-a", None)
 
 
+@pytest.fixture
+def home_base(tmp_path):
+    """Where a stand-in home folder can live. On Linux a sandbox has its own /tmp, so a
+    home folder under /tmp could not be told apart from a hidden one."""
+    if sys.platform != "linux":
+        yield tmp_path
+        return
+    import shutil
+    import tempfile
+    base = Path(tempfile.mkdtemp(prefix="hands-test-", dir="/var/tmp"))
+    yield base
+    shutil.rmtree(base, ignore_errors=True)
+
+
 @sandboxed
-def test_commands_cannot_read_the_rest_of_the_home_folder(hub, tmp_path, monkeypatch):
-    home = tmp_path / "home"
+def test_commands_cannot_read_the_rest_of_the_home_folder(hub, home_base, monkeypatch):
+    home = home_base / "home"
     project, shown = home / "work" / "app", home / "notes"
     for path in (project, shown, home / "Documents", home / "work" / "other"):
         path.mkdir(parents=True)
@@ -1095,6 +1109,9 @@ def test_commands_cannot_read_the_rest_of_the_home_folder(hub, tmp_path, monkeyp
     device = up(hub, project, invite=False, read=[str(shown)])
     out, _ = run(hub, f"(cat {shown}/ok.txt; echo x > {shown}/new.txt; cat {home}/Documents/taxes.txt) 2>/dev/null")
     assert "fine" in out and "papers" not in out and not (shown / "new.txt").exists()
+    # A write into the hidden home folder fails; it does not seem to work and then vanish.
+    out, _ = run(hub, f"echo x > {home}/stray.txt; echo write=$?; mkdir {home}/newdir; echo mkdir=$?")
+    assert "write=0" not in out and "mkdir=0" not in out and not (home / "stray.txt").exists()
     device.stop()
     device.thread.join(30)
     # --read-home shows the home folder again, except the protected paths.
