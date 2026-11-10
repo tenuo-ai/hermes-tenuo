@@ -88,7 +88,7 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 
@@ -103,8 +103,13 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=a\|b\|c` | one of the choices |
 | `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
-| `tool:arg=*` | that argument may be anything |
+| `tool:arg=*` | that argument must be present and may be anything |
 | `tool:a=..,b=..` | several constraints on one tool |
+
+Once a tool has any constraint, name every argument the call sends: an
+unnamed argument is denied. `write_file` always sends `content`, so add
+`content=*`. To accept optional arguments such as `read_file`'s `offset` and
+`limit`, mint in Python with `_allow_unknown=True`.
 
 Only a complete numeric `MIN..MAX` value is a range; other values containing
 `..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
@@ -121,7 +126,7 @@ TTL matches the schedule. Tools are the job, not the interactive agent.
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 
