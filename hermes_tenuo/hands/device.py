@@ -1150,7 +1150,7 @@ class Device:
 
     def reconnect_command(self) -> str:
         """A fresh local consent action; never include the consumed invite or its secret."""
-        args = ["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
+        args = ["env", f"TENUO_HANDS_HOME={self.state}", "uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
                 "--for", f"{self.ttl_seconds}s", "--name", self.name]
         for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
                               (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox")):

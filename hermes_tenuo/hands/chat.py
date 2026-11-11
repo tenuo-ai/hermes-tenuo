@@ -45,7 +45,8 @@ machine, folder, access, network and remaining time. Terminal/file result ran_on
 execution target, not the target of browser, MCP, memory or other tools. Do not assume browser localhost
 means the paired machine. Internet is off by default; dependency installation requires the user to
 restart hands up locally with --network. Never broaden access or rerun an unknown-outcome command
-without checking first. /hands off changes conversation routing; Ctrl-C in hands up ends device access.
+without checking first. /hands off changes conversation routing unless terminal.backend is hands for the whole profile;
+then change the profile terminal backend to return to the server. Ctrl-C in hands up ends device access.
 """
 
 SETUP = """Connect your laptop to this Hermes; your memory and skills stay here.
@@ -80,6 +81,12 @@ def describe(session: Any) -> str:
             f" · {left} min left")
 
 
+def _return_to_server() -> str:
+    if _whole_profile():
+        return "Change this profile's terminal backend to return to the server; /hands off cannot switch this profile."
+    return "/hands off switches this conversation to the server."
+
+
 def before_turn(**_: Any) -> dict:
     """Fresh per-conversation context; no probing, grants or changes to routing."""
     hub = get_hub()
@@ -92,7 +99,7 @@ def before_turn(**_: Any) -> dict:
     try:
         session = hub.pick(name or "", _owner())
     except HandsUnavailable:
-        state = {"target": "paired device unavailable", "action": "Ask the user to reconnect locally or use /hands off"}
+        state = {"target": "paired device unavailable", "action": "Ask the user to reconnect locally. " + _return_to_server()}
     else:
         state = {"machine": session.name, "folder": session.folder, "access": session.mode,
                  "internet": session.network, "minutes_left": max(0, int((session.expires - time.time()) / 60))}
@@ -238,7 +245,7 @@ def command(raw_args: str = "") -> str:
                     "Keep this terminal open. Preflight runs before pairing. "
                     "If uvx is missing, install uv from https://docs.astral.sh/uv/getting-started/installation/.\n"
                     "The line works once and for 10 minutes. "
-                    + ("This conversation starts using the machine as soon as it is up; /hands off switches back."
+                    + ("This conversation starts using the machine as soon as it is up. " + _return_to_server()
                        if can_switch else "Then type /hands on here.")
                     + "\nThen run /hands verify here to confirm the folder and permissions before working."
                     + ("\nInternet is ON for this share." if mode == "online" else
@@ -262,7 +269,7 @@ def command(raw_args: str = "") -> str:
                 return f"Connection check failed (exit {code}): {output}\nRun /hands status; check the laptop terminal."
             return ("Connected: " + describe(session) + "\nShared folder verified: " + output.strip()
                     + "\nTerminal and file tools use this machine. Browser, MCP and other tools are not moved."
-                    + "\n/hands off switches this conversation to the server; Ctrl-C on the laptop ends access.")
+                    + "\n" + _return_to_server() + " Ctrl-C on the laptop ends access.")
         if verb == "on":
             if not can_switch:
                 return ("This Hermes version can't switch one conversation to a machine. Set "
@@ -273,7 +280,7 @@ def command(raw_args: str = "") -> str:
                 _wanted[_conversation()] = session.name
                 _remember()
             return ("This conversation now runs commands on: " + describe(session)
-                    + "\n/hands off switches back to the server. Ctrl-C on the laptop ends access.")
+                    + "\n" + _return_to_server() + " Ctrl-C on the laptop ends access.")
         if verb == "off":
             with _lock:
                 _wanted.pop(_conversation(), None)
@@ -301,7 +308,7 @@ def command(raw_args: str = "") -> str:
                 here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
             return "\n".join(["Machines:"] + (rows or ["  none are up (/hands invite to add one)"]) +
                              ["Confirm a connected folder with /hands verify. If offline or expired, run the reconnect "
-                              "command in the device terminal. /hands off changes conversation routing.",
+                              "command in the device terminal. " + _return_to_server(),
                               f"This conversation runs on: {here}"])
     except HandsUnavailable as e:
         return str(e)

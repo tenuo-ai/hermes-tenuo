@@ -23,7 +23,7 @@ If a result says the outcome is unknown, inspect the device/project before retry
 
 ## End or recover
 
-`/hands off` sends this conversation's subsequent terminal/file work back to the server. It does **not** end the laptop's grant. Ctrl-C in the laptop's `hands up` terminal stops device access and its background processes. Existing file edits remain. `/hands revoke <name>` forgets the device server-side; a new invite is required afterward.
+`/hands off` sends this conversation's subsequent terminal/file work back to the server. For a whole profile configured with `terminal.backend: hands`, `/hands off` cannot switch to the server; change that profile's terminal backend instead. Neither operation ends the laptop's grant. Ctrl-C in the laptop's `hands up` terminal stops device access and its background processes. Existing file edits remain. `/hands revoke <name>` forgets the device server-side; a new invite is required afterward.
 
 The laptop prints a reconnect command with the same folder, permissions and duration, without the consumed invite. Running it locally grants a fresh time window. Expired invites require a new `/hands setup` command. For connection errors, check the laptop's preflight output, `hands.url`, proxy route, sandbox availability, and whether the correct Hermes gateway/profile was restarted. Never silently fall back to executing on the server.
 

@@ -160,3 +160,46 @@ def test_read_only_does_not_downgrade_without_sandbox(hub, folder, monkeypatch):
     monkeypatch.setattr(sandbox, '_probe', [None])
     assert any(ok is False for ok, _ in device.check(hub.invite(), str(folder), read_only=True,
                                                     allow_unsandboxed=True))
+
+
+@pytest.mark.parametrize('whole_profile', [False, True])
+def test_verification_and_unavailable_guidance_match_routing(hub, folder, monkeypatch, whole_profile):
+    monkeypatch.setattr(chat, 'get_hub', lambda: hub)
+    monkeypatch.setattr(chat, '_whole_profile', lambda: whole_profile)
+    monkeypatch.setattr(chat, '_owner', lambda: '')
+    monkeypatch.setattr(chat, '_conversation', lambda: 'guidance')
+    monkeypatch.setattr(chat, '_wanted', {'guidance': 'laptop'})
+    offline = chat.before_turn()['context']
+    session = SimpleNamespace(name='laptop', folder=str(folder), mode='sandboxed', network='off', expires=10**10)
+    monkeypatch.setattr(hub, 'pick', lambda *a: session)
+    monkeypatch.setattr(hub, 'run', lambda *a, **kw: (str(folder), 0))
+    verified = chat.command('verify')
+    for text in (offline, verified):
+        if whole_profile:
+            assert "Change this profile's terminal backend" in text
+            assert '/hands off cannot switch' in text
+            assert '/hands off switches' not in text
+        else:
+            assert '/hands off switches this conversation to the server' in text
+            assert 'Change this profile' not in text
+
+
+def test_reconnect_uses_original_identity_from_a_fresh_shell(hub, folder, tmp_path, monkeypatch):
+    import json
+    state = tmp_path / 'original state with spaces'
+    monkeypatch.setenv('TENUO_HANDS_HOME', str(state))
+    original = device.Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    original.pair()
+    args = shlex.split(original.reconnect_command())
+    assert args[:2] == ['env', 'TENUO_HANDS_HOME=' + str(state.resolve())]
+    # A command-local assignment is gone in the next shell. Inherit a different
+    # state directory and verify the printed prefix restores the original pair.
+    monkeypatch.setenv('TENUO_HANDS_HOME', str(tmp_path / 'different-state'))
+    script = ('import json,sys; from hermes_tenuo.hands.device import Device; '
+              'd=Device(None,sys.argv[1],60,allow_unsandboxed=True); d.pair(); '
+              'print(json.dumps([d.url,d.me]))')
+    done = subprocess.run(args[:2] + [sys.executable, '-c', script, str(folder)],
+                          capture_output=True, text=True, timeout=20)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == [original.url, original.me]
+    assert not (tmp_path / 'different-state').exists()
