@@ -204,7 +204,7 @@ def test_access_only_local_delegation_remains_unrestricted(monkeypatch, attribut
     guard = HermesGuard(access_policy=policy)
     sender(monkeypatch)  # CLI/Desktop/API: no messaging identity
     def lookup(task):
-        return {"subagent_id": task} if task == "child-task" else None
+        return {"subagent_id": task, "parent_session_id": "parent"} if task == "child-task" else None
 
     monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: lookup if attribution_available else None)
     assert guard.pre_tool_call("delegate_task", {"goal": "local work"}, session_id="parent", task_id="parent-task") is None
@@ -235,3 +235,25 @@ def test_local_calls_never_claim_gateway_grants_or_require_their_warrants(monkey
     # Local audit-only exemption never overrides an explicit operator requirement.
     guard._require_session_warrant = True
     assert guard.pre_tool_call("read_file", {"path": "/local"}, session_id="local")
+
+
+@pytest.mark.parametrize("explicit_parent", [False, True])
+def test_local_warranted_child_cannot_inherit_authority_when_hook_is_missed(monkeypatch, explicit_parent):
+    key = tenuo.SigningKey.generate()
+    policy = build_access_policy({"roles": {"owner": {"default": True, "allow": ["delegate_task", "web_search", "read_file"]}}},
+                                 control_key=key, holder=key.public_key, signing_key=key)
+    parent, _ = policy.warrant_for()
+    guard = HermesGuard(warrant=None if explicit_parent else parent, signing_key=key,
+                        access_policy=policy, trusted_roots=[key.public_key])
+    if explicit_parent:
+        guard.set_session_warrant("parent", parent, key)
+    sender(monkeypatch)
+    children = {}
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: children.get)
+    assert guard.pre_tool_call("delegate_task", {"goal": "research", "toolsets": ["web_search"]}, session_id="parent") is None
+    children["child-task"] = {"subagent_id": "child-task", "parent_session_id": "parent"}
+    denied = guard.pre_tool_call("read_file", {"path": "/secret"}, session_id="child", task_id="child-task")
+    assert denied and "no bound delegation warrant" in denied["message"]
+    guard.on_subagent_start("parent", "child", child_goal="research")
+    assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="child", task_id="child-task") is None
+    assert guard.pre_tool_call("read_file", {"path": "/secret"}, session_id="child", task_id="child-task")

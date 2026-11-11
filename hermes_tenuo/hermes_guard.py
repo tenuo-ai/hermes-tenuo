@@ -1063,27 +1063,28 @@ class HermesGuard:
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
+        warrant, signing_key = self._resolve_warrant(session_id)
         if self._access_policy is not None:
             from hermes_tenuo.access import current_sender, subagent_attribution_lookup
-            # Only messaging turns can inherit a role. Local audit-only parents
-            # intentionally stage no grants, and their children stay audit-only.
-            if current_sender() is not None:
-                lookup = subagent_attribution_lookup()
-                # Do not use the legacy FIFO heuristic for concurrent gateway users.
-                # Hermes registers a child before running it and gives all its calls
-                # the subagent task id, even when subagent_start failed to fire.
-                if lookup is not None and task_id and lookup(task_id) is not None:
-                    with self._session_lock:
-                        bound = session_id in self._session_warrants
-                    if not bound:
-                        return self._block(tool_name, args,
-                                           "tenuo: subagent has no bound delegation warrant; tool call blocked",
-                                           session_id, task_id, tool_call_id)
-                if _is_delegation_spawn(tool_name, args) and lookup is None:
+            lookup = subagent_attribution_lookup()
+            child = lookup(task_id) if lookup is not None and task_id else None
+            if child is not None:
+                parent_id = child.get("parent_session_id")
+                with self._session_lock:
+                    bound = session_id in self._session_warrants
+                    parent_bound = parent_id in self._session_warrants if parent_id else False
+                # Only a positively identified, audit-only local parent permits
+                # an unbound child. Static, explicit, and role authority all need
+                # the narrowed grant; missing attribution cannot imply audit-only.
+                if not bound and (current_sender() is not None or self._static_warrant is not None
+                                  or parent_bound or not parent_id):
                     return self._block(tool_name, args,
-                                       "tenuo: access-mode delegation requires Hermes subagent attribution; upgrade Hermes",
+                                       "tenuo: subagent has no bound delegation warrant; tool call blocked",
                                        session_id, task_id, tool_call_id)
-        warrant, signing_key = self._resolve_warrant(session_id)
+            if _is_delegation_spawn(tool_name, args) and warrant is not None and lookup is None:
+                return self._block(tool_name, args,
+                                   "tenuo: access-mode delegation requires Hermes subagent attribution; upgrade Hermes",
+                                   session_id, task_id, tool_call_id)
         reason = _marker_reason(warrant)
         if reason is not None:
             return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)

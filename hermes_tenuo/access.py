@@ -107,10 +107,22 @@ def subagent_attribution_lookup():
     gateway users, so access-mode delegation must be refused on those builds.
     """
     try:
-        from tools.delegate_tool_registry import get_subagent_attribution
+        from tools.delegate_tool_registry import get_subagent_attribution, list_active_subagents
     except ImportError:
         return None
-    return get_subagent_attribution if callable(get_subagent_attribution) else None
+    if not callable(get_subagent_attribution) or not callable(list_active_subagents):
+        return None
+
+    def lookup(task_id):
+        attribution = get_subagent_attribution(task_id)
+        if attribution is None:
+            return None
+        # The public live registry also names the owning agent session. This
+        # distinguishes local audit-only children from explicitly warranted ones.
+        record = next((r for r in list_active_subagents() if r.get("subagent_id") == task_id), {})
+        return {**attribution, "parent_session_id": record.get("owner_agent_session_id")}
+
+    return lookup
 
 
 def _constraint(value: Any, where: str) -> Any:
