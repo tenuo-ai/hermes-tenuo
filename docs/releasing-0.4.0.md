@@ -23,8 +23,9 @@ requirements, and browser/MCP tools staying on the server.
 
 ## Testing before the release exists
 
-The user guides describe the published 0.4.0 experience. Until the tag and PyPI
-package exist, maintainers test the candidate commit instead:
+The user guides describe the published 0.4.0 experience. The repository install
+uses its default branch; Hermes `--ref` accepts a full commit SHA, not a version
+tag. Until the PyPI package exists, maintainers test the candidate commit instead:
 
 ```sh
 hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA
@@ -43,16 +44,20 @@ commands. This substitution belongs in release testing, not user onboarding.
   tests. The wheel must be built from the source archive, not just the checkout.
 - Complete a two-host Hands session with the candidate wheel on both ends:
   setup/pair, verify, read/write, sandbox exclusions, redaction and disconnect.
-- Complete the first-session demo in Desktop and a messaging gateway on supported
-  macOS/Linux devices; record Hermes versions. Backend tests do not prove UI behavior.
-- Do not announce the user walkthrough until its v0.4.0 tag and PyPI package exist.
+- Complete the first-session demo in Desktop on a supported device and record
+  the Hermes version. Record messaging-gateway UI coverage separately; do not
+  claim it from backend tests. Missing messaging UI coverage is a documented
+  limitation, not a blocker for the independently validated core release.
+- Do not announce the user walkthrough until the default branch includes the
+  release and its PyPI package exists.
 - Check version agreement across pyproject, plugin manifest, source version and lockfile.
 - Record outstanding validation below; do not publish with unchecked required gates.
 
 ## Publication and catalog order (separate approval/action)
 
-1. Mark the changelog released. Confirm the user guides target `v0.4.0` and the
-   published CLI; keep prerelease testing substitutions in this checklist only.
+1. Mark the changelog released. Confirm the repository install resolves to the
+   released code and the CLI comes from PyPI; keep candidate SHA substitutions
+   in this checklist only.
 2. Tag the reviewed commit `v0.4.0`; the publication workflow validates the tag,
    artifacts and isolated installed-wheel smoke checks before PyPI publication.
 3. Verify a fresh `uvx --from hermes-tenuo==0.4.0 hermes-tenuo --version` and

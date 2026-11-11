@@ -71,7 +71,7 @@ see [docs/walkthrough.md](walkthrough.md).
 Install hermes-tenuo 0.4.0 on the Hermes server:
 
 ```bash
-hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
+hermes plugins install tenuo-ai/hermes-tenuo
 hermes plugins enable hermes-tenuo
 ```
 

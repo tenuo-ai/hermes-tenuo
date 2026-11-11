@@ -1,13 +1,18 @@
-# 0.4.0 (unreleased)
-
-- Add Hands: scoped, expiring local workspaces for remote Hermes, with sandboxing, per-conversation routing, setup/verify, privacy exclusions and local result redaction.
-- Reuse Tenuo path-jail for workspace containment.
-- Separate Hands and tool-authorization onboarding and diagnostics; align plugin and package descriptions.
-- Prefer the selected directory checkout, reject already-loaded conflicting installations, and validate release artifacts before publishing.
-
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-11-10
+
+### Packaging and onboarding
+
+- Give warrants and Hands separate, outcome-led getting-started paths, with
+  runnable demos and a concrete private-network setup guide.
+- Add version/source diagnostics and distinguish tool authorization from Hands.
+- Load the selected directory plugin checkout and reject conflicting loaded
+  installations instead of silently using an older pip package.
+- Validate wheel/source contents, bundled skills and clean wheel installation
+  before publication. Include the runnable walkthrough in source archives.
+- Use the supported repository install command in user guides; Hermes `--ref`
+  accepts a full commit SHA rather than a release tag.
 
 ### Hands
 
