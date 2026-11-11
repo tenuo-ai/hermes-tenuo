@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pty
 import sys
+import time
 
 import pytest
 
@@ -309,3 +310,88 @@ def test_a_git_note_never_interrupts_the_device(hub, folder, monkeypatch):
     monkeypatch.setattr(gitwatch, "settings", lambda folder: (_ for _ in ()).throw(RuntimeError("unexpected")))
     device._git_note()
     device._git_reminder()
+
+
+def test_gitwatch_watches_the_shared_folder_when_it_is_the_hooks_folder(tmp_path):
+    _git(tmp_path)
+    with open(tmp_path / ".git" / "config", "a") as f:
+        f.write("[core]\n\thooksPath = .\n")
+    (tmp_path / "README.md").write_text("not a hook\n")
+    before = gitwatch.settings(str(tmp_path))
+    assert set(before) == {"core.hookspath"}                    # ordinary files are not hooks
+    (tmp_path / "pre-commit").write_text("#!/bin/sh\n")          # the setting itself is unchanged
+    (tmp_path / "notes.txt").write_text("still not a hook\n")
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["hooks in the shared folder/pre-commit"]
+
+
+def test_gitwatch_looks_at_every_hooks_folder_named(tmp_path):
+    _git(tmp_path)
+    with open(tmp_path / ".git" / "config", "a") as f:
+        f.write("".join(f"[core]\n\thooksPath = h{n}\n" for n in range(6)))   # git uses the last
+    for n in range(6):
+        (tmp_path / f"h{n}").mkdir()
+    before = gitwatch.settings(str(tmp_path))
+    (tmp_path / "h5" / "pre-push").write_text("#!/bin/sh\n")
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["h5/pre-push"]
+    with open(tmp_path / ".git" / "config", "a") as f:
+        f.write("".join(f"[core]\n\thooksPath = more{n}\n" for n in range(20)))
+    assert "more hooks folders (cannot be checked)" in gitwatch.settings(str(tmp_path))
+
+
+def test_gitwatch_reads_per_worktree_settings(tmp_path):
+    _git(tmp_path)
+    before = gitwatch.settings(str(tmp_path))
+    (tmp_path / ".git" / "config.worktree").write_text("[core]\n\tfsmonitor = ./w.sh\n[alias]\n\tq = \"!sh q.sh\"\n")
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["alias.q", "core.fsmonitor"]
+
+
+def test_gitwatch_does_not_read_through_a_linked_shared_folder(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    _git(real)
+    with open(real / ".git" / "config", "a") as f:
+        f.write("[core]\n\tfsmonitor = ./w.sh\n")
+    (tmp_path / "linked").symlink_to(real)
+    assert "core.fsmonitor" in gitwatch.settings(str(real))
+    assert gitwatch.settings(str(tmp_path / "linked")) == {"the shared folder (cannot be checked)": "unchecked"}
+
+
+def test_printing_to_a_closed_terminal_never_raises(hub, folder):
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True)
+    for error in (OSError("input/output error"), BrokenPipeError(), ValueError("I/O operation on closed file")):
+        def closed(line, error=error):
+            raise error
+        device.say = closed
+        device.say("anything")
+        device._record("echo hi", 0, "")
+
+
+def test_serving_always_ends_with_cleanup(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True)
+    stopped = []
+    monkeypatch.setattr(device, "_stop_runner", lambda: stopped.append(True))
+    monkeypatch.setattr(device, "_serve", lambda: (_ for _ in ()).throw(RuntimeError("unexpected")))
+    with pytest.raises(RuntimeError):
+        device.serve()
+    assert stopped == [True]
+
+
+@sandboxed
+def test_background_processes_stop_when_the_terminal_is_already_gone(hub, folder, monkeypatch):
+    from hermes_tenuo.hands import wire
+    monkeypatch.setattr(wire, "POLL_SECONDS", 1)
+    running = up(hub, folder)
+    run(hub, "(while true; do date +%s%N > tick.txt; sleep 0.2; done) >/dev/null 2>&1 &")
+    time.sleep(1)
+    assert (folder / "tick.txt").exists()
+
+    def closed(line):
+        raise OSError("input/output error")
+    running.device.say = closed                                  # the terminal was closed (SIGHUP)
+    running.stop()
+    running.thread.join(wire.POLL_SECONDS + 20)
+    assert not running.thread.is_alive()
+    time.sleep(1)
+    seen = (folder / "tick.txt").read_text()
+    time.sleep(1)
+    assert (folder / "tick.txt").read_text() == seen

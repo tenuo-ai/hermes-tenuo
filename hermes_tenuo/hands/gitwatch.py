@@ -35,8 +35,17 @@ _SECTION = re.compile(r'^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\
 _ENTRY = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$", re.S)
 _LIMIT = 1 << 20      # bytes read from one settings file
 _FILES = 8            # settings files followed through includes
-_ENTRIES = 200        # entries looked at in one hooks folder
+_HOOK_FOLDERS = 16    # hooks folders looked at
 _HOOK_BYTES = 4 << 20  # hook programs read in one look, in total
+# The file names git runs from a hooks folder. Anything else there is not a hook.
+_HOOK_NAMES = (
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit",
+    "prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout", "post-merge",
+    "pre-push", "pre-receive", "update", "proc-receive", "post-receive", "post-update",
+    "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite", "sendemail-validate",
+    "fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist", "p4-post-changelist",
+    "p4-pre-submit", "post-index-change",
+)
 _UNCHECKED = "cannot be checked"
 
 
@@ -59,9 +68,9 @@ def _open(folder_fd: int, relative: str, directory: bool) -> int:
     """Open *relative* under the folder without following a link at any step, or raise OSError."""
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     parts = [p for p in relative.split(os.sep) if p not in ("", ".")]
-    if not parts or ".." in parts:
+    if ".." in parts or (not parts and not directory):
         raise OSError("not a path inside the folder")
-    fd = os.dup(folder_fd)
+    fd = os.dup(folder_fd)          # with no parts left, the folder itself
     try:
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
@@ -177,6 +186,8 @@ def _hook_mark(fd: int, name: str, budget: List[int]) -> Optional[str]:
 
 
 def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int]) -> None:
+    """Fingerprint the hooks in one folder. Only the names git runs are looked at, so a
+    hooks folder that is the project itself costs no more than any other."""
     try:
         fd = _open(folder_fd, relative, directory=True)
     except FileNotFoundError:
@@ -185,27 +196,22 @@ def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], bud
         found[f"{label} ({_UNCHECKED})"] = "unchecked"
         return
     try:
-        with os.scandir(fd) as listing:
-            for count, entry in enumerate(listing):
-                if count >= _ENTRIES:
-                    found[f"{label} (more than {_ENTRIES} files, {_UNCHECKED})"] = "unchecked"
-                    break
-                if entry.name.endswith(".sample"):
-                    continue
-                mark = _hook_mark(fd, entry.name, budget)
-                if mark is not None:
-                    found[f"{label}/{entry.name}"] = mark
-                    continue
-                # A link, a pipe, a folder or something too large: say so, and still notice
-                # when it is replaced.
-                try:
-                    info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
-                    seen = f"{info.st_mode}:{info.st_size}:{info.st_mtime_ns}:{info.st_ino}"
-                except OSError:
-                    seen = "gone"
-                found[f"{label}/{entry.name} ({_UNCHECKED})"] = seen
-    except OSError:
-        found[f"{label} ({_UNCHECKED})"] = "unchecked"
+        for name in _HOOK_NAMES:
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                found[f"{label}/{name} ({_UNCHECKED})"] = "unchecked"
+                continue
+            mark = _hook_mark(fd, name, budget)
+            if mark is not None:
+                found[f"{label}/{name}"] = mark
+            else:
+                # A link, a pipe, a folder or something too large: say so, and still
+                # notice when it is replaced.
+                found[f"{label}/{name} ({_UNCHECKED})"] = (
+                    f"{info.st_mode}:{info.st_size}:{info.st_mtime_ns}:{info.st_ino}")
     finally:
         os.close(fd)
 
@@ -253,13 +259,20 @@ def settings(folder: str) -> Dict[str, str]:
     if not hasattr(os, "O_NOFOLLOW"):
         return found
     try:
-        kind = os.lstat(os.path.join(folder, ".git")).st_mode
-        folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+        # The folder itself must not be a link either: everything is read relative to it.
+        folder_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return found
     except OSError:
-        return found          # no repository here
+        return {f"the shared folder ({_UNCHECKED})": "unchecked"}
     try:
+        try:
+            kind = os.stat(".git", dir_fd=folder_fd, follow_symlinks=False).st_mode
+        except OSError:
+            return found      # no repository here
         git_dirs = _git_dirs(folder, folder_fd, kind, found)
-        queue = [os.path.join(gitdir, "config") for gitdir in git_dirs]
+        # Each of the repository's folders may hold shared and per-worktree settings.
+        queue = [os.path.join(gitdir, name) for gitdir in git_dirs for name in ("config", "config.worktree")]
         seen: set = set()
         hook_folders: List[str] = []
         while queue:
@@ -267,7 +280,7 @@ def settings(folder: str) -> Dict[str, str]:
             if relative in seen:
                 continue
             seen.add(relative)
-            if len(seen) > _FILES:
+            if len(seen) > _FILES + 2 * len(git_dirs):
                 found[f"more included settings files ({_UNCHECKED})"] = "unchecked"
                 break
             try:
@@ -286,8 +299,8 @@ def settings(folder: str) -> Dict[str, str]:
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     target = _inside(folder, value, "")
-                    if target not in (None, "."):
-                        hook_folders.append(target)
+                    if target is not None and target not in hook_folders:
+                        hook_folders.append(target)   # "." is the shared folder itself
                 elif (f"{section}.{key}" in _RUNS or key in _RUNS_IN.get(section, ())
                         or section == "pager" or (section == "alias" and value.lstrip().startswith("!"))):
                     found[name] = _digest(found.get(name, "") + value)
@@ -295,8 +308,12 @@ def settings(folder: str) -> Dict[str, str]:
         for gitdir in git_dirs:
             hooks = os.path.join(gitdir, "hooks")
             _hooks(folder_fd, hooks, "hooks" if gitdir == ".git" else hooks, found, budget)
-        for target in hook_folders[:4]:
-            _hooks(folder_fd, target, target, found, budget)
+        # Git uses the last hooks path it reads; every one named is looked at, so the
+        # order files were read in here cannot hide the one in effect.
+        for target in hook_folders[:_HOOK_FOLDERS]:
+            _hooks(folder_fd, target, "hooks in the shared folder" if target == "." else target, found, budget)
+        if len(hook_folders) > _HOOK_FOLDERS:
+            found[f"more hooks folders ({_UNCHECKED})"] = "unchecked"
         return found
     finally:
         os.close(folder_fd)

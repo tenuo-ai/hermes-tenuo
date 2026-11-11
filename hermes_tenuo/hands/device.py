@@ -585,7 +585,7 @@ class Device:
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
                      writable=not read_only, home_visible=read_home, tools=self.shown,
                      network=network, excluded=self.excluded)  # fail before pairing
-        self.say = say
+        self._say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
         # The name is shown in the chat and to the agent, on one line.
@@ -1249,7 +1249,32 @@ class Device:
             args.append("--plain-http")
         return shlex.join(args)
 
+    @property
+    def say(self) -> Callable[[str], None]:
+        """Print for the person at the machine. Their terminal may be gone (it was closed,
+        or its output is a broken pipe); that must never interrupt a command or cleanup."""
+        def tolerant(line: str) -> None:
+            try:
+                self._say(line)
+            except (OSError, ValueError):
+                pass
+        return tolerant
+
+    @say.setter
+    def say(self, value: Callable[[str], None]) -> None:
+        self._say = value
+
     def serve(self) -> int:
+        try:
+            return self._serve()
+        finally:
+            # However serving ends, nothing a command started is left running.
+            try:
+                self._stop_runner()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _serve(self) -> int:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
