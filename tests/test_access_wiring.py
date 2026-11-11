@@ -214,3 +214,24 @@ def test_access_only_local_delegation_remains_unrestricted(monkeypatch, attribut
     sender(monkeypatch, user="telegram:1", platform="telegram")
     if attribution_available:
         assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="child", task_id="child-task")
+
+
+@pytest.mark.parametrize("attach_gateway_child", [False, True])
+def test_local_calls_never_claim_gateway_grants_or_require_their_warrants(monkeypatch, attach_gateway_child):
+    key = tenuo.SigningKey.generate()
+    policy = build_access_policy({"roles": {"owner": {"default": True, "allow": ["delegate_task", "web_search"]}}},
+                                 control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(access_policy=policy, trusted_roots=[key.public_key])
+    sender(monkeypatch, user="telegram:1", platform="telegram")
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: lambda task: None)
+    assert guard.pre_tool_call("delegate_task", {"goal": "research"}, session_id="gateway") is None
+    if attach_gateway_child:
+        guard.on_subagent_start("gateway", "gateway-child", child_goal="research")
+    sender(monkeypatch)
+    assert guard.pre_tool_call("read_file", {"path": "/local"}, session_id="local") is None
+    assert "local" not in guard._session_warrants
+    if not attach_gateway_child:
+        assert len(guard._planned_children["gateway"]) == 1
+    # Local audit-only exemption never overrides an explicit operator requirement.
+    guard._require_session_warrant = True
+    assert guard.pre_tool_call("read_file", {"path": "/local"}, session_id="local")

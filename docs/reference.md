@@ -276,7 +276,10 @@ plugins:
   operator) is not governed by it, and `delegate_task` children keep their
   attenuated warrants. Messaging delegation requires Hermes’s live subagent attribution;
   older builds without it cannot spawn children on messaging turns. An unbound child
-  is denied if its lifecycle hook was missed. A static `warrant:` is optional and covers those local
+  is denied if its lifecycle hook was missed. Child grants are never assigned
+  by session order when access is enabled. Local audit-only turns remain
+  unrestricted unless `require_session_warrant` is explicitly enabled.
+  A static `warrant:` is optional and covers those local
   turns.
 
 ## Hands: let your server's agent use your own machine

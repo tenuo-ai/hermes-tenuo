@@ -545,7 +545,7 @@ class HermesGuard:
                 warrant, key = self._access_policy.warrant_for(**ident)
                 return (warrant, key) if warrant is not None else (_NO_ROLE, None)
 
-        if self._planned_children and not self._saw_subagent_start:
+        if self._access_policy is None and self._planned_children and not self._saw_subagent_start:
             # Fallback for a Hermes build that does not fire subagent_start:
             # the first session seen is the primary, and a new session id
             # after an authorised delegate_task claims the next staged grant.
@@ -1124,6 +1124,13 @@ class HermesGuard:
         if reason is not None:
             return reason
         if warrant is None:
+            # Role-governed children must not turn unrelated local audit-only
+            # sessions into warrant-required sessions. An explicit requirement
+            # still wins, as do denied/evicted-session markers checked above.
+            if self._access_policy is not None and self._require_session_warrant is None:
+                from hermes_tenuo.access import current_sender
+                if current_sender() is None:
+                    return None
             # A gateway that already called set_session_warrant is configured:
             # unknown sessions fail closed unless the operator sets
             # require_session_warrant=False.
