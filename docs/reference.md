@@ -249,13 +249,15 @@ plugins:
             default: true          # everyone not matched above
             allow:
               web_search: {}
-        on_unmatched: guest        # or: deny
+        on_unmatched: guest
 ```
 
 - **Who.** `match` lists `user`, `chat` and/or `platform` (all given
   dimensions must hold). `user` and `chat` are `"<platform>:<id>"`. Roles are
   tried in order, then the `default` role; `on_unmatched: deny` blocks a
-  sender no role matches. Exactly one role may be the `default`.
+  sender no role matches. At most one role may be the `default`. To deny
+  unmatched senders in the example, remove the guest role’s `default: true`
+  and set `on_unmatched: deny`; an explicit deny cannot coexist with a default.
 - **What.** `allow` maps a tool to its argument constraints. A tool mapped to
   `{}` (or listed in `allow: [web_search, read_file]`) is allowed with no
   constraints. An argument value is `"*"` (any), `"/path/**"` (any path under

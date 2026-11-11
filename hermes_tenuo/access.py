@@ -20,7 +20,7 @@ we only turn config into warrants and answer "which role is this identity".
           default: true
           allow:
             web_search: {}
-      on_unmatched: guest        # or: deny
+      on_unmatched: guest
 
 Friendlier than hand-minting in two ways: a constrained tool keeps its other
 arguments by default (``read_file: {path: ...}`` still allows ``limit``), and
