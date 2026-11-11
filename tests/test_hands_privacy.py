@@ -222,17 +222,17 @@ def test_exclusions_inside_existing_private_overlay_do_not_break_commands(hub, f
     # Use a synthetic private directory in home: /tmp overlays are deliberately
     # exempt from the final read-only remount, so they would miss this regression.
     with tempfile.TemporaryDirectory(prefix='.hands-privacy-test-', dir=Path.home()) as hidden:
-        secret = Path(hidden) / 'credential'
-        secret.write_text('NEVER_SEND_THIS_CREDENTIAL')
+        excluded_file = Path(hidden) / 'credential'
+        excluded_file.write_text('NEVER_SEND_THIS_CREDENTIAL')
         original = sandbox._private_paths()
         monkeypatch.setattr(sandbox, '_private_paths', lambda: [*original, hidden])
-        rules(str(secret))
+        rules(str(excluded_file))
         running = up(hub, folder, read_home=read_home)
         try:
-            output, code = run(hub, 'echo ordinary-command; cat ' + shlex.quote(str(secret)))
+            output, code = run(hub, 'echo ordinary-command; cat ' + shlex.quote(str(excluded_file)))
             assert 'ordinary-command' in output
             assert 'NEVER_SEND_THIS_CREDENTIAL' not in output
-            assert secret.read_text() == 'NEVER_SEND_THIS_CREDENTIAL'
+            assert excluded_file.read_text() == 'NEVER_SEND_THIS_CREDENTIAL'
         finally:
             running.stop()
             running.thread.join(5)
