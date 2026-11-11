@@ -45,6 +45,9 @@ _RETIRED = object()
 # Returned for a session with no warrant of its own once the marker table has
 # overflowed: it can no longer be told apart from a session that was denied.
 _UNTRACKED = object()
+# Session marker: an access-governed gateway turn whose sender matches no role
+# (or is caught by the deny policy). It holds no authority for this turn.
+_NO_ROLE = object()
 
 _MARKER_REASONS = {
     _NO_AUTHORITY: "tenuo: this subagent was not started by an authorised delegation and holds no authority",
@@ -53,6 +56,7 @@ _MARKER_REASONS = {
         "tenuo: this session has no warrant of its own and too many sessions have been "
         "denied to tell it from one of them; it holds no authority until Hermes restarts"
     ),
+    _NO_ROLE: "tenuo: no access role grants this sender; the call was blocked",
 }
 
 
@@ -308,9 +312,13 @@ class HermesGuard:
         approval_handler: Optional[Callable] = None,
         require_session_warrant: Optional[bool] = None,
         delegation_plan: Optional[Any] = None,
+        access_policy: Optional[Any] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
+        # Role-based access (hermes_tenuo.access): a gateway turn resolves to its
+        # sender's role warrant per call. None means single-warrant mode.
+        self._access_policy = access_policy
         self._child_warrant = child_warrant
         self._trusted_roots = trusted_roots
         self._trusted_roots_lock = threading.Lock()
@@ -519,12 +527,25 @@ class HermesGuard:
             return entry
 
         # Once a marker has been evicted, a session with no warrant of its own
-        # may be one that was denied. It gets nothing: not a staged child grant
-        # below, and not the config warrant.
+        # may be one that was denied. It gets nothing — not a role warrant, not a
+        # staged child grant below, and not the config warrant. Explicit bindings
+        # above still win; this fail-closed guard comes before access resolution.
         if self._overflowed:
             return _UNTRACKED, None
 
-        if self._planned_children and not self._saw_subagent_start:
+        # Role-based access governs identified gateway turns. The warrant follows
+        # the message's sender (not the session), so a shared group chat is
+        # authorised per message; a sender no role grants is blocked, never
+        # falling through to a broader warrant. A turn with no gateway identity
+        # (CLI / local) is left to the resolution below.
+        if self._access_policy is not None:
+            from hermes_tenuo.access import current_sender
+            ident = current_sender()
+            if ident is not None:
+                warrant, key = self._access_policy.warrant_for(**ident)
+                return (warrant, key) if warrant is not None else (_NO_ROLE, None)
+
+        if self._access_policy is None and self._planned_children and not self._saw_subagent_start:
             # Fallback for a Hermes build that does not fire subagent_start:
             # the first session seen is the primary, and a new session id
             # after an authorised delegate_task claims the next staged grant.
@@ -1043,6 +1064,27 @@ class HermesGuard:
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
+        if self._access_policy is not None:
+            from hermes_tenuo.access import current_sender, subagent_attribution_lookup
+            lookup = subagent_attribution_lookup()
+            child = lookup(task_id) if lookup is not None and task_id else None
+            if child is not None:
+                parent_id = child.get("parent_session_id")
+                with self._session_lock:
+                    bound = session_id in self._session_warrants
+                    parent_bound = parent_id in self._session_warrants if parent_id else False
+                # Only a positively identified, audit-only local parent permits
+                # an unbound child. Static, explicit, and role authority all need
+                # the narrowed grant; missing attribution cannot imply audit-only.
+                if not bound and (current_sender() is not None or self._static_warrant is not None
+                                  or parent_bound or not parent_id):
+                    return self._block(tool_name, args,
+                                       "tenuo: subagent has no bound delegation warrant; tool call blocked",
+                                       session_id, task_id, tool_call_id)
+            if _is_delegation_spawn(tool_name, args) and warrant is not None and lookup is None:
+                return self._block(tool_name, args,
+                                   "tenuo: access-mode delegation requires Hermes subagent attribution; upgrade Hermes",
+                                   session_id, task_id, tool_call_id)
         reason = _marker_reason(warrant)
         if reason is not None:
             return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
@@ -1058,9 +1100,11 @@ class HermesGuard:
             return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
 
         # No warrant on this call: an unconfigured single-agent guard is a
-        # documented no-op.
+        # documented no-op. In access mode this is only a non-gateway turn
+        # (CLI/local) falling through — gateway turns are enforced by role, so
+        # the audit-only warning would be misleading and is suppressed.
         if warrant is None:
-            if not self._audit_only_warned:
+            if self._access_policy is None and not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
                     "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "
@@ -1081,6 +1125,13 @@ class HermesGuard:
         if reason is not None:
             return reason
         if warrant is None:
+            # Role-governed children must not turn unrelated local audit-only
+            # sessions into warrant-required sessions. An explicit requirement
+            # still wins, as do denied/evicted-session markers checked above.
+            if self._access_policy is not None and self._require_session_warrant is None:
+                from hermes_tenuo.access import current_sender
+                if current_sender() is None:
+                    return None
             # A gateway that already called set_session_warrant is configured:
             # unknown sessions fail closed unless the operator sets
             # require_session_warrant=False.
