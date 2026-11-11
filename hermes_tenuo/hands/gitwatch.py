@@ -320,8 +320,10 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
         for extra in also:
             try:
                 roots.append((os.path.normpath(extra), os.open(extra, flags | os.O_NOFOLLOW), "temp folder"))
-            except OSError:
+            except FileNotFoundError:
                 continue      # not there (yet): nothing in it to read
+            except OSError:
+                found[f"temp folder ({_UNCHECKED})"] = "unchecked"   # a link, or not a folder
 
         def label(index: int, relative: str) -> str:
             return _path_label(roots, index, relative)

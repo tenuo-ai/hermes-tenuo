@@ -536,3 +536,22 @@ def test_device_reports_git_directory_moved_into_temp_by_a_sandboxed_command(hub
     finally:
         running.stop()
         running.thread.join(timeout=10)
+
+
+def test_gitwatch_reports_a_temp_folder_it_cannot_open_safely(tmp_path):
+    project, elsewhere, temp = tmp_path / "project", tmp_path / "elsewhere", tmp_path / "state" / "tmp"
+    project.mkdir()
+    elsewhere.mkdir()
+    temp.parent.mkdir()
+    _git(project)
+    (elsewhere / "extra.cfg").write_text("[core]\n\tfsmonitor = ./never-read.sh\n")
+    temp.symlink_to(elsewhere)
+    with open(project / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {temp}/extra.cfg\n")
+    found = gitwatch.settings(str(project), also=(str(temp),))
+    assert "temp folder (cannot be checked)" in found and "core.fsmonitor" not in found
+    temp.unlink()
+    temp.write_text("not a folder")
+    assert "temp folder (cannot be checked)" in gitwatch.settings(str(project), also=(str(temp),))
+    temp.unlink()
+    assert "temp folder (cannot be checked)" not in gitwatch.settings(str(project), also=(str(temp),))   # simply absent
