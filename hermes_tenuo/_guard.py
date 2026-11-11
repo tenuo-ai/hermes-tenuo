@@ -47,10 +47,11 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
 
         access_key = get_signing_key(ctx)
         if access_key is None:
-            raise WarrantLoadError(
-                "access is configured but no signing key is set (signing_key_env / "
-                "TENUO_SIGNING_KEY) — every tool call is blocked until a key is available"
-            )
+            # No key configured: provision one under $HERMES_HOME/tenuo so access
+            # works with no key management. A configured key still takes precedence.
+            from hermes_tenuo.access import access_key_path, load_or_create_signing_key
+            access_key = load_or_create_signing_key()
+            logger.info("hermes-tenuo: access signing key auto-provisioned at %s", access_key_path())
         try:
             access_policy = build_access_policy(
                 access_block, control_key=access_key, holder=access_key.public_key, signing_key=access_key,

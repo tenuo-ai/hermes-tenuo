@@ -301,6 +301,46 @@ class AccessPolicy:
         return role.name if role is not None else None
 
 
+def access_key_path():
+    """Where the auto-provisioned access signing key lives."""
+    from hermes_tenuo._home import hermes_home
+    return hermes_home() / "tenuo" / "access.key"
+
+
+def load_access_key() -> Optional[Any]:
+    """The persisted access signing key, or None if not yet provisioned or unreadable."""
+    from tenuo import SigningKey
+    from hermes_tenuo._config import _b64_to_bytes
+    path = access_key_path()
+    try:
+        if path.is_file():
+            return SigningKey.from_bytes(_b64_to_bytes(path.read_text().strip()))
+    except Exception as exc:  # noqa: BLE001 - a bad key file must not crash startup
+        logger.warning("hermes-tenuo: access key at %s is unreadable (%s); a new one will be made",
+                       path, type(exc).__name__)
+    return None
+
+
+def load_or_create_signing_key() -> Any:
+    """The gateway's signing key for role warrants. Uses the persisted key, creating one
+    under ``$HERMES_HOME/tenuo/access.key`` (0600) on first use so no key need be configured."""
+    import base64
+
+    from tenuo import SigningKey
+    from hermes_tenuo.issuance import write_private_file
+
+    key = load_access_key()
+    if key is not None:
+        return key
+    path = access_key_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key = SigningKey.generate()
+    # overwrite only an existing (unreadable) file; a fresh path is created no-clobber.
+    write_private_file(path, base64.b64encode(key.secret_key_bytes()).decode(), overwrite=path.exists())
+    logger.info("hermes-tenuo: created an access signing key at %s", path)
+    return key
+
+
 def build_access_policy(block: Any, *, control_key: Any, holder: Any, signing_key: Any,
                         ttl_seconds: int = _DEFAULT_TTL) -> AccessPolicy:
     """Parse the access block and mint one warrant per role.

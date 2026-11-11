@@ -645,6 +645,49 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 else:
                     check(True, "delegation plan loads")
 
+    # 8b. Access: role-based gateway authorization, if configured.
+    from hermes_tenuo._config import get_access_block
+    access_block = get_access_block(None)
+    if access_block is not None:
+        from hermes_tenuo.access import (
+            AccessConfigError,
+            access_key_path,
+            build_access_policy,
+            load_access_key,
+            parse_access,
+        )
+        try:
+            cfg = parse_access(access_block)
+        except AccessConfigError as exc:
+            check(False, f"access config: {exc}", blocks)
+        else:
+            check(True, f"access: {len(cfg.roles)} role(s); unmatched senders → {cfg.default_role or 'deny'}")
+            configured = _env_secret(config_entry.get("signing_key_env", "TENUO_SIGNING_KEY")) or _env_secret("TENUO_SIGNING_KEY")
+            key = None
+            if configured:
+                try:
+                    from tenuo_core import SigningKey
+                    key = SigningKey.from_bytes(_b64_to_bytes(configured))
+                    note("access: signs role warrants with the configured key")
+                except Exception as exc:
+                    check(False, f"access signing key could not be loaded: {exc}", blocks)
+            else:
+                key = load_access_key()
+                if key is not None:
+                    note(f"access: using the provisioned key at {access_key_path()}")
+                else:
+                    note(f"access: a signing key is auto-provisioned at {access_key_path()} on first start")
+            if key is None:
+                from tenuo_core import SigningKey
+                key = SigningKey.generate()  # ephemeral, only to compile-check the roles
+            try:
+                build_access_policy(access_block, control_key=key, holder=key.public_key, signing_key=key)
+                check(True, "access: every role compiles to a warrant")
+                for role in cfg.roles:
+                    note(f"  role {role.name}: {', '.join(sorted(role.capabilities)) or '(no tools)'}")
+            except AccessConfigError as exc:
+                check(False, f"access role: {exc}", blocks)
+
     # 9. on_denial
     on_denial = config_entry.get("on_denial", "block")
     if on_denial == "log":

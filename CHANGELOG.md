@@ -9,6 +9,17 @@
 
 ## Unreleased
 
+### Access
+
+- Add role-based gateway access: an `access:` block of roles (`match` + `allow`)
+  compiles to one warrant per role and the guard resolves each messaging turn to
+  its sender's role. Authority follows the message's sender, so a shared chat is
+  authorised per message; a sender no role grants is blocked. A constrained tool
+  keeps its other arguments unless `strict: true`; `terminal` takes a `binaries`
+  allowlist. The signing key is auto-provisioned under `$HERMES_HOME/tenuo` so no
+  key need be configured; `doctor` validates the block. Local (CLI/desktop) turns
+  and `delegate_task` children keep their existing authorization.
+
 ### Hands
 
 - Reuse Tenuo’s Python `path-jail` for workspace selection and signed command
