@@ -159,3 +159,38 @@ def test_access_mode_does_not_warn_audit_only_on_a_local_fallthrough(monkeypatch
     with caplog.at_level(logging.WARNING):
         assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="s") is None   # passes through
     assert "AUDIT-ONLY" not in caplog.text and guard._audit_only_warned is False
+
+
+def test_unbound_child_cannot_inherit_a_role_when_start_hook_is_missing(monkeypatch):
+    key = tenuo.SigningKey.generate()
+    rules = {"roles": {"owner": {"default": True, "allow": ["delegate_task", "web_search", "read_file"]}}}
+    policy = build_access_policy(rules, control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy)
+    sender(monkeypatch, user="telegram:1", platform="telegram")
+    children = {}
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: children.get)
+    assert guard.pre_tool_call("delegate_task", {"goal": "research", "toolsets": ["web_search"]},
+                               session_id="parent", task_id="parent-task") is None
+    children["child-task"] = {"subagent_id": "child-task", "goal": "research"}
+    denied = guard.pre_tool_call("read_file", {"path": "/secret"}, session_id="child", task_id="child-task")
+    assert denied and "no bound delegation warrant" in denied["message"]
+    # Neither another user nor another conversation may claim the staged grant.
+    sender(monkeypatch, user="telegram:2", platform="telegram")
+    assert guard.pre_tool_call("read_file", {"path": "/public"}, session_id="other", task_id="other-task") is None
+    assert len(guard._planned_children["parent"]) == 1
+    guard.on_subagent_start("parent", "child", child_goal="research", child_task_id="child-task")
+    assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="child", task_id="child-task") is None
+    assert guard.pre_tool_call("read_file", {"path": "/secret"}, session_id="child", task_id="child-task")
+
+
+def test_access_delegation_is_denied_without_runtime_child_attribution(monkeypatch):
+    key = tenuo.SigningKey.generate()
+    policy = build_access_policy({"roles": {"owner": {"default": True, "allow": ["delegate_task", "web_search"]}}},
+                                 control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy, on_denial="log")
+    sender(monkeypatch, user="telegram:1", platform="telegram")
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: None)
+    denied = guard.pre_tool_call("delegate_task", {"goal": "research"}, session_id="parent")
+    assert denied and "requires Hermes subagent attribution" in denied["message"]
+    assert not guard._planned_children
+    assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="parent") is None

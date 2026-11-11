@@ -1063,6 +1063,23 @@ class HermesGuard:
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
+        if self._access_policy is not None:
+            from hermes_tenuo.access import subagent_attribution_lookup
+            lookup = subagent_attribution_lookup()
+            # Do not use the legacy FIFO heuristic for concurrent gateway users.
+            # Hermes registers a child before running it and gives all its calls
+            # the subagent task id, even when subagent_start failed to fire.
+            if lookup is not None and task_id and lookup(task_id) is not None:
+                with self._session_lock:
+                    bound = session_id in self._session_warrants
+                if not bound:
+                    return self._block(tool_name, args,
+                                       "tenuo: subagent has no bound delegation warrant; tool call blocked",
+                                       session_id, task_id, tool_call_id)
+            if _is_delegation_spawn(tool_name, args) and lookup is None:
+                return self._block(tool_name, args,
+                                   "tenuo: access-mode delegation requires Hermes subagent attribution; upgrade Hermes",
+                                   session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
         reason = _marker_reason(warrant)
         if reason is not None:

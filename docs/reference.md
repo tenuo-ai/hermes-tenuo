@@ -256,7 +256,7 @@ plugins:
   dimensions must hold). `user` and `chat` are `"<platform>:<id>"`. Roles are
   tried in order, then the `default` role; `on_unmatched: deny` blocks a
   sender no role matches. At most one role may be the `default`. To deny
-  unmatched senders in the example, remove the guest role’s `default: true`
+  unmatched senders in the example, remove the entire `guest` role
   and set `on_unmatched: deny`; an explicit deny cannot coexist with a default.
 - **What.** `allow` maps a tool to its argument constraints. A tool mapped to
   `{}` (or listed in `allow: [web_search, read_file]`) is allowed with no
@@ -274,7 +274,9 @@ plugins:
   they compile.
 - **Scope.** Access governs messaging turns. A local CLI or desktop turn (the
   operator) is not governed by it, and `delegate_task` children keep their
-  attenuated warrants. A static `warrant:` is optional and covers those local
+  attenuated warrants. Delegation requires Hermes’s live subagent attribution;
+  older builds without it cannot spawn children in access mode. An unbound child
+  is denied if its lifecycle hook was missed. A static `warrant:` is optional and covers those local
   turns.
 
 ## Hands: let your server's agent use your own machine

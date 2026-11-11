@@ -100,6 +100,19 @@ def current_sender() -> Optional[Dict[str, str]]:
         return {"user": NOBODY, "chat": "", "platform": ""}
 
 
+def subagent_attribution_lookup():
+    """Hermes's runtime-owned child identity, independent of lifecycle hooks.
+
+    Older Hermes cannot safely disambiguate unbound children from concurrent
+    gateway users, so access-mode delegation must be refused on those builds.
+    """
+    try:
+        from tools.delegate_tool_registry import get_subagent_attribution
+    except ImportError:
+        return None
+    return get_subagent_attribution if callable(get_subagent_attribution) else None
+
+
 def _constraint(value: Any, where: str) -> Any:
     """Keep SDK validation errors inside the fail-closed config error boundary."""
     from tenuo.exceptions import TenuoError
