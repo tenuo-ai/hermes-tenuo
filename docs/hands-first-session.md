@@ -77,3 +77,19 @@ The laptop prints a reconnect command that preserves your choices and the origin
 - Confirm read-only leaves files unchanged; edit stays offline; online is explicitly chosen.
 - Confirm the catalog install and the default `uvx` package interoperate and show the same permissions.
 - Repin only after those checks pass. This PR does not publish or change the upstream catalog pin.
+
+## Preview and keep private files out
+
+Before running the generated `hands up` command, append `--preview` to inspect
+its permissions locally. Remove `--preview` to connect. Preview does not consume
+the invite or test the server connection.
+
+Personal exclusions live in `~/.config/hermes-tenuo/never-share`, one existing
+literal path per line, relative to the shared folder or absolute. For example,
+`customers/` keeps that directory's contents out of terminal and file operations.
+Missing paths are errors; globs are not supported. Restart Hands to apply rule
+changes. See the README for platform behavior and path-alias limitations.
+
+Recognized secrets in results and command logs are redacted locally. A result
+says when redaction occurred; it does not modify project files. Detection is
+best effort, so exclude material you must not send to Hermes or its model.

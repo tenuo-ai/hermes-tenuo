@@ -67,7 +67,7 @@ def _ancestors(path: str) -> List[str]:
 
 def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
                  writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
-                 network: bool = False) -> str:
+                 network: bool = False, excluded: Sequence[str] = ()) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -113,13 +113,16 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
         ' (regex #"^/dev/tty") (regex #"^/dev/fd/"))',
+        *[f"(deny file-read* file-write* (subpath {q(p)}))" for p in excluded],
+        *[f"(deny file-write-unlink (literal {q(p)}))"
+          for p in sorted({a for path in excluded for a in _ancestors(path)})],
         '(allow file-ioctl (literal "/dev/null") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))',
     ])
 
 
 def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
            readable: Sequence[str] = (), hidden: Sequence[str] = (), writable: bool = True,
-           home_visible: bool = True, tools: Sequence[str] = (), network: bool = False) -> List[str]:
+           home_visible: bool = True, tools: Sequence[str] = (), network: bool = False, excluded: Sequence[str] = ()) -> List[str]:
     # Its own process list: commands see and signal only what runs in the same sandbox, and
     # everything in it stops when it ends (for the shared one, when the device goes down).
     argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc",
@@ -174,6 +177,25 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     for path in readable:
         argv += ["--ro-bind", path, path]
     argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
+    # Make writable ancestors mount points too: otherwise Linux allows renaming
+    # a parent of a masked directory, unlike Seatbelt's unlink denial.
+    parents = sorted({a for p in excluded for a in _ancestors(os.path.realpath(p))
+                      if a.startswith(folder.rstrip(os.sep) + os.sep)})
+    for path in parents:
+        argv += ["--bind" if writable else "--ro-bind", path, path]
+    # Apply exclusions last. An excluded directory already covers descendants;
+    # mounting a second mask inside that empty read-only directory would fail.
+    roots: List[str] = []
+    for path in sorted(set(os.path.realpath(p) for p in excluded)):
+        if not any(path.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+            roots.append(path)
+    for path in roots:
+        if not os.path.exists(path):
+            raise SandboxUnavailable(f"never-share path disappeared: {path}")
+        if os.path.isdir(path):
+            argv += ["--tmpfs", path, "--remount-ro", path]
+        else:
+            argv += ["--ro-bind", "/dev/null", path]
     # An emptied folder is not a place to write: a write there would seem to work and be
     # lost when the sandbox ends. What was put back inside it keeps its own setting.
     shared_tmp = os.path.realpath("/tmp")
@@ -261,7 +283,7 @@ def protected(path: str, hidden: Sequence[str] = ()) -> bool:
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
          shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
          writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
-         network: bool = False) -> List[str]:
+         network: bool = False, excluded: Sequence[str] = ()) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
@@ -276,12 +298,12 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
     kind = available()
     if kind == "sandbox-exec":
         return ["/usr/bin/sandbox-exec", "-p",
-                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network), *command]
+                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network, excluded), *command]
     if kind == "bwrap":
         if network and not scopes_sockets():
             raise SandboxUnavailable("--network needs Landlock ABI 6 or later to isolate host abstract sockets. "
                                      "Enable Landlock on a supported Linux kernel, or omit --network.")
-        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools, network)
+        return _bwrap(folder, tmp, command, shared, readable, hidden, writable, home_visible, tools, network, excluded)
     if allow_unsandboxed:
         if not writable:
             raise SandboxUnavailable("--read-only needs a sandbox to hold commands to it; this machine has none")

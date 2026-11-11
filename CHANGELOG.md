@@ -4,6 +4,13 @@
 
 ### Hands
 
+- Preview sharing locally with `hands up --preview`, without connecting or pairing.
+- Enforce personal literal-path exclusions from `~/.config/hermes-tenuo/never-share`
+  in both terminal and file operations; retain the policy location on reconnect.
+- Redact recognized secrets on the device before sending results or recording
+  command logs, including Hermes's encoded file-read samples. Detection is best effort.
+- Exercise both client/server directions against a pinned previous Hands version in CI.
+
 - Add Hands: a conversation with a remote Hermes can run its terminal and file
   tools in one folder on your own machine, for a set time. `/hands invite`,
   `/hands on|off|status|revoke` in chat; `hermes-tenuo hands up` and

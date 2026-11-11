@@ -288,7 +288,47 @@ someone else in a shared chat does not run on it.
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
 | `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. `--network` lets them use the internet. |
 | `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --preview` | your machine | Shows sharing policy locally, without connecting, pairing, or creating a key. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
+
+Before connecting, add `--preview` to the same `hands up` command. It shows the
+server, folder, access duration, network setting, readable toolchains and extra
+paths, and your personal exclusions. Preview does not probe server connectivity
+or run the sandbox; use `hands check` for those checks.
+
+To keep private files out of a shared project, create
+`~/.config/hermes-tenuo/never-share` (or
+`$XDG_CONFIG_HOME/hermes-tenuo/never-share` when that variable is absolute):
+
+```text
+# Literal paths relative to the shared project, or absolute paths
+customers/
+config/production.json
+```
+
+Every listed path must exist. Missing paths, unreadable rules, glob patterns and
+negation are errors, never silently ignored. Rules apply to terminal commands
+and file tools, override extra read access, and require a sandbox. On macOS
+access is denied; on Linux files appear empty and directories are empty,
+read-only mounts. Names may remain visible. Rules are fixed for a session;
+stop and restart Hands after changing them. Protect the original path and any
+existing copies or hard-link aliases separately. These rules control paths,
+not all copies of the same information. Do not move excluded data from another
+local process during a session.
+
+Hands redacts recognized credentials from tool results on the device before
+signing or sending them, and from commands recorded in its local log. It matches
+common token formats, sensitive values from the launch environment, and values
+of at least six characters from regular project-root `.env*` files up to 64 KiB.
+Redacted text uses `[redacted]`; the local console reports redaction, and
+ordinary terminal results include a notice. Hermes file-read base64 samples
+are scrubbed along with their plaintext pages, preserving transport framing.
+The current-directory field remains intact for tool routing. Files on disk are not rewritten.
+This is best-effort detection: short values, fragments, encodings and unknown
+formats can escape detection. Use exclusions for data that must not be shared.
+Redaction does not restrict network traffic from commands started with
+`--network`. Results still go to remote Hermes and may go to its model provider.
+Older Hands clients do not gain these protections merely by upgrading the server.
 
 What your machine enforces, whatever the server asks:
 
