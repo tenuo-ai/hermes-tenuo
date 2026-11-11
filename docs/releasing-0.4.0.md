@@ -75,3 +75,29 @@ commands. This substitution belongs in release testing, not user onboarding.
 
 Results and remaining gates are recorded in the preparation PR. Publication and
 catalog repinning remain separate actions even if every automated check passes.
+
+### Desktop acceptance — 2026-11-11
+
+Passed with Hermes Desktop 0.23.1+1096, Hermes backend 0.23.1, and the
+0.4.0 wheel in a fresh local Python environment. The backend and device used
+separate temporary state directories. Model credentials remained on the Mac.
+
+- `/hands setup` displayed read/edit/online choices in Desktop.
+- `/hands setup edit` produced a one-use invite; device preflight and pairing passed.
+- `/hands verify` showed the chosen folder, read/write access and internet off.
+- A real gpt-4o-mini conversation ran the invoice tests, observed two failures,
+  edited `invoice.py`, and reran both tests successfully. An independent local
+  test run passed and the original test file was byte-for-byte unchanged.
+- Stopping the device made `/hands status` report it not answering;
+  `/hands off` returned the conversation to server tools.
+- Desktop was restored to its original local gateway and the test connection removed.
+
+The supported repository-install command also passed in a separate fresh Hermes
+home; `hermes plugins doctor hermes-tenuo` confirmed discovery, manifest parsing,
+import and registration. A pre-existing multi-profile install hit an upstream
+workspace collision with duplicate package names; the clean install did not.
+
+This Desktop check used a loopback backend. The earlier GCP-to-Mac integration
+run separately validated the two-host execution path. No messaging-app UI test
+is claimed. CI, artifact checks and final PyPI smoke checks are recorded with the
+release PR and publication run.

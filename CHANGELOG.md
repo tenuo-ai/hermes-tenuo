@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 - 2026-11-10
+## 0.4.0 - 2026-11-11
 
 ### Packaging and onboarding
 
