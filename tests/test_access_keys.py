@@ -215,3 +215,23 @@ print(access.load_or_create_signing_key().public_key.to_bytes().hex())
     import base64
     persisted = SigningKey.from_bytes(base64.b64decode(key_path.read_text()))
     assert identities[0] == persisted.public_key.to_bytes().hex()
+
+
+def test_doctor_uses_only_the_selected_signing_key_variable(tmp_path, monkeypatch, capsys):
+    from argparse import Namespace
+    import hermes_tenuo._home as home
+    from hermes_tenuo.cli import cmd_doctor
+    from hermes_tenuo._guard import build_plugin_guard
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TENUO_SIGNING_KEY", "invalid-but-not-selected")
+    monkeypatch.delenv("ACCESS_TEST_KEY", raising=False)
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    config = _config(ROLES)
+    config["plugins"]["entries"]["hermes-tenuo"]["signing_key_env"] = "ACCESS_TEST_KEY"
+    monkeypatch.setattr(home, "load_hermes_config", lambda: config)
+    assert build_plugin_guard(None) is not None
+    cmd_doctor(Namespace())
+    output = capsys.readouterr().out
+    assert "access: using the provisioned key" in output
+    assert "access signing key could not be loaded" not in output

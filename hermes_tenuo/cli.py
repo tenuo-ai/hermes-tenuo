@@ -547,7 +547,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if child_raw is not None and load_warrant(child_raw) is None:
                 problem = "child warrant is set but could not be loaded"
 
-    from hermes_tenuo._config import get_access_block
+    from hermes_tenuo._config import get_access_block, get_signing_key_raw
     configured = warrant is not None and problem is None
     if problem is not None:
         check(False, f"plugin configured (warrant): {problem}", blocks)
@@ -651,7 +651,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     check(True, "delegation plan loads")
 
     # 8b. Access: role-based gateway authorization, if configured.
-    from hermes_tenuo._config import get_access_block
     access_block = get_access_block(None)
     if access_block is not None:
         from hermes_tenuo.access import (
@@ -667,7 +666,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             check(False, f"access config: {exc}", blocks)
         else:
             check(True, f"access: {len(cfg.roles)} role(s); unmatched senders → {cfg.default_role or 'deny'}")
-            configured = _env_secret(config_entry.get("signing_key_env", "TENUO_SIGNING_KEY")) or _env_secret("TENUO_SIGNING_KEY")
+            configured = get_signing_key_raw(None)
             key = None
             if configured:
                 try:
