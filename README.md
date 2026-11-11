@@ -322,7 +322,8 @@ common token formats, sensitive values from the launch environment, and values
 of at least six characters from regular project-root `.env*` files up to 64 KiB.
 Redacted text uses `[redacted]`; the local console reports redaction, and
 ordinary terminal results include a notice. Hermes file-read base64 samples
-are scrubbed along with their plaintext pages, preserving transport framing. Files on disk are not rewritten.
+are scrubbed along with their plaintext pages, preserving transport framing.
+The current-directory field remains intact for tool routing. Files on disk are not rewritten.
 This is best-effort detection: short values, fragments, encodings and unknown
 formats can escape detection. Use exclusions for data that must not be shared.
 Redaction does not restrict network traffic from commands started with

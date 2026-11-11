@@ -159,3 +159,11 @@ def test_preflight_refuses_invalid_rules_before_contacting_server(hub, folder, m
     found = device.check(hub.invite(), str(folder))
     assert any(ok is False and 'never-share path does not exist' in text for ok, text in found)
     assert not device.home().exists()
+
+
+def test_redaction_preserves_cwd_routing_metadata(folder):
+    (folder / '.env').write_text('WORKSPACE=' + str(folder))
+    marker = '__HERMES_CWD_0123456789abcdef__'
+    result = privacy.Redactor(str(folder)).clean('content ' + str(folder) + '\n' + marker + str(folder) + marker)
+    assert result.startswith('content [redacted]\n')
+    assert marker + str(folder) + marker in result

@@ -96,6 +96,11 @@ class Redactor:
         # a marker adjacent to a token (files need not end with a newline).
         parts = re.split(r"(__HERMES_[A-Z]+_[0-9a-f]+__)", text)
         for i in range(0, len(parts), 2):
+            # Hermes consumes cwd as routing metadata, not file/command content.
+            # It already knows this path; replacing it would break subsequent tools.
+            if (0 < i < len(parts) - 1 and parts[i - 1] == parts[i + 1]
+                    and parts[i - 1].startswith("__HERMES_CWD_")):
+                continue
             part = parts[i]
             compact = "".join(part.split())
             if len(compact) >= 16 and re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", compact):
