@@ -809,6 +809,11 @@ def cmd_hands(args: argparse.Namespace) -> int:
         duration = _parse_ttl(args.ttl)
         if duration <= 0:
             raise ValueError("the time window must be positive")
+        if getattr(args, "preview", False):
+            from hermes_tenuo.hands.privacy import preview
+            for line in preview(args, duration):
+                print(device.printable(line))
+            return 0
         print("Checking this machine before pairing…")
         checks = device.check(args.invite, args.dir, read_only=args.read_only,
                               plain_http=args.plain_http, network=args.network,
@@ -918,6 +923,7 @@ def main() -> None:
                       help="The hands://... line from `/hands invite` (only needed the first time)")
     up_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder the server may work in (default: here)")
     up_p.add_argument("--for", dest="ttl", default="4h", metavar="DURATION", help="How long, e.g. 30m, 4h (default: 4h)")
+    up_p.add_argument("--preview", action="store_true", help="Show local sharing policy without connecting or pairing")
     up_p.add_argument("--name", metavar="NAME", help="What to call this machine (default: its hostname)")
     up_p.add_argument("--no-sandbox", action="store_true",
                       help="Run commands with your full access when this machine has no sandbox")

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from hermes_tenuo.hands import sandbox, wire
+from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
 
 MAX_OUTPUT = 8 * 1024 * 1024
 
@@ -463,6 +464,14 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
     else:
         found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
                              "commands your full access"))
+    try:
+        excluded = exclusions(real)
+        if excluded and (allow_unsandboxed or not kind):
+            raise ValueError("never-share rules require a sandbox; cannot use --no-sandbox")
+        found.extend((True, f"excluded from commands: {path}") for path in excluded)
+    except ValueError as exc:
+        found.append((False, str(exc)))
+        return found
     if network and kind == "bwrap" and not sandbox.scopes_sockets():
         found.append((False, "--network needs enabled Landlock ABI 6 or later; omit --network or upgrade the kernel"))
     url = ""
@@ -537,6 +546,11 @@ class Device:
             raise HandsError("point Hands at a project folder, not your home folder or /")
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
+        self.config_home = str(policy_file().parent.parent.resolve())
+        self.excluded = exclusions(self.folder)
+        if self.excluded and (allow_unsandboxed or sandbox.available() is None):
+            raise HandsError("never-share rules require a sandbox; cannot use --no-sandbox")
+        self.redactor = Redactor(self.folder)
         self.ttl_seconds = ttl_seconds
         self.plain_http = plain_http
         # A command-local CA setting disappears in a fresh shell. Resolve it now,
@@ -565,7 +579,7 @@ class Device:
         self._prepare_home(self.tmp)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
                      writable=not read_only, home_visible=read_home, tools=self.shown,
-                     network=network)  # fail before pairing
+                     network=network, excluded=self.excluded)  # fail before pairing
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -648,7 +662,14 @@ class Device:
             pass
 
     def report(self, job_id: str, output: str, returncode: int, timeout: float = 60) -> None:
-        output = wire.fit(output)
+        cleaned = self.redactor.clean(output)
+        if cleaned != output:
+            self.say("Recognized secrets were redacted on the device before sending a result.")
+            # File-tool frames carry status fields: appending prose can make a
+            # successful read fall back or turn the notice into file content.
+            if not any(marker in output for marker in ("__HERMES_RF_", "__HERMES_RB_", "__HERMES_WF_")):
+                cleaned += "\nhands: recognized secrets were redacted on the device\n"
+        output = wire.fit(cleaned)
         args = {"job": job_id, "digest": wire.digest(output, returncode)}
         _post(self.url + wire.API + "/result", {
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
@@ -885,7 +906,7 @@ class Device:
                 command.append("--scope-sockets")
             argv = sandbox.wrap(folder, tmp, command,
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
-                                hidden=[self.state], writable=not self.read_only,
+                                hidden=[self.state], excluded=self.excluded, writable=not self.read_only,
                                 home_visible=self.read_home, tools=self.shown, network=self.network)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
@@ -1080,7 +1101,7 @@ class Device:
 
     def handle(self, job: Dict[str, Any]) -> None:
         job_id = str(job.get("id", ""))
-        shown = str(job.get("shown") or "(session setup)")[:500]
+        shown = str(job.get("shown") or "(session setup)")
         try:
             folder = self.verify(job)
             timeout = self.budget(job)
@@ -1106,12 +1127,12 @@ class Device:
         self._deliver(job_id, output, code)
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
-        line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": shown,
-                "exit": code, "note": note}
+        line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],
+                "exit": code, "note": self.redactor.clean(note)}
         with open(self._log, "a") as f:
             f.write(json.dumps(line) + "\n")
         self.say(f"  {time.strftime('%H:%M:%S')}  {'refused' if code is None else f'exit {code}'}  "
-                 f"{printable(shown[:100])}")
+                 f"{printable(self.redactor.clean(shown)[:100])}")
 
     # -- the loop ---------------------------------------------------------------
 
@@ -1145,6 +1166,8 @@ class Device:
                          "(start with --network to let them install or download).")
         if kind == "sandbox-exec":
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        lines.extend(f"Excluded from commands: {p}" for p in self.excluded)
+        lines.append("Results go to remote Hermes and may go to its model provider; recognized secrets are redacted locally.")
         return lines
 
     def stop(self, *from_signal: Any) -> None:
@@ -1154,7 +1177,7 @@ class Device:
 
     def reconnect_command(self) -> str:
         """A fresh local consent action; never include the consumed invite or its secret."""
-        args = ["env", f"TENUO_HANDS_HOME={self.state}"]
+        args = ["env", f"TENUO_HANDS_HOME={self.state}", f"XDG_CONFIG_HOME={self.config_home}"]
         if self.ssl_cert_file:
             args.append(f"SSL_CERT_FILE={self.ssl_cert_file}")
         args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
