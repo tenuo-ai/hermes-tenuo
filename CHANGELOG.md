@@ -20,6 +20,11 @@
   in both terminal and file operations; retain the policy location on reconnect.
 - Redact recognized secrets on the device before sending results or recording
   command logs, including Hermes's encoded file-read samples. Detection is best effort.
+  A `.env` value is treated as a secret only under a secret-looking key, and an assigned
+  value that is a code expression, a plain word or a file path is left as is, so ordinary
+  settings and source are not redacted.
+- Keep serving when the server's answer is not in the expected form: it is retried like a
+  lost connection instead of ending the device.
 - Exercise both client/server directions against a pinned previous Hands version in CI.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file

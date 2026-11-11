@@ -1030,6 +1030,33 @@ def test_a_server_error_is_a_lost_connection_and_a_refusal_is_not(monkeypatch):
         device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
 
 
+def test_a_server_answer_that_is_not_an_object_is_a_lost_connection_not_a_crash(monkeypatch):
+    import io
+
+    def returns(value):
+        return lambda request, timeout=None: io.BytesIO(json.dumps(value).encode())
+
+    # A buggy or incompatible server, or anything injected on an unencrypted link: not an
+    # object. It is retried like a lost connection instead of crashing the device.
+    for value in ([], "text", 7, None, True):
+        monkeypatch.setattr(device_module.urllib.request, "urlopen", returns(value))
+        with pytest.raises(ConnectionError):
+            device_module._post("http://127.0.0.1:1/x", {}, timeout=1)
+    monkeypatch.setattr(device_module.urllib.request, "urlopen", returns({"job": {"id": "j"}}))
+    assert device_module._post("http://127.0.0.1:1/x", {}, timeout=1) == {"job": {"id": "j"}}
+
+
+@sandboxed
+def test_poll_ignores_a_command_that_is_not_an_object(hub, folder, monkeypatch):
+    device = Device(hub.invite(), str(folder), 600, allow_unsandboxed=True)
+    device.pair()
+    for malformed in ({"job": 5}, {"job": "x"}, {"job": []}, {}):
+        monkeypatch.setattr(device_module, "_post", lambda *a, _r=malformed, **k: _r)
+        assert device.poll() is None
+    monkeypatch.setattr(device_module, "_post", lambda *a, **k: {"job": {"id": "j1", "cmd": "echo x"}})
+    assert device.poll() == {"id": "j1", "cmd": "echo x"}
+
+
 @sandboxed
 def test_a_revoked_device_does_not_pair_again(hub, folder, monkeypatch):
     monkeypatch.setattr(wire, "POLL_SECONDS", 1)

@@ -162,11 +162,34 @@ def test_preflight_refuses_invalid_rules_before_contacting_server(hub, folder, m
 
 
 def test_redaction_preserves_cwd_routing_metadata(folder):
-    (folder / '.env').write_text('WORKSPACE=' + str(folder))
+    (folder / '.env').write_text('SECRET_WORKSPACE=' + str(folder))
     marker = '__HERMES_CWD_0123456789abcdef__'
     result = privacy.Redactor(str(folder)).clean('content ' + str(folder) + '\n' + marker + str(folder) + marker)
     assert result.startswith('content [redacted]\n')
     assert marker + str(folder) + marker in result
+
+
+def test_redaction_leaves_ordinary_code_and_non_secret_settings(folder):
+    (folder / '.env').write_text(
+        'LOG_LEVEL=warning\nAPP_NAME=shopfront\nHOST=localhost\nNODE_ENV=development\n'
+        'API_TOKEN=tok_opaque_123456\nDATABASE_URL=postgres://u:hunter2hunter2@h/db\n')
+    r = privacy.Redactor(str(folder))
+    # A dotenv holds ordinary settings too; their plain-word values are not redacted
+    # wherever they happen to appear in output or files.
+    for benign in ('run at LOG_LEVEL warning on localhost', 'the app is called shopfront',
+                   'listening on PORT 8000 in development mode'):
+        assert r.clean(benign) == benign, benign
+    # Ordinary source that merely mentions token/secret/password/credential is not a secret.
+    for code in ('token_type: "bearer"', 'TOKEN_TTL = timedelta(minutes=15)',
+                 'password_ok = len(password) >= 12', 'credentials_path = "config/credentials.json"',
+                 'return {"access_token": token}'):
+        assert r.clean(code) == code, code
+    # Real secrets are still redacted: a secret-keyed dotenv value, a url credential,
+    # an opaque assignment, and a recognized token format.
+    assert '[redacted]' in r.clean('calling with tok_opaque_123456')
+    assert r.clean('db at postgres://u:hunter2hunter2@h/db') == 'db at postgres://[redacted]@h/db'
+    assert '[redacted]' in r.clean('SECRET_KEY = "aB3xK9mNp2Qr7"')
+    assert '[redacted]' in r.clean('tok = ghp_' + 'a' * 36)
 
 
 @sandboxed

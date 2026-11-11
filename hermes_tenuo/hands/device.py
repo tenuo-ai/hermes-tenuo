@@ -420,7 +420,7 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     request = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read(wire.MAX_BODY))
+            answer = json.loads(response.read(wire.MAX_BODY))
     except urllib.error.HTTPError as e:
         if e.code >= 500:
             # A proxy in front of the server, or the server itself failing: not an answer
@@ -440,6 +440,12 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
                 "uses its own certificate authority or a self-signed certificate, set SSL_CERT_FILE to that "
                 "certificate file and run this again") from e
         raise ConnectionError(str(reason)) from e
+    if not isinstance(answer, dict):
+        # The server answered with something that is not an object (a buggy or incompatible
+        # server, or anything injected on an unencrypted link). It is not an answer about this
+        # device, so it is retried like any lost connection rather than crashing the device.
+        raise ConnectionError("the server's answer was not in the expected form")
+    return answer
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
@@ -648,7 +654,10 @@ class Device:
         reply = _post(self.url + wire.API + "/poll", {
             "device": self.me, "nonce": nonce, "sig": self._request("poll", nonce),
         }, timeout=min(wire.POLL_SECONDS + 15, max(1.0, self.expires - time.time() + 1)))
-        return reply.get("job")
+        job = reply.get("job")
+        # A command is an object; anything else here is not one Hands can run. Treat it as
+        # "nothing to do" (the signed command chain is still verified in verify()).
+        return job if isinstance(job, dict) else None
 
     def bye(self) -> None:
         """Tell the server this device is going down, so callers hear it now instead of waiting."""
