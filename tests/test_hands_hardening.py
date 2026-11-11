@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import pty
 import sys
 import time
@@ -555,3 +556,49 @@ def test_gitwatch_reports_a_temp_folder_it_cannot_open_safely(tmp_path):
     assert "temp folder (cannot be checked)" in gitwatch.settings(str(project), also=(str(temp),))
     temp.unlink()
     assert "temp folder (cannot be checked)" not in gitwatch.settings(str(project), also=(str(temp),))   # simply absent
+
+
+def _other_spellings(path):
+    """Other names this machine gives the same folder (none on a plain case-sensitive disk)."""
+    names = [path.parent / path.name.upper(), Path("/System/Volumes/Data" + str(path))]
+    return [name for name in names if str(name) != str(path) and name.is_dir() and name.samefile(path)]
+
+
+def test_gitwatch_follows_a_folder_named_another_way(tmp_path):
+    project, temp = tmp_path / "project", tmp_path / "state" / "tmp"
+    project.mkdir()
+    temp.mkdir(parents=True)
+    _git(project)
+    (temp / "extra.cfg").write_text("[core]\n\tfsmonitor = ./w.sh\n")
+    (temp / "hooks").mkdir()
+    (temp / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    spellings = _other_spellings(temp)
+    if not spellings:
+        pytest.skip("this disk gives a folder only one name")
+    for spelled in spellings:
+        (project / ".git" / "config").write_text(
+            f"[include]\n\tpath = {spelled}/extra.cfg\n[core]\n\thooksPath = {spelled}/hooks\n")
+        found = gitwatch.settings(str(project), also=(str(temp),))
+        assert "core.fsmonitor" in found and "temp folder/hooks/pre-commit" in found, spelled
+    # The same holds for the shared folder itself.
+    for spelled in _other_spellings(project):
+        (project / "inside.cfg").write_text("[alias]\n\tz = \"!sh z.sh\"\n")
+        (project / ".git" / "config").write_text(f"[include]\n\tpath = {spelled}/inside.cfg\n")
+        assert "alias.z" in gitwatch.settings(str(project), also=(str(temp),)), spelled
+
+
+def test_a_read_only_session_still_watches_the_temp_folder(hub, folder):
+    _git(folder)
+    said = []
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True, read_only=True,
+                    say=said.append)
+    os.makedirs(device.tmp, exist_ok=True)
+    with open(folder / ".git" / "config", "a") as f:               # as it was before the session
+        f.write(f"[include]\n\tpath = {device.tmp}/extra.cfg\n")
+    device._git_seen = gitwatch.settings(str(folder), also=(device.tmp,))
+    device._git_note()
+    assert not said
+    with open(os.path.join(device.tmp, "extra.cfg"), "w") as f:    # the one place a command can write
+        f.write("[core]\n\tfsmonitor = ./w.sh\n")
+    device._git_note()
+    assert any("core.fsmonitor" in line for line in said)

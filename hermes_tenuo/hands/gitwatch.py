@@ -89,6 +89,25 @@ def _locate(roots: List[Tuple[str, int, str]], path: str, origin: int, base: str
             for spelling in {root, os.path.realpath(root)}:
                 if candidate == spelling or candidate.startswith(spelling + os.sep):
                     return index, os.path.relpath(candidate, spelling)
+    # Last, by what the folders are rather than how they are spelled: another letter case
+    # on a case-insensitive disk, or a second name the system gives the same folder.
+    try:
+        known = {(info.st_dev, info.st_ino): index
+                 for index, info in ((i, os.fstat(fd)) for i, (_root, fd, _label) in enumerate(roots))}
+    except OSError:
+        return None
+    above, below = full, []
+    for _ in range(64):
+        try:
+            info = os.stat(above)
+        except OSError:
+            info = None
+        if info is not None and (info.st_dev, info.st_ino) in known:
+            return known[(info.st_dev, info.st_ino)], os.path.join(*reversed(below)) if below else "."
+        parent, name = os.path.split(above)
+        if not name or parent == above:
+            return None
+        above, below = parent, below + [name]
     return None
 
 

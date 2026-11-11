@@ -1150,9 +1150,8 @@ class Device:
 
         Advice only: nothing here may keep a result from being sent or cleanup from running.
         """
-        if self.read_only:
-            return
         try:
+            # Also in a read-only session: commands can still write their temp folder.
             now = gitwatch.settings(self.folder, also=(self.tmp,))
             new, self._git_seen = gitwatch.changed(self._git_seen, now), now
             if not new:
