@@ -190,32 +190,46 @@ def _directory_install(home, shim_text):
     return directory
 
 
-def test_doctor_fails_on_a_second_installation_that_blocks(tmp_path, monkeypatch, capsys):
+_THIS_SHIM = (__import__("pathlib").Path(__file__).resolve().parents[1] / "__init__.py").read_text()
+# The loader that refused a second installation by raising, so Hermes dropped the plugin.
+_RAISING_SHIM = """
+def _load_package():
+    raise ImportError("hermes-tenuo installation conflict: x is already loaded")
+_pkg = _load_package()
+register = _pkg.register
+"""
+# The 0.3 loader: use whichever package is already importable.
+_REUSING_SHIM = """
+import importlib
+_pkg = importlib.import_module("hermes_tenuo")
+register = _pkg.register
+"""
+
+
+@pytest.mark.parametrize("shim, effect, said, fails", [
+    (_THIS_SHIM, "blocks", "Hermes blocks every tool call until one is removed", True),
+    (_RAISING_SHIM, "drops", "Hermes does not load the plugin, so nothing is enforced", True),
+    (_REUSING_SHIM, "reuses", "—  two installations", False),
+])
+def test_doctor_reports_a_second_installation_by_what_its_loader_does(
+        tmp_path, monkeypatch, capsys, shim, effect, said, fails):
     from hermes_tenuo import cli
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
-    directory = _directory_install(tmp_path, "raise ImportError('installation conflict')")
-    assert cli._second_installation() == (directory, True)
-    assert cli.cmd_doctor(argparse.Namespace()) == 1
+    directory = _directory_install(tmp_path, shim)
+    assert cli._second_installation() == (directory, effect)
+    code = cli.cmd_doctor(argparse.Namespace())
     out = capsys.readouterr().out
-    assert "two installations" in out and str(directory) in out and "blocks every tool call" in out
-
-
-def test_doctor_notes_a_second_installation_with_an_older_loader(tmp_path, monkeypatch, capsys):
-    from hermes_tenuo import cli
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
-    directory = _directory_install(tmp_path, "import hermes_tenuo")
-    assert cli._second_installation() == (directory, False)
-    cli.cmd_doctor(argparse.Namespace())
-    out = capsys.readouterr().out
-    assert "—  two installations" in out and "blocks every tool call" not in out
+    assert said in out and str(directory) in out
+    assert ("✗  two installations" in out) is fails
+    if fails:
+        assert code == 1
 
 
 def test_doctor_ignores_the_plugin_directory_outside_the_hermes_environment(tmp_path, monkeypatch):
     from hermes_tenuo import cli
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    _directory_install(tmp_path, "raise ImportError('installation conflict')")
+    _directory_install(tmp_path, _THIS_SHIM)
     monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: False)
     assert cli._second_installation() is None
     monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
