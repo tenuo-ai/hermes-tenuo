@@ -203,7 +203,9 @@ def test_access_only_local_delegation_remains_unrestricted(monkeypatch, attribut
                                  control_key=key, holder=key.public_key, signing_key=key)
     guard = HermesGuard(access_policy=policy)
     sender(monkeypatch)  # CLI/Desktop/API: no messaging identity
-    lookup = (lambda task: {"subagent_id": task} if task == "child-task" else None)
+    def lookup(task):
+        return {"subagent_id": task} if task == "child-task" else None
+
     monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: lookup if attribution_available else None)
     assert guard.pre_tool_call("delegate_task", {"goal": "local work"}, session_id="parent", task_id="parent-task") is None
     guard.on_subagent_start("parent", "child", child_goal="local work", child_task_id="child-task")
