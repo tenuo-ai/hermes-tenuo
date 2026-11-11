@@ -547,12 +547,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if child_raw is not None and load_warrant(child_raw) is None:
                 problem = "child warrant is set but could not be loaded"
 
+    from hermes_tenuo._config import get_access_block
     configured = warrant is not None and problem is None
     if problem is not None:
         check(False, f"plugin configured (warrant): {problem}", blocks)
+    elif configured:
+        check(True, "plugin configured (warrant)")
+    elif get_access_block(None) is not None:
+        note("no static warrant — role-based access (below) is the tool-call authority")
     else:
         check(
-            configured,
+            False,
             "plugin configured (warrant)",
             "set TENUO_WARRANT / warrant: for general tool-call authorization. "
             "Hands device grants are independent. Run doctor after configuration.",

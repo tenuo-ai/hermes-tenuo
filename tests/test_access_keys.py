@@ -105,3 +105,5 @@ def test_doctor_reports_the_access_block(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "access: 2 role(s)" in out and "unmatched senders → guest" in out
     assert "every role compiles to a warrant" in out
+    # No static warrant is not a failure when access provides the authority.
+    assert "role-based access (below) is the tool-call authority" in out
