@@ -53,15 +53,16 @@ jobs:
           python -m pip install build twine
           python -m build
           python -m twine check dist/*
-      - name: Check the wheel does not ship the repo-root shim
+      - name: Validate release artifacts and clean wheel install
         run: |
-          python - <<'PY'
-          import glob, zipfile
-          whl = glob.glob("dist/*.whl")[0]
-          top = {n.split("/")[0] for n in zipfile.ZipFile(whl).namelist()}
-          assert top == {"hermes_tenuo", next(t for t in top if t.endswith(".dist-info"))}, top
-          print("wheel top-level:", sorted(top))
-          PY
+          python scripts/check_release_artifacts.py
+          python -m venv /tmp/tenuo-wheel
+          /tmp/tenuo-wheel/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/tenuo-wheel/bin/hermes-tenuo --version
+          /tmp/tenuo-wheel/bin/hermes-tenuo status
+          /tmp/tenuo-wheel/bin/hermes-tenuo hands --help
+          /tmp/tenuo-wheel/bin/hermes-tenuo hands demo
       - uses: actions/upload-artifact@v7
         with:
           name: dist

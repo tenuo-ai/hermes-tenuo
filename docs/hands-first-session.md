@@ -9,29 +9,87 @@ Supported devices: macOS with sandbox-exec, or Linux with working bubblewrap. Na
 In the Hermes environment/profile serving your chat:
 
 ```sh
-hermes plugins install hermes-tenuo
+hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
 hermes plugins enable hermes-tenuo
 ```
 
-Hands needs no manually minted warrant. Leave the optional enforcement credentials empty if you only want Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
+Leave the optional credential prompts empty for Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
 
-**Before the catalog update:** the catalog still points to an older release without Hands. PR reviewers should install this PR's commit using `hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA`, and run the laptop CLI from the same commit with `uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo …`. Do not advertise the catalog walkthrough as released until the checklist below is complete.
+Hands requires hermes-tenuo 0.4.0 or newer on both the server and laptop.
 
-## 2. Configure the connection once
+## 2. Connect your server and laptop
 
-In the chat, run `/hands setup`. Follow its server configuration instructions: an HTTPS URL forwarded to the loopback Hands listener, or a Tailscale IP bound on that private network. This is **not** the Hermes Desktop gateway port. Restart the gateway/profile after changing configuration.
+For a first session, use **Tailscale** to connect the two machines privately.
+You do not need a public domain, a reverse proxy, or an incoming port on your laptop.
+If you already have an HTTPS endpoint for Hands, use the alternative below.
 
-The laptop connects outward; it needs no incoming port. Keep the laptop awake and its sharing terminal open. Server-side configuration cannot prove your laptop can reach the address: preflight on the laptop checks that.
+1. [Install Tailscale](https://tailscale.com/download) on the server and laptop,
+   sign both into the same tailnet, and keep Tailscale connected on both.
+2. On the **server**, run `tailscale ip -4` and copy its address.
+3. In the **server's Hermes config** (`~/.hermes/config.yaml`, or the config for
+   the profile serving your chat), merge the following into your existing
+   `plugins` settings. Replace both occurrences of `100.64.0.10` with the
+   server address you just copied; preserve your other plugin settings:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      hands:
+        listen: "100.64.0.10:8765"
+        url: "http://100.64.0.10:8765"
+```
+
+4. Restart that Hermes gateway/profile. In your **Hermes chat**, run `/hands setup`.
+   It should now offer the read/edit/online choices.
+5. On the **laptop**, confirm the server is reachable with
+   `tailscale ping 100.64.0.10`, using your server's address.
+   Your tailnet policy and the server firewall must allow the laptop to reach
+   TCP port 8765 on the Tailscale interface. There is no need to expose it on
+   the server's public interface.
+
+The `http://` address here travels over your private Tailscale network. This is
+Hands' own listener, not the Hermes Desktop gateway port. A successful Tailscale
+ping checks the network path; the Hands preflight in the next steps checks the
+actual service. See Tailscale's [connection guide](https://tailscale.com/docs/how-to/connect-to-devices)
+if the machines cannot reach each other.
+
+<details>
+<summary>Already have an HTTPS reverse proxy?</summary>
+
+Use a dedicated Hands URL, forward it to this loopback listener, and restart
+Hermes after merging the configuration:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      hands:
+        listen: "127.0.0.1:8765"
+        url: "https://hands.example.com"
+```
+
+Replace `https://hands.example.com` with your actual HTTPS endpoint. The proxy
+must reach port 8765 in the same network namespace as Hermes and support the
+Hands client's long-poll requests. Run `/hands setup` after restarting Hermes.
+
+</details>
+
+The laptop connects outward. Keep it awake and its sharing terminal open for
+the session. If Hermes runs in a container, the private listener address must
+be available inside that container; otherwise use the HTTPS proxy route.
 
 ## 3. Create a practice folder on the laptop
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if `uvx` is not available, then run:
 
 ```sh
+uvx --refresh hermes-tenuo --version
 uvx hermes-tenuo hands demo
 ```
 
-It prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
+The version command refreshes any older cached CLI; check that it reports 0.4.0 or newer.
+The demo prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
 
 ## 4. Choose permissions and connect
 
@@ -62,21 +120,11 @@ The laptop prints a reconnect command that preserves your choices and the origin
 | `/hands` is unknown | Enable the plugin and restart the gateway/profile serving this chat; check its version includes Hands. |
 | Hands is off | Follow `/hands setup`; no laptop connection is possible until the server listener is configured. |
 | Cannot reach server / wrong service | Check `hands.url`, the proxy route, port and private-network connection. Run `hands check` locally. |
-| No sandbox | Follow `hands check` diagnostics. On Ubuntu, see the bubblewrap setup in the README. The demo does not need `--no-sandbox`. |
+| No sandbox | Follow `hands check` diagnostics. On Ubuntu, see the bubblewrap setup in the [reference](reference.md). The demo does not need `--no-sandbox`. |
 | Invite expired or already used | Generate a new invite; do not repeatedly reuse the old one. |
 | Install/download fails | Internet is off in read/edit shares. Choose online only if you want that access, then restart locally. |
 | Device disconnected or expired | Inspect the laptop terminal and use its reconnect command. No silent server fallback occurs. |
 | Outcome unknown | Check the device and files before retrying; a lost reply does not mean a command failed. |
-
-## Release validation before repinning
-
-- Publish the laptop package containing these changes before updating the reviewed catalog SHA.
-- Update marketplace description, permission disclosures and demo to cover Hands; preserve the existing authorization feature documentation.
-- From clean supported macOS and Ubuntu installations, complete this walkthrough through Desktop and a messaging gateway. Record actual versions and results; automated tool-dispatch tests are not a substitute for UI checks.
-- Exercise unreachable server, missing sandbox, expired invite, laptop disconnect and offline dependency-install cases.
-- Confirm read-only leaves files unchanged; edit stays offline; online is explicitly chosen.
-- Confirm the catalog install and the default `uvx` package interoperate and show the same permissions.
-- Repin only after those checks pass. This PR does not publish or change the upstream catalog pin.
 
 ## Preview and keep private files out
 
@@ -88,7 +136,7 @@ Personal exclusions live in `~/.config/hermes-tenuo/never-share`, one existing
 literal path per line, relative to the shared folder or absolute. For example,
 `customers/` keeps that directory's contents out of terminal and file operations.
 Missing paths are errors; globs are not supported. Restart Hands to apply rule
-changes. See the README for platform behavior and path-alias limitations.
+changes. See the [reference](reference.md) for platform behavior and path-alias limitations.
 
 Recognized secrets in results and command logs are redacted locally. A result
 says when redaction occurred; it does not modify project files. Detection is

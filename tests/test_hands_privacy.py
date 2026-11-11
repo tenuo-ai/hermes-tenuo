@@ -162,11 +162,38 @@ def test_preflight_refuses_invalid_rules_before_contacting_server(hub, folder, m
 
 
 def test_redaction_preserves_cwd_routing_metadata(folder):
-    (folder / '.env').write_text('WORKSPACE=' + str(folder))
+    (folder / '.env').write_text('SECRET_WORKSPACE=' + str(folder))
     marker = '__HERMES_CWD_0123456789abcdef__'
     result = privacy.Redactor(str(folder)).clean('content ' + str(folder) + '\n' + marker + str(folder) + marker)
     assert result.startswith('content [redacted]\n')
     assert marker + str(folder) + marker in result
+
+
+def test_redaction_leaves_ordinary_code_and_non_secret_settings(folder):
+    (folder / '.env').write_text(
+        'LOG_LEVEL=warning\nAPP_NAME=shopfront\nHOST=localhost\nNODE_ENV=development\n'
+        'API_TOKEN=tok_opaque_123456\nDATABASE_URL=postgres://u:hunter2hunter2@h/db\n')
+    r = privacy.Redactor(str(folder))
+    # A dotenv holds ordinary settings too; their plain-word values are not redacted
+    # wherever they happen to appear in output or files.
+    for benign in ('run at LOG_LEVEL warning on localhost', 'the app is called shopfront',
+                   'listening on PORT 8000 in development mode'):
+        assert r.clean(benign) == benign, benign
+    # Unquoted values are bare expressions or references, not credential literals, and a
+    # quoted value that is a file path is not a secret: these are left as is.
+    for code in ('TOKEN_TTL = timedelta(minutes=15)', 'password_ok = len(password) >= 12',
+                 'return {"access_token": token}', 'credentials_path = "config/credentials.json"'):
+        assert r.clean(code) == code, code
+    # A quoted string literal under a secret-named field is redacted, even when it reads like
+    # a word or contains brackets (a credential literal must not slip through).
+    for secret in ('PASSWORD = "correcthorsebatterystaple"', 'password = "aB3x(K9mNp2Qr7)"',
+                   'api_secret: "swordfish"', 'SECRET_KEY = "aB3xK9mNp2Qr7"'):
+        assert '[redacted]' in r.clean(secret), secret
+    # And the other matchers still apply: a secret-keyed dotenv value, a url credential,
+    # and a recognized token format.
+    assert '[redacted]' in r.clean('calling with tok_opaque_123456')
+    assert r.clean('db at postgres://u:hunter2hunter2@h/db') == 'db at postgres://[redacted]@h/db'
+    assert '[redacted]' in r.clean('tok = ghp_' + 'a' * 36)
 
 
 @sandboxed

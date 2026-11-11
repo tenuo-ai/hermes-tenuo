@@ -60,10 +60,26 @@ _TOKEN = re.compile(
     r"|xox[baprs]-[A-Za-z0-9-]{10,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
 )
 _ASSIGNMENT = re.compile(
-    r'''(?i)(\b[\w.-]*(?:secret|token|password|passwd|api_?key|private_key|credential)[\w.-]*["']?\s*[:=]\s*["']?)([^\s"',;]{6,})'''
+    r'''(?i)(\b[\w.-]*(?:secret|token|password|passwd|api_?key|private_key|credential)[\w.-]*["']?\s*[:=]\s*)(["']?)([^\s"',;]{6,})'''
 )
 _AUTH = re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic|token)\s+)\S+")
 _URL = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
+# A path like config/credentials.json: a slash and a short file extension.
+_PATHISH = re.compile(r"[\w.~-]*/[\w./~-]*\.[A-Za-z]{1,6}")
+
+
+def _not_a_secret(value: str, quoted: bool) -> bool:
+    """Whether a value assigned to a secret-named field is ordinary source, not a secret to
+    redact. A file path is never a secret. A quoted string literal is kept: it is the shape a
+    real secret takes, so it is redacted even when it reads like a word or contains brackets.
+    An unquoted value is a bare expression or reference (len(x), timedelta(...), a variable),
+    not a credential literal; an opaque unquoted token is still caught by the token patterns
+    and by the environment and dotenv values collected above."""
+    if _PATHISH.fullmatch(value):
+        return True                                 # a file path: config/credentials.json
+    if quoted:
+        return False                                # a string literal under a secret field
+    return any(c in value for c in "(){}[]") or value.isalpha()
 
 
 class Redactor:
@@ -88,7 +104,11 @@ class Redactor:
                 for line in content.splitlines():
                     key, sep, value = line.removeprefix("export ").partition("=")
                     value = value.strip().strip("\"'")
-                    if sep and not key.lstrip().startswith("#") and len(value) >= 6:
+                    # Only values under a secret-looking key, as for environment variables.
+                    # A dotenv also holds ordinary settings (LOG_LEVEL, HOST, APP_NAME) whose
+                    # values are plain words; redacting those everywhere they appear hides
+                    # non-secret text. A credential in a URL value is still caught by _URL.
+                    if sep and _SECRET_NAME.search(key) and len(value) >= 6:
                         self.values.add(value)
             except (OSError, UnicodeError):
                 continue
@@ -140,7 +160,8 @@ class Redactor:
         text = _TOKEN.sub("[redacted]", text)
         text = _AUTH.sub(r"\1[redacted]", text)
         text = _URL.sub(r"\1[redacted]@", text)
-        return _ASSIGNMENT.sub(lambda m: m[1] + "[redacted]", text)
+        return _ASSIGNMENT.sub(
+            lambda m: m[0] if _not_a_secret(m[3], bool(m[2])) else m[1] + m[2] + "[redacted]", text)
 
 
 def preview(args, duration: int) -> list[str]:

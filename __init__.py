@@ -6,13 +6,12 @@ module. ``pip install`` users never touch it: Hermes finds the
 ``hermes_agent.plugins`` entry point and imports ``hermes_tenuo`` directly.
 
 This shim makes the clone importable without putting the clone on
-``sys.path``: if ``hermes_tenuo`` is already installed it is reused,
-otherwise the sibling package directory is loaded by path.
+``sys.path``. The selected checkout is authoritative. An already loaded package
+from another installation is rejected to avoid mixing modules from two versions.
 """
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -21,13 +20,16 @@ _PKG_DIR = Path(__file__).resolve().parent / "hermes_tenuo"
 
 
 def _load_package():
-    if "hermes_tenuo" in sys.modules:
-        return sys.modules["hermes_tenuo"]
-    try:
-        return importlib.import_module("hermes_tenuo")
-    except ModuleNotFoundError as exc:
-        if exc.name != "hermes_tenuo":
-            raise
+    loaded = sys.modules.get("hermes_tenuo")
+    if loaded is not None:
+        source = getattr(loaded, "__file__", None)
+        if source and Path(source).resolve() == (_PKG_DIR / "__init__.py").resolve():
+            return loaded
+        raise ImportError(
+            f"hermes-tenuo installation conflict: {source} is already loaded, "
+            f"but Hermes selected {_PKG_DIR}. Keep one plugin installation "
+            "(directory or pip entry point), then restart Hermes."
+        )
     spec = importlib.util.spec_from_file_location(
         "hermes_tenuo", _PKG_DIR / "__init__.py", submodule_search_locations=[str(_PKG_DIR)],
     )
@@ -46,10 +48,11 @@ def _load_package():
 try:
     _pkg = _load_package()
 except ModuleNotFoundError as exc:
-    if exc.name in ("tenuo", "tenuo_core"):
+    if exc.name in ("tenuo", "tenuo_core", "path_jail"):
         raise ModuleNotFoundError(
-            "hermes-tenuo needs the 'tenuo' package, which Hermes does not install for "
-            "plugins. Run: pip install 'tenuo>=0.3.6,<0.4' in the environment Hermes uses."
+            "hermes-tenuo runtime dependency is missing. Run `hermes plugins enable "
+            "hermes-tenuo` to install the manifest dependencies, or install "
+            "'tenuo>=0.3.6,<0.4' and 'path-jail>=0.3,<0.4' in the Hermes environment."
         ) from exc
     raise
 

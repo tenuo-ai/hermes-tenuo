@@ -81,7 +81,8 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
    Switch back to `block` (the default) before you call it done.
    Do not ship `log`.
 8. **`hermes-tenuo doctor` after every config change.** Enabled with
-   no warrant is a no-op — the plugin loads and enforces nothing.
+   no warrant leaves general tool-call authorization off. Hands can still enforce
+   its independent device grants; it does not need a manually minted warrant.
 
 ## Mint
 

@@ -1,3 +1,10 @@
+# 0.4.0 (unreleased)
+
+- Add Hands: scoped, expiring local workspaces for remote Hermes, with sandboxing, per-conversation routing, setup/verify, privacy exclusions and local result redaction.
+- Reuse Tenuo path-jail for workspace containment.
+- Separate Hands and tool-authorization onboarding and diagnostics; align plugin and package descriptions.
+- Prefer the selected directory checkout, reject already-loaded conflicting installations, and validate release artifacts before publishing.
+
 # Changelog
 
 ## Unreleased
@@ -13,6 +20,11 @@
   in both terminal and file operations; retain the policy location on reconnect.
 - Redact recognized secrets on the device before sending results or recording
   command logs, including Hermes's encoded file-read samples. Detection is best effort.
+  A `.env` value is treated as a secret only under a secret-looking key, and an assignment to
+  a secret-named field redacts a quoted string literal while leaving a bare expression, a
+  reference or a file path as is, so ordinary settings and source are not redacted.
+- Keep serving when the server's answer is not in the expected form: it is retried like a
+  lost connection instead of ending the device.
 - Exercise both client/server directions against a pinned previous Hands version in CI.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file

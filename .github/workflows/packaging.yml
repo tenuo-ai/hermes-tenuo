@@ -1,0 +1,28 @@
+name: Release artifacts
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  artifacts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build twine
+      # build's default builds the wheel from the sdist, testing both artifacts.
+      - run: python -m build && python -m twine check dist/*
+      - run: python scripts/check_release_artifacts.py
+      - name: Smoke test an isolated installed wheel outside the checkout
+        run: |
+          python -m venv /tmp/tenuo-wheel
+          /tmp/tenuo-wheel/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/tenuo-wheel/bin/hermes-tenuo --version
+          /tmp/tenuo-wheel/bin/hermes-tenuo status
+          /tmp/tenuo-wheel/bin/hermes-tenuo hands --help
+          /tmp/tenuo-wheel/bin/hermes-tenuo hands demo
