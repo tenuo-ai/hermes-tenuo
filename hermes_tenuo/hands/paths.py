@@ -11,12 +11,17 @@ from path_jail import Jail
 def workspace(folder: str) -> Jail:
     """Resolve an existing project directory, including an explicitly selected symlink."""
     path = Path(folder).expanduser()
-    if not path.is_dir():
+    try:
+        is_directory = path.is_dir()
+    except OSError as exc:
+        raise ValueError(f"cannot inspect workspace {folder}: {exc}") from exc
+    if not is_directory:
         raise ValueError(f"{folder} is not a folder")
     try:
         jail = Jail(path)
+        home = str(Path.home().resolve())
     except (OSError, ValueError) as exc:
         raise ValueError(f"point Hands at a project folder, not your home folder or / ({exc})") from exc
-    if jail.root == str(Path.home().resolve()):
+    if jail.root == home:
         raise ValueError("point Hands at a project folder, not your home folder or /")
     return jail

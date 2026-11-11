@@ -80,3 +80,34 @@ def test_jail_rejects_prefix_sibling(folder):
     sibling.mkdir()
     with pytest.raises(ValueError):
         workspace(str(folder)).contains(os.path.realpath(sibling))
+
+
+@pytest.mark.parametrize('command,preview', [('check', False), ('up', False), ('up', True)])
+def test_untraversable_workspace_is_a_handled_cli_failure(folder, monkeypatch, capsys, command, preview):
+    from types import SimpleNamespace
+    from hermes_tenuo.cli import cmd_hands
+    original = Path.is_dir
+    def denied(path):
+        if path == folder:
+            raise PermissionError('permission denied by test')
+        return original(path)
+    monkeypatch.setattr(Path, 'is_dir', denied)
+    args = SimpleNamespace(hands_command=command, preview=preview, invite=None, dir=str(folder), ttl='1h',
+                           name=None, read_only=False, network=False, no_sandbox=False,
+                           plain_http=False, read_home=False, read=None)
+    assert cmd_hands(args) == 1
+    captured = capsys.readouterr()
+    assert 'cannot inspect workspace' in captured.out + captured.err
+    assert not device.home().exists()
+
+
+def test_untraversable_workspace_is_a_handled_device_failure(folder, monkeypatch):
+    original = Path.is_dir
+    def denied(path):
+        if path == folder:
+            raise PermissionError('permission denied by test')
+        return original(path)
+    monkeypatch.setattr(Path, 'is_dir', denied)
+    with pytest.raises(device.HandsError, match='cannot inspect workspace'):
+        device.Device(None, str(folder), 60)
+    assert not device.home().exists()
