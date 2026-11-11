@@ -173,6 +173,12 @@ def get_signing_key(ctx: Any):
         return None
 
 
+def get_access_block(ctx: Any) -> Optional[dict]:
+    """The ``access:`` block (role-based gateway access), or None if not set."""
+    block = _get_plugin_entry(ctx).get("access")
+    return block if block is not None else None
+
+
 def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
     """Return list of trusted PublicKeys from env or config, or None."""
     entry = _get_plugin_entry(ctx)

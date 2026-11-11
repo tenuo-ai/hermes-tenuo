@@ -25,6 +25,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     Raises WarrantLoadError when a warrant IS configured but unloadable.
     """
     from hermes_tenuo._config import (
+        get_access_block,
         get_audit_log_path,
         get_child_warrant_raw,
         get_delegation_plan_path,
@@ -35,6 +36,27 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         load_warrant,
         resolve_warrant_text,
     )
+
+    # Role-based access: the plugin mints one warrant per role from config and
+    # resolves each gateway turn to its sender's role. It needs a signing key to
+    # mint and present those warrants (its public key becomes a trusted root).
+    access_policy = None
+    access_block = get_access_block(ctx)
+    if access_block is not None:
+        from hermes_tenuo.access import AccessConfigError, build_access_policy
+
+        access_key = get_signing_key(ctx)
+        if access_key is None:
+            raise WarrantLoadError(
+                "access is configured but no signing key is set (signing_key_env / "
+                "TENUO_SIGNING_KEY) — every tool call is blocked until a key is available"
+            )
+        try:
+            access_policy = build_access_policy(
+                access_block, control_key=access_key, holder=access_key.public_key, signing_key=access_key,
+            )
+        except AccessConfigError as exc:
+            raise WarrantLoadError(f"{exc} — every tool call is blocked until access is fixed") from exc
 
     try:
         warrant_raw, source = resolve_warrant_text(ctx)
@@ -48,20 +70,24 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             f"TENUO_WARRANT cannot be read ({exc}) — "
             "every tool call is blocked until the warrant is fixed"
         ) from exc
-    if not warrant_raw:
+    if warrant_raw:
+        warrant = load_warrant(warrant_raw)
+        if warrant is None:
+            raise WarrantLoadError(
+                "TENUO_WARRANT is set but could not be loaded — "
+                "every tool call is blocked until the warrant is fixed"
+            )
+    elif access_policy is not None:
+        # Access mode supplies authority through the per-role warrants; a static
+        # warrant is optional (it would only cover non-gateway, local turns).
+        warrant = None
+    elif source == "none" or source.startswith("kanban:"):
         # Not configured, or a kanban worker with no staged task warrant
-        # (register() blocks that case). Anything else is an empty warrant.
-        if source == "none" or source.startswith("kanban:"):
-            return None
+        # (register() blocks that case).
+        return None
+    else:
         raise WarrantLoadError(
             f"TENUO_WARRANT is set but empty ({source}) — "
-            "every tool call is blocked until the warrant is fixed"
-        )
-
-    warrant = load_warrant(warrant_raw)
-    if warrant is None:
-        raise WarrantLoadError(
-            "TENUO_WARRANT is set but could not be loaded — "
             "every tool call is blocked until the warrant is fixed"
         )
     try:
@@ -100,6 +126,10 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         )
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
+    if access_policy is not None:
+        # The role warrants are issued by the gateway's own signing key; trust it
+        # so the guard accepts them. Harmless if already listed.
+        trusted_roots = list(trusted_roots or []) + [access_key.public_key]
     on_denial = get_on_denial(ctx)
 
     audit_callback = None
@@ -118,6 +148,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         audit_callback=audit_callback,
         require_session_warrant=get_require_session_warrant(ctx),
         delegation_plan=delegation_plan,
+        access_policy=access_policy,
     )
 
     return PluginGuard(guard)

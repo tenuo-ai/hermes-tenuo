@@ -47,6 +47,56 @@ class AccessConfigError(ValueError):
     """The access block is missing fields, malformed, or inconsistent."""
 
 
+# A message on a chat platform with no single sender (a shared feed). It matches
+# no ``user`` rule, so such a turn falls to the default role or is denied.
+NOBODY = "?"
+
+
+def current_sender() -> Optional[Dict[str, str]]:
+    """The current turn's sender, for role matching, or None off a gateway.
+
+    ``user`` and ``chat`` are ``"<platform>:<id>"``; ``platform`` is the bare
+    platform. The identity follows the message's actual sender where Hermes names
+    it (``HERMES_SESSION_ACTOR_ID``), so a shared group chat is authorised per
+    message rather than per session — the sender a model believes it is talking
+    to never changes who the tool call is authorised as. A messaging turn with no
+    single sender is ``NOBODY``. A non-gateway turn (CLI / local, no platform)
+    returns None so access does not govern it.
+    """
+    try:
+        from gateway import session_context as context
+    except Exception:
+        return None
+    try:
+        import inspect
+
+        read = context.get_session_env
+        platform = str(read("HERMES_SESSION_PLATFORM", "") or "")
+        if not platform:
+            return None
+        # Access governs only messaging (gateway) turns. A CLI, desktop or API turn
+        # has a platform too, but it is the operator, not a chat user: leave it to
+        # the static warrant (return None). Fall back to a small local-surface list
+        # on a Hermes without the messaging-surface check.
+        messaging = getattr(context, "session_is_messaging_surface", None)
+        is_messaging = messaging() if callable(messaging) else platform not in (
+            "cli", "desktop", "local", "api_server", "tui", "codex", "tool", "webhook")
+        if not is_messaging:
+            return None
+        chat = str(read("HERMES_SESSION_CHAT_ID", "") or "")
+        names_sender = "actor_id" in inspect.signature(context.set_session_vars).parameters
+        raw = read("HERMES_SESSION_ACTOR_ID" if names_sender else "HERMES_SESSION_USER_ID", "")
+        person = str(raw or "")
+        return {
+            "user": f"{platform}:{person}" if person else NOBODY,
+            "chat": f"{platform}:{chat}" if chat else "",
+            "platform": platform,
+        }
+    except Exception:
+        # Fail closed: an unreadable identity matches no role.
+        return {"user": NOBODY, "chat": "", "platform": ""}
+
+
 def _constraint(value: Any, where: str) -> Any:
     """Compile one friendly argument value to a Tenuo constraint.
 
@@ -167,9 +217,13 @@ class AccessConfig:
     default_role: Optional[str]  # name of the role for unmatched senders, or None = deny
 
     def role_for(self, *, user: str = "", chat: str = "", platform: str = "") -> Optional[Role]:
-        for role in self.roles:
-            if not role.is_default and role.matches(user, chat, platform):
-                return role
+        # An unattributable message (no single sender) can claim no specific role,
+        # not even a platform- or chat-wide one: it gets the default role, or is
+        # denied. Only an identified sender is matched against the roles.
+        if user != NOBODY:
+            for role in self.roles:
+                if not role.is_default and role.matches(user, chat, platform):
+                    return role
         if self.default_role is not None:
             return next(r for r in self.roles if r.name == self.default_role)
         return None

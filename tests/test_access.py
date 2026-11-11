@@ -216,3 +216,15 @@ def test_compiled_role_warrants_enforce_through_the_guard():
     assert not blocked("s-guest", "read_file", {"path": "/data/public/readme"})
     assert blocked("s-guest", "read_file", {"path": "/data/private/secret"})
     assert blocked("s-guest", "terminal", {"command": "ls"})                            # not granted
+
+
+def test_an_unattributable_sender_gets_only_the_default():
+    from hermes_tenuo.access import NOBODY
+    cfg = parse_access({"roles": {
+        "team": {"match": {"platform": ["telegram"]}, "allow": {"web_search": {}}},
+        "guest": {"default": True, "allow": {"web_search": {}}}}})
+    assert cfg.role_for(user="telegram:1", platform="telegram").name == "team"   # identified
+    assert cfg.role_for(user=NOBODY, platform="telegram").name == "guest"        # no sender -> default
+    # With no default, an unattributable sender is denied.
+    cfg2 = parse_access({"roles": {"team": {"match": {"platform": ["telegram"]}, "allow": {"web_search": {}}}}})
+    assert cfg2.role_for(user=NOBODY, platform="telegram") is None
