@@ -68,23 +68,10 @@ see [docs/walkthrough.md](walkthrough.md).
 
 ## Install into Hermes
 
-For 0.4.0 candidate testing, use the exact-commit installation instructions in the [README](../README.md). Do not mix catalog and development installs.
-
-**1. Install.** hermes-tenuo is in the
-[Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/hermes-tenuo).
-On Hermes Agent 0.21.2 or newer, install it by catalog name to get the
-reviewed, pinned commit:
+Install hermes-tenuo 0.4.0 on the Hermes server:
 
 ```bash
-hermes plugins install hermes-tenuo
-hermes plugins enable hermes-tenuo
-```
-
-Hermes 0.20 to 0.21.1 can't install by catalog name. Install from GitHub
-instead, which tracks the default branch rather than the reviewed pin:
-
-```bash
-hermes plugins install tenuo-ai/hermes-tenuo
+hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
 hermes plugins enable hermes-tenuo
 ```
 
@@ -93,9 +80,8 @@ in the next step, so leave both empty for now. `enable` installs the `tenuo` and
 dependencies into the Hermes runtime.
 
 If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead. That also puts the `hermes-tenuo` command on your path, so you can
-drop the `uvx` prefix below. To run the latest unreleased code:
-`pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
+instead, pinned to `hermes-tenuo==0.4.0`. That also puts the
+`hermes-tenuo` command on your path, so you can drop the `uvx` prefix below.
 
 Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
 the plugin loader of upstream Hermes `main` using both install routes; the

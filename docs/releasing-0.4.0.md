@@ -21,6 +21,20 @@ Keep the operational disclosures in the catalog draft: optional listener,
 commands/results sent to the server, network off by default, platform sandbox
 requirements, and browser/MCP tools staying on the server.
 
+## Testing before the release exists
+
+The user guides describe the published 0.4.0 experience. Until the tag and PyPI
+package exist, maintainers test the candidate commit instead:
+
+```sh
+hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA
+hermes plugins enable hermes-tenuo
+uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo --version
+```
+
+Use that same CLI prefix for candidate commands, including generated setup
+commands. This substitution belongs in release testing, not user onboarding.
+
 ## Before publication
 
 - Verify the candidate commit through both Hermes install routes. Test a clean
@@ -31,14 +45,14 @@ requirements, and browser/MCP tools staying on the server.
   setup/pair, verify, read/write, sandbox exclusions, redaction and disconnect.
 - Complete the first-session demo in Desktop and a messaging gateway on supported
   macOS/Linux devices; record Hermes versions. Backend tests do not prove UI behavior.
-- Keep catalog/PyPI install instructions explicitly conditional until available.
+- Do not announce the user walkthrough until its v0.4.0 tag and PyPI package exist.
 - Check version agreement across pyproject, plugin manifest, source version and lockfile.
 - Record outstanding validation below; do not publish with unchecked required gates.
 
 ## Publication and catalog order (separate approval/action)
 
-1. Mark the changelog released and replace candidate README instructions with
-   pinned `0.4.0` client instructions and the actual release commit server install.
+1. Mark the changelog released. Confirm the user guides target `v0.4.0` and the
+   published CLI; keep prerelease testing substitutions in this checklist only.
 2. Tag the reviewed commit `v0.4.0`; the publication workflow validates the tag,
    artifacts and isolated installed-wheel smoke checks before PyPI publication.
 3. Verify a fresh `uvx --from hermes-tenuo==0.4.0 hermes-tenuo --version` and

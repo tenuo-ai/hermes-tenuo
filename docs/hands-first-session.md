@@ -6,17 +6,16 @@ Supported devices: macOS with sandbox-exec, or Linux with working bubblewrap. Na
 
 ## 1. Install and enable on the server
 
-For the unpublished 0.4.0 candidate, replace `COMMIT_SHA` with the exact reviewed
-commit. In the Hermes environment/profile serving your chat:
+In the Hermes environment/profile serving your chat:
 
 ```sh
-hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA
+hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
 hermes plugins enable hermes-tenuo
 ```
 
 Hands needs no manually minted warrant. Leave the optional enforcement credentials empty if you only want Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
 
-**Before the catalog update:** the catalog still points to an older release without Hands. PR reviewers should install this PR's commit using `hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA`, and run the laptop CLI from the same commit with `uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo …`. Replace the `uvx hermes-tenuo` prefix in generated setup commands as well. Do not advertise the catalog walkthrough as released until the checklist below is complete.
+Hands requires hermes-tenuo 0.4.0 or newer on both the server and laptop.
 
 ## 2. Configure the connection once
 
@@ -29,10 +28,12 @@ The laptop connects outward; it needs no incoming port. Keep the laptop awake an
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if `uvx` is not available, then run:
 
 ```sh
-uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo hands demo
+uvx --refresh hermes-tenuo --version
+uvx hermes-tenuo hands demo
 ```
 
-It prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
+The version command refreshes any older cached CLI; check that it reports 0.4.0 or newer.
+The demo prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
 
 ## 4. Choose permissions and connect
 
@@ -68,16 +69,6 @@ The laptop prints a reconnect command that preserves your choices and the origin
 | Install/download fails | Internet is off in read/edit shares. Choose online only if you want that access, then restart locally. |
 | Device disconnected or expired | Inspect the laptop terminal and use its reconnect command. No silent server fallback occurs. |
 | Outcome unknown | Check the device and files before retrying; a lost reply does not mean a command failed. |
-
-## Release validation before repinning
-
-- Publish the laptop package containing these changes before updating the reviewed catalog SHA.
-- Update marketplace description, permission disclosures and demo to cover Hands; preserve the existing authorization feature documentation.
-- From clean supported macOS and Ubuntu installations, complete this walkthrough through Desktop and a messaging gateway. Record actual versions and results; automated tool-dispatch tests are not a substitute for UI checks.
-- Exercise unreachable server, missing sandbox, expired invite, laptop disconnect and offline dependency-install cases.
-- Confirm read-only leaves files unchanged; edit stays offline; online is explicitly chosen.
-- Confirm the catalog install and the default `uvx` package interoperate and show the same permissions.
-- Repin only after those checks pass. This PR does not publish or change the upstream catalog pin.
 
 ## Preview and keep private files out
 
