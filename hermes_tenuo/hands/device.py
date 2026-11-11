@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from hermes_tenuo.hands import sandbox, wire
+from hermes_tenuo.hands.paths import workspace
 from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
 
 MAX_OUTPUT = 8 * 1024 * 1024
@@ -446,13 +447,11 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
-    real = os.path.realpath(os.path.expanduser(folder))
-    if not os.path.isdir(real):
-        found.append((False, f"{folder} is not a folder"))
-    elif real in ("/", os.path.realpath(os.path.expanduser("~"))):
-        found.append((False, "point Hands at a project folder, not your home folder or /"))
-    else:
-        found.append((True, f"folder to share: {real}"))
+    try:
+        real = workspace(folder).root
+    except ValueError as exc:
+        return [(False, str(exc))]
+    found.append((True, f"folder to share: {real}"))
     state = os.path.realpath(home())
     if _within(state, real) or _within(real, state):
         found.append((False, f"the shared folder and Hands's own folder ({state}) must be separate"))
@@ -539,11 +538,11 @@ class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
                  allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
                  plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False):
-        self.folder = os.path.realpath(os.path.expanduser(folder))
-        if not os.path.isdir(self.folder):
-            raise HandsError(f"{folder} is not a folder")
-        if self.folder in ("/", os.path.realpath(os.path.expanduser("~"))):
-            raise HandsError("point Hands at a project folder, not your home folder or /")
+        try:
+            self._workspace = workspace(folder)
+        except ValueError as exc:
+            raise HandsError(str(exc)) from exc
+        self.folder = self._workspace.root
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
         self.config_home = str(policy_file().parent.parent.resolve())
@@ -744,10 +743,13 @@ class Device:
         wire.check(chain, self.key.public_key, wire.TOOL, args, job["pop"])
         # The warrants were checked against the folder as written, so it must be the real
         # path: a link inside an allowed folder must not lead the command somewhere else.
-        real = os.path.realpath(where)
+        try:
+            real = self._workspace.contains(where)
+        except (OSError, ValueError) as exc:
+            raise HandsError("the command is for a folder this device isn't serving") from exc
         if real != where:
             raise HandsError("the command names its folder through a link; it must use the real path")
-        if not (real == self.folder or real.startswith(self.folder + os.sep)) or not os.path.isdir(real):
+        if not os.path.isdir(real):
             raise HandsError("the command is for a folder this device isn't serving")
         self._seen.add(job_id)
         return real

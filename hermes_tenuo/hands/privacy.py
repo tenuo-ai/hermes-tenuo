@@ -145,9 +145,8 @@ class Redactor:
 
 def preview(args, duration: int) -> list[str]:
     from . import device, wire
-    folder = os.path.realpath(os.path.expanduser(args.dir))
-    if not os.path.isdir(folder) or folder in ("/", str(Path.home().resolve())):
-        raise ValueError("point Hands at a project folder, not your home folder or /")
+    from .paths import workspace
+    folder = workspace(args.dir).root
     paths = exclusions(folder)
     kind = ("sandbox-exec" if sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec")
             else "bubblewrap (not probed)" if sys.platform.startswith("linux") and shutil.which("bwrap") else None)
