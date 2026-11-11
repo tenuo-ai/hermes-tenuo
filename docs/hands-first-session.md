@@ -53,7 +53,7 @@ Inspect `invoice.py` locally and run the tests yourself. No package installation
 
 Press Ctrl-C in the laptop's sharing terminal. Its commands and background processes stop; file edits remain. `/hands status` should show the device as not answering. `/hands off` sends the conversation back to the server. **Using `/hands off` alone does not end the laptop grant.** For a whole profile with `terminal.backend: hands`, change the profile's terminal backend to return to the server; `/hands off` cannot switch it. Delete the practice folder when done.
 
-The laptop prints a reconnect command that preserves your choices and the original `TENUO_HANDS_HOME` identity directory, and excludes the consumed invite. Running it locally grants a new time window. After revocation, request a new invite instead.
+The laptop prints a reconnect command that preserves your choices and the original `TENUO_HANDS_HOME` identity directory and configured `SSL_CERT_FILE` CA path (made absolute at startup), and excludes the consumed invite. Running it locally grants a new time window. After revocation, request a new invite instead.
 
 ## When something goes wrong
 

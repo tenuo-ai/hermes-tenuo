@@ -539,6 +539,10 @@ class Device:
             raise HandsError("the time window must be positive")
         self.ttl_seconds = ttl_seconds
         self.plain_http = plain_http
+        # A command-local CA setting disappears in a fresh shell. Resolve it now,
+        # before a reconnect can be printed or run from a different directory.
+        ca_file = os.environ.get("SSL_CERT_FILE")
+        self.ssl_cert_file = os.path.abspath(ca_file) if ca_file else ""
         self.allow_unsandboxed = allow_unsandboxed
         self.read_only = read_only  # commands may look at the folder and not change it
         self.network = network      # commands may use the internet (to install, clone, download)
@@ -1150,8 +1154,11 @@ class Device:
 
     def reconnect_command(self) -> str:
         """A fresh local consent action; never include the consumed invite or its secret."""
-        args = ["env", f"TENUO_HANDS_HOME={self.state}", "uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
-                "--for", f"{self.ttl_seconds}s", "--name", self.name]
+        args = ["env", f"TENUO_HANDS_HOME={self.state}"]
+        if self.ssl_cert_file:
+            args.append(f"SSL_CERT_FILE={self.ssl_cert_file}")
+        args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
+                     "--for", f"{self.ttl_seconds}s", "--name", self.name])
         for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
                               (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox")):
             if enabled:

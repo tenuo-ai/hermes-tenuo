@@ -203,3 +203,31 @@ def test_reconnect_uses_original_identity_from_a_fresh_shell(hub, folder, tmp_pa
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == [original.url, original.me]
     assert not (tmp_path / 'different-state').exists()
+
+
+@pytest.mark.parametrize('relative', [False, True])
+def test_reconnect_preserves_ca_path_from_original_directory(hub, folder, tmp_path, monkeypatch, relative):
+    ca_file = tmp_path / 'private CA.pem'
+    ca_file.write_text('original CA file')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('SSL_CERT_FILE', ca_file.name if relative else str(ca_file))
+    original = device.Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv('SSL_CERT_FILE', 'different.pem')
+    args = shlex.split(original.reconnect_command())
+    # Execute the actual printed environment prefix in a fresh process, from a
+    # different cwd, with a conflicting inherited CA value and spaces in the path.
+    prefix = args[:args.index('uvx')]
+    script = ('import os; from pathlib import Path; '
+              'p=Path(os.environ["SSL_CERT_FILE"]); assert p.is_absolute(); print(p.read_text())')
+    done = subprocess.run(prefix + [sys.executable, '-c', script], capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == 'original CA file'
+
+
+def test_reconnect_does_not_add_an_unconfigured_ca(hub, folder, monkeypatch):
+    monkeypatch.delenv('SSL_CERT_FILE', raising=False)
+    original = device.Device(hub.invite(), str(folder), 60, allow_unsandboxed=True)
+    assert not any(arg.startswith('SSL_CERT_FILE=') for arg in shlex.split(original.reconnect_command()))
