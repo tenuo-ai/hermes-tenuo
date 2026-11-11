@@ -4,6 +4,10 @@
 
 ### Hands
 
+- Reuse Tenuo’s Python `path-jail` for workspace selection and signed command
+  directory containment. Keep sandbox enforcement and the canonical-path rule
+  for commands; this is validation at call time, not descriptor-pinned access.
+
 - Preview sharing locally with `hands up --preview`, without connecting or pairing.
 - Enforce personal literal-path exclusions from `~/.config/hermes-tenuo/never-share`
   in both terminal and file operations; retain the policy location on reconnect.

@@ -23,6 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    "path-jail>=0.3,<0.4",
     "tenuo>=0.3.6,<0.4",
 ]
 
