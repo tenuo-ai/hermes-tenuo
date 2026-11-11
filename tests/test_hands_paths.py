@@ -111,3 +111,31 @@ def test_untraversable_workspace_is_a_handled_device_failure(folder, monkeypatch
     with pytest.raises(device.HandsError, match='cannot inspect workspace'):
         device.Device(None, str(folder), 60)
     assert not device.home().exists()
+
+
+@pytest.mark.parametrize('command,preview', [('check', False), ('up', False), ('up', True)])
+def test_unknown_user_home_is_a_handled_cli_failure(monkeypatch, capsys, command, preview):
+    import pwd
+    from types import SimpleNamespace
+    from hermes_tenuo.cli import cmd_hands
+    original = pwd.getpwnam
+    def unknown(name):
+        if name == 'hands-nonexistent-user':
+            raise KeyError(name)
+        return original(name)
+    monkeypatch.setattr(pwd, 'getpwnam', unknown)
+    args = SimpleNamespace(hands_command=command, preview=preview, invite=None,
+                           dir='~hands-nonexistent-user/project', ttl='1h', name=None,
+                           read_only=False, network=False, no_sandbox=False,
+                           plain_http=False, read_home=False, read=None)
+    assert cmd_hands(args) == 1
+    captured = capsys.readouterr()
+    assert 'cannot inspect workspace' in captured.out + captured.err
+
+
+def test_unknown_user_home_is_a_handled_device_failure(monkeypatch):
+    def unresolved(path):
+        raise RuntimeError('Could not determine home directory')
+    monkeypatch.setattr(Path, 'expanduser', unresolved)
+    with pytest.raises(device.HandsError, match='cannot inspect workspace'):
+        device.Device(None, '~hands-nonexistent-user/project', 60)
