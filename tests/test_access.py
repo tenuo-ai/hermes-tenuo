@@ -57,7 +57,7 @@ def test_bad_config_fails_closed(block, message):
 
 
 def test_default_role_and_on_unmatched_must_agree():
-    with pytest.raises(AccessConfigError, match="must agree"):
+    with pytest.raises(AccessConfigError, match="conflicts with the default role"):
         parse_access({
             "roles": {"a": {"default": True, "allow": {"t": {}}},
                       "b": {"match": {"user": ["u"]}, "allow": {"t": {}}}},
@@ -228,3 +228,74 @@ def test_an_unattributable_sender_gets_only_the_default():
     # With no default, an unattributable sender is denied.
     cfg2 = parse_access({"roles": {"team": {"match": {"platform": ["telegram"]}, "allow": {"web_search": {}}}}})
     assert cfg2.role_for(user=NOBODY, platform="telegram") is None
+
+
+def test_mixed_and_unknown_constraint_keys_are_rejected():
+    from hermes_tenuo.access import _constraint
+    import pytest as _pt
+    for bad in ({"subpath": "/a", "exact": "/b"}, {"wildcard": True, "subpath": "/a"},
+                {"subpath": "/a", "binaries": ["git"]}, {"nope": 1}, {"wildcard": "false"}):
+        with _pt.raises(AccessConfigError):
+            _constraint(bad, "where")
+    from tenuo import Subpath, Wildcard, Exact
+    assert isinstance(_constraint({}, "w"), Wildcard)
+    assert isinstance(_constraint({"subpath": "/a"}, "w"), Subpath)
+    assert isinstance(_constraint("/a/**", "w"), Subpath)
+    assert isinstance(_constraint({"exact": "x"}, "w"), Exact)
+
+
+def test_advanced_constraints_are_validated_not_silently_dropped():
+    with pytest.raises(AccessConfigError, match="patterns"):
+        parse_access({"roles": {"r": {"match": {"user": ["u"]}, "allow": {
+            "terminal": {"command": {"binaries": ["git"], "patterns": ""}}}}}})
+    with pytest.raises(AccessConfigError, match="binaries"):
+        parse_access({"roles": {"r": {"match": {"user": ["u"]}, "allow": {
+            "terminal": {"command": {"binaries": "git"}}}}}})   # a string is not a list
+    with pytest.raises(AccessConfigError, match="range"):
+        parse_access({"roles": {"r": {"match": {"user": ["u"]}, "allow": {
+            "wait": {"seconds": {"range": [1]}}}}}})
+
+
+def test_default_must_be_a_real_boolean():
+    with pytest.raises(AccessConfigError, match="default must be true or false"):
+        parse_access({"roles": {"r": {"default": "false", "allow": {"web_search": {}}}}})
+
+
+def test_explicit_deny_conflicts_with_a_default_role():
+    with pytest.raises(AccessConfigError, match="deny conflicts with the default role"):
+        parse_access({"roles": {"g": {"default": True, "allow": {"web_search": {}}}}, "on_unmatched": "deny"})
+    # deny with no default is fine (fail closed).
+    cfg = parse_access({"roles": {"owner": {"match": {"user": ["u"]}, "allow": {"web_search": {}}}}, "on_unmatched": "deny"})
+    assert cfg.default_role is None
+
+
+def test_role_warrants_are_reminted_before_they_expire():
+    import time
+    control = tenuo.SigningKey.generate()
+    gateway = tenuo.SigningKey.generate()
+    from hermes_tenuo.access import build_access_policy
+    pol = build_access_policy({"roles": {"owner": {"match": {"user": ["u"]}, "allow": {"web_search": {}}}}},
+                              control_key=control, holder=gateway.public_key, signing_key=gateway, ttl_seconds=3600)
+    w1, _ = pol.warrant_for(user="u")
+    assert pol.warrant_for(user="u")[0] is w1               # cached while fresh
+    pol._warrants["owner"] = (w1, time.monotonic() - 4000)  # pretend it aged past the TTL
+    w2, _ = pol.warrant_for(user="u")
+    assert w2 is not w1                                     # re-minted, so authority does not lapse
+
+
+def test_role_warrant_renews_when_wall_time_outpaces_monotonic(monkeypatch):
+    import time
+    from hermes_tenuo.access import build_access_policy
+
+    key = tenuo.SigningKey.generate()
+    monkeypatch.setattr(time, "monotonic", lambda: 1000)
+    policy = build_access_policy(
+        {"roles": {"guest": {"default": True, "allow": ["web_search"]}}},
+        control_key=key, holder=key.public_key, signing_key=key, ttl_seconds=2,
+    )
+    first, _ = policy.warrant_for()
+    time.sleep(2.1)  # SDK expiry uses wall time; monotonic deliberately stays fixed.
+    assert first.is_expired()
+    renewed, _ = policy.warrant_for()
+    assert renewed is not first
+    assert not renewed.is_expired()

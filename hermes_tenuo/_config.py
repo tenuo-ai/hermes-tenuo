@@ -179,6 +179,15 @@ def get_access_block(ctx: Any) -> Optional[dict]:
     return block if block is not None else None
 
 
+def get_signing_key_raw(ctx: Any) -> Optional[str]:
+    """The configured signing-key secret as text (not decoded), or None if unset.
+
+    Lets a caller tell a signing key that is absent (provision one) from one that is
+    set but cannot be decoded (a misconfiguration that must fail closed)."""
+    entry = _get_plugin_entry(ctx)
+    return _env_secret(entry.get("signing_key_env", "TENUO_SIGNING_KEY"))
+
+
 def get_trusted_roots(ctx: Any) -> Optional[List[Any]]:
     """Return list of trusted PublicKeys from env or config, or None."""
     entry = _get_plugin_entry(ctx)

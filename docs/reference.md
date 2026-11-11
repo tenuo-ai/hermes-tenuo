@@ -215,12 +215,67 @@ Point `warrant:` at that file. Set `trusted_root` to the base64 of
 |---|---|---|
 | **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
 | **Subagents via `delegate_task`** | Attenuate the parent's warrant for each child | Every child gets a fresh holder key and a verified chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts and `guard.clear_session_warrant(session_id)` when it ends | That user's tools follow that warrant on every turn until you clear it. A cleared session is denied; it never falls back to the config warrant. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
+| **Multi-user gateways** | Add an [`access:`](#role-based-access-for-the-gateway) block of roles, or call `guard.set_session_warrant(session_id, warrant)` yourself | Each user's tools follow their role (or warrant) every turn. A cleared session is denied; it never falls back to the config warrant. Sessionless calls from `execute_code` are attributed by task id and blocked if ambiguous. |
 | **Kanban workers** | `hermes-tenuo mint --task <id> --issuer-key issuer.key --holder-public-key holder.pub --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant`, signed by the issuer the worker's `trusted_root` names; a denial auto-blocks the task on the board |
 | **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
 
 Runnable versions of the first three live in
 [`examples/`](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
+
+## Role-based access for the gateway
+
+For a shared gateway (several people in one Telegram/Discord/Slack chat), an
+`access:` block gives each person a role, with no code and no keys to manage:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      access:
+        roles:
+          owner:
+            match: { user: ["telegram:12345", "discord:67890"] }
+            allow:
+              terminal:   { command: { binaries: ["git", "ls"] } }
+              read_file:  { path: "/data/**" }
+              write_file: { path: "/data/**" }
+              web_search: {}
+          analyst:
+            match: { platform: ["telegram"] }
+            allow:
+              read_file:  { path: "/data/reports/**" }
+              web_search: {}
+          guest:
+            default: true          # everyone not matched above
+            allow:
+              web_search: {}
+        on_unmatched: guest
+```
+
+- **Who.** `match` lists `user`, `chat` and/or `platform` (all given
+  dimensions must hold). `user` and `chat` are `"<platform>:<id>"`. Roles are
+  tried in order, then the `default` role; `on_unmatched: deny` blocks a
+  sender no role matches. At most one role may be the `default`. To deny
+  unmatched senders in the example, remove the guest role’s `default: true`
+  and set `on_unmatched: deny`; an explicit deny cannot coexist with a default.
+- **What.** `allow` maps a tool to its argument constraints. A tool mapped to
+  `{}` (or listed in `allow: [web_search, read_file]`) is allowed with no
+  constraints. An argument value is `"*"` (any), `"/path/**"` (any path under
+  it), a literal, or `{ binaries: [...] }` / `{ patterns: ["^...$"] }` /
+  `{ range: [min, max] }`. A constrained tool still accepts its other
+  arguments unless the tool sets `strict: true`.
+- **Per message, not per session.** Authority follows the message's sender,
+  so in a shared chat each person is authorised as themselves — the user a
+  model believes it is replying to never changes who a call runs as. A message
+  with no single sender gets only the default role, or is denied.
+- **Keys.** None to manage: the plugin signs the role warrants with a key it
+  creates once under `$HERMES_HOME/tenuo/access.key` (set `TENUO_SIGNING_KEY`
+  to use your own instead). `hermes-tenuo doctor` lists the roles and checks
+  they compile.
+- **Scope.** Access governs messaging turns. A local CLI or desktop turn (the
+  operator) is not governed by it, and `delegate_task` children keep their
+  attenuated warrants. A static `warrant:` is optional and covers those local
+  turns.
 
 ## Hands: let your server's agent use your own machine
 

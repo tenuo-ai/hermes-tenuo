@@ -526,6 +526,13 @@ class HermesGuard:
         if entry is not None:
             return entry
 
+        # Once a marker has been evicted, a session with no warrant of its own
+        # may be one that was denied. It gets nothing — not a role warrant, not a
+        # staged child grant below, and not the config warrant. Explicit bindings
+        # above still win; this fail-closed guard comes before access resolution.
+        if self._overflowed:
+            return _UNTRACKED, None
+
         # Role-based access governs identified gateway turns. The warrant follows
         # the message's sender (not the session), so a shared group chat is
         # authorised per message; a sender no role grants is blocked, never
@@ -537,12 +544,6 @@ class HermesGuard:
             if ident is not None:
                 warrant, key = self._access_policy.warrant_for(**ident)
                 return (warrant, key) if warrant is not None else (_NO_ROLE, None)
-
-        # Once a marker has been evicted, a session with no warrant of its own
-        # may be one that was denied. It gets nothing: not a staged child grant
-        # below, and not the config warrant.
-        if self._overflowed:
-            return _UNTRACKED, None
 
         if self._planned_children and not self._saw_subagent_start:
             # Fallback for a Hermes build that does not fire subagent_start:
@@ -1078,9 +1079,11 @@ class HermesGuard:
             return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
 
         # No warrant on this call: an unconfigured single-agent guard is a
-        # documented no-op.
+        # documented no-op. In access mode this is only a non-gateway turn
+        # (CLI/local) falling through — gateway turns are enforced by role, so
+        # the audit-only warning would be misleading and is suppressed.
         if warrant is None:
-            if not self._audit_only_warned:
+            if self._access_policy is None and not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
                     "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "

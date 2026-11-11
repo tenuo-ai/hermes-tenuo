@@ -547,12 +547,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if child_raw is not None and load_warrant(child_raw) is None:
                 problem = "child warrant is set but could not be loaded"
 
+    from hermes_tenuo._config import get_access_block, get_signing_key_raw
     configured = warrant is not None and problem is None
     if problem is not None:
         check(False, f"plugin configured (warrant): {problem}", blocks)
+    elif configured:
+        check(True, "plugin configured (warrant)")
+    elif get_access_block(None) is not None:
+        note("no static warrant — role-based access (below) is the tool-call authority")
     else:
         check(
-            configured,
+            False,
             "plugin configured (warrant)",
             "set TENUO_WARRANT / warrant: for general tool-call authorization. "
             "Hands device grants are independent. Run doctor after configuration.",
@@ -644,6 +649,70 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
                 else:
                     check(True, "delegation plan loads")
+
+    # 8b. Access: role-based gateway authorization, if configured.
+    access_block = get_access_block(None)
+    if access_block is not None:
+        from hermes_tenuo.access import (
+            AccessConfigError,
+            access_key_path,
+            build_access_policy,
+            load_access_key,
+            parse_access,
+        )
+        try:
+            cfg = parse_access(access_block)
+        except AccessConfigError as exc:
+            check(False, f"access config: {exc}", blocks)
+        else:
+            check(True, f"access: {len(cfg.roles)} role(s); unmatched senders → {cfg.default_role or 'deny'}")
+            configured = get_signing_key_raw(None)
+            key = None
+            if configured:
+                try:
+                    from tenuo_core import SigningKey
+                    key = SigningKey.from_bytes(_b64_to_bytes(configured))
+                    note("access: signs role warrants with the configured key")
+                except Exception as exc:
+                    check(False, f"access signing key could not be loaded: {exc}", blocks)
+            else:
+                key = load_access_key()
+                if key is not None:
+                    note(f"access: using the provisioned key at {access_key_path()}")
+                else:
+                    note(f"access: a signing key is auto-provisioned at {access_key_path()} on first start")
+            if key is None:
+                from tenuo_core import SigningKey
+                key = SigningKey.generate()  # ephemeral, only to compile-check the roles
+            try:
+                build_access_policy(access_block, control_key=key, holder=key.public_key, signing_key=key)
+                check(True, "access: every role compiles to a warrant")
+                for role in cfg.roles:
+                    note(f"  role {role.name}: {', '.join(sorted(role.capabilities)) or '(no tools)'}")
+            except (AccessConfigError, ValueError, TypeError) as exc:
+                check(False, f"access role: {exc}", blocks)
+
+        # The child-warrant and delegation-plan files are loaded at startup whether
+        # or not a static warrant is set, but the warrant block above checks them
+        # only when one is. For an access-only install, check them here too.
+        if warrant is None:
+            plan_path = get_delegation_plan_path(None)
+            if plan_path:
+                from hermes_tenuo.delegation import DelegationPlanError, load_plan
+                try:
+                    load_plan(plan_path)
+                    check(True, "delegation plan loads")
+                except DelegationPlanError as exc:
+                    check(False, f"delegation plan: {exc}", blocks)
+            try:
+                child_raw = get_child_warrant_raw(None)
+            except OSError as exc:
+                check(False, f"child warrant path cannot be read: {exc}", blocks)
+            else:
+                if child_raw is not None and load_warrant(child_raw) is None:
+                    check(False, "child_warrant is set but could not be loaded", blocks)
+                elif child_raw is not None and plan_path:
+                    check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
 
     # 9. on_denial
     on_denial = config_entry.get("on_denial", "block")
