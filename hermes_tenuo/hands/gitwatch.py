@@ -36,6 +36,7 @@ _ENTRY = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?$", re.S)
 _LIMIT = 1 << 20      # bytes read from one settings file
 _FILES = 8            # settings files followed through includes
 _ENTRIES = 200        # entries looked at in one hooks folder
+_HOOK_BYTES = 4 << 20  # hook programs read in one look, in total
 _UNCHECKED = "cannot be checked"
 
 
@@ -112,6 +113,28 @@ def _logical_lines(text: str) -> List[str]:
     return out
 
 
+def _value(raw: str) -> str:
+    """A setting's value as git reads it: quotes and escapes decoded, a comment dropped."""
+    out: List[str] = []
+    quoted, keep, i = False, 0, 0   # keep: how much of `out` survives trimming trailing spaces
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\" and i + 1 < len(raw):
+            out.append({"n": "\n", "t": "\t", "b": "\b"}.get(raw[i + 1], raw[i + 1]))
+            i, keep = i + 2, len(out)
+            continue
+        if ch == '"':
+            quoted, i, keep = not quoted, i + 1, len(out)
+            continue
+        if not quoted and ch in "#;":
+            break
+        out.append(ch)
+        if quoted or not ch.isspace():
+            keep = len(out)
+        i += 1
+    return "".join(out[:keep])
+
+
 def _entries(text: str) -> List[Tuple[str, str, str, str]]:
     """(section, subsection, key, value) for each setting in a config file's text."""
     found: List[Tuple[str, str, str, str]] = []
@@ -122,11 +145,38 @@ def _entries(text: str) -> List[Tuple[str, str, str, str]]:
             section, sub, line = header.group(1).lower(), header.group(2) or "", header.group(3)
         entry = _ENTRY.match(line)
         if entry and section:
-            found.append((section, sub, entry.group(1).lower(), (entry.group(2) or "").strip()))
+            found.append((section, sub, entry.group(1).lower(), _value(entry.group(2) or "")))
     return found
 
 
-def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str]) -> None:
+def _hook_mark(fd: int, name: str, budget: List[int]) -> Optional[str]:
+    """A fingerprint of one hook's program and mode, or None if it cannot be read safely."""
+    try:
+        hook = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0), dir_fd=fd)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(hook)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > budget[0]:
+            return None
+        digest, left = hashlib.sha256(), info.st_size + 1
+        while left > 0:
+            chunk = os.read(hook, min(65536, left))
+            if not chunk:
+                break
+            digest.update(chunk)
+            left -= len(chunk)
+        if left <= 0:
+            return None                      # it grew while being read
+        budget[0] -= info.st_size
+        return f"{stat.S_IMODE(info.st_mode):o}:{digest.hexdigest()[:16]}"
+    except OSError:
+        return None
+    finally:
+        os.close(hook)
+
+
+def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int]) -> None:
     try:
         fd = _open(folder_fd, relative, directory=True)
     except FileNotFoundError:
@@ -142,15 +192,55 @@ def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str]) -> 
                     break
                 if entry.name.endswith(".sample"):
                     continue
+                mark = _hook_mark(fd, entry.name, budget)
+                if mark is not None:
+                    found[f"{label}/{entry.name}"] = mark
+                    continue
+                # A link, a pipe, a folder or something too large: say so, and still notice
+                # when it is replaced.
                 try:
                     info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                    seen = f"{info.st_mode}:{info.st_size}:{info.st_mtime_ns}:{info.st_ino}"
                 except OSError:
-                    continue
-                found[f"{label}/{entry.name}"] = f"{info.st_size}:{info.st_mtime_ns}:{info.st_mode}:{info.st_ino}"
+                    seen = "gone"
+                found[f"{label}/{entry.name} ({_UNCHECKED})"] = seen
     except OSError:
         found[f"{label} ({_UNCHECKED})"] = "unchecked"
     finally:
         os.close(fd)
+
+
+def _git_dirs(folder: str, folder_fd: int, kind: int, found: Dict[str, str]) -> List[str]:
+    """The repository's own folders inside *folder* (relative to it) that hold its settings."""
+    if stat.S_ISDIR(kind):
+        dirs = [".git"]
+    elif stat.S_ISREG(kind):
+        # A pointer file. Its target matters only inside the folder: commands cannot
+        # change anything outside it.
+        try:
+            text = _read(folder_fd, ".git") or ""
+        except OSError:
+            found[f".git ({_UNCHECKED})"] = "unchecked"
+            return []
+        pointer = re.match(r"gitdir:[ \t]*(.+)", text.strip())
+        target = _inside(folder, pointer.group(1).strip(), "") if pointer else None
+        if target in (None, "."):
+            return []
+        dirs = [target]
+    else:
+        found[f".git ({_UNCHECKED})"] = "unchecked"
+        return []
+    for gitdir in list(dirs):   # a worktree keeps its settings and hooks in a shared folder
+        name = os.path.join(gitdir, "commondir")
+        try:
+            common = _read(folder_fd, name)
+        except OSError:
+            found[f"{name} ({_UNCHECKED})"] = "unchecked"
+            continue
+        target = _inside(folder, common.strip(), gitdir) if common else None
+        if target not in (None, ".") and target not in dirs:
+            dirs.append(target)
+    return dirs
 
 
 def settings(folder: str) -> Dict[str, str]:
@@ -168,11 +258,10 @@ def settings(folder: str) -> Dict[str, str]:
     except OSError:
         return found          # no repository here
     try:
-        if stat.S_ISREG(kind):
-            return found      # a worktree's pointer: its settings live outside the folder
-        if not stat.S_ISDIR(kind):
-            return {f".git ({_UNCHECKED})": "unchecked"}
-        queue, seen, hook_folders = [os.path.join(".git", "config")], set(), []
+        git_dirs = _git_dirs(folder, folder_fd, kind, found)
+        queue = [os.path.join(gitdir, "config") for gitdir in git_dirs]
+        seen: set = set()
+        hook_folders: List[str] = []
         while queue:
             relative = queue.pop(0)
             if relative in seen:
@@ -191,20 +280,23 @@ def settings(folder: str) -> Dict[str, str]:
             for section, sub, key, value in _entries(text):
                 name = ".".join(part for part in (section, sub, key) if part)
                 if (section, key) in (("include", "path"), ("includeif", "path")):
-                    target = _inside(folder, value.strip('"'), os.path.dirname(relative))
-                    if target is not None:
+                    target = _inside(folder, value, os.path.dirname(relative))
+                    if target not in (None, "."):
                         queue.append(target)
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
-                    target = _inside(folder, value.strip('"'), "")
-                    if target is not None:
+                    target = _inside(folder, value, "")
+                    if target not in (None, "."):
                         hook_folders.append(target)
                 elif (f"{section}.{key}" in _RUNS or key in _RUNS_IN.get(section, ())
-                        or section == "pager" or (section == "alias" and value.lstrip('" ').startswith("!"))):
+                        or section == "pager" or (section == "alias" and value.lstrip().startswith("!"))):
                     found[name] = _digest(found.get(name, "") + value)
-        _hooks(folder_fd, os.path.join(".git", "hooks"), "hooks", found)
+        budget = [_HOOK_BYTES]
+        for gitdir in git_dirs:
+            hooks = os.path.join(gitdir, "hooks")
+            _hooks(folder_fd, hooks, "hooks" if gitdir == ".git" else hooks, found, budget)
         for target in hook_folders[:4]:
-            _hooks(folder_fd, target, target, found)
+            _hooks(folder_fd, target, target, found, budget)
         return found
     finally:
         os.close(folder_fd)

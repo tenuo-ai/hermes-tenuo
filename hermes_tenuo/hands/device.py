@@ -1146,33 +1146,41 @@ class Device:
         self._deliver(job_id, output, code)
 
     def _git_note(self) -> None:
-        """Tell the person when a command changed what git will run in this folder."""
+        """Tell the person when a command changed what git will run in this folder.
+
+        Advice only: nothing here may keep a result from being sent or cleanup from running.
+        """
         if self.read_only:
             return
         try:
             now = gitwatch.settings(self.folder)
-        except Exception:  # noqa: BLE001 - a note must never keep a result from being sent
+            new, self._git_seen = gitwatch.changed(self._git_seen, now), now
+            if not new:
+                return
+            # A name can carry a secret (a credential URL as a subsection, a hook's file name).
+            new = [self.redactor.clean(name) for name in new]
+            self._git_changes += [name for name in new if name not in self._git_changes]
+            names = ", ".join(printable(name)[:60] for name in new[:6]) + (" and more" if len(new) > 6 else "")
+            self.say(f"  Note: that command changed git settings that run programs: {names}.")
+            self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
+                     "Check .git/config and .git/hooks before you do.")
+            with open(self._log, "a") as f:  # the same shape as a command's record, for `hands log`
+                f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
+                                    "command": ", ".join(new[:20])[:500], "exit": None,
+                                    "note": "git settings changed"}) + "\n")
+        except Exception:  # noqa: BLE001
             return
-        new, self._git_seen = gitwatch.changed(self._git_seen, now), now
-        if not new:
-            return
-        self._git_changes += [name for name in new if name not in self._git_changes]
-        names = ", ".join(printable(name)[:60] for name in new[:6]) + (" and more" if len(new) > 6 else "")
-        self.say(f"  Note: that command changed git settings that run programs: {names}.")
-        self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
-                 "Check .git/config and .git/hooks before you do.")
-        with open(self._log, "a") as f:  # the same shape as a command's record, for `hands log`
-            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
-                                "command": ", ".join(new[:20])[:500], "exit": None,
-                                "note": "git settings changed"}) + "\n")
 
     def _git_reminder(self) -> None:
         """Said once commands and what they left running have stopped, however Hands ends."""
         self._git_note()  # a process left running may have written after its command returned
-        if self._git_changes:
-            names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
-            self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
-                     f"programs ({names}). Check .git/config and .git/hooks.")
+        try:
+            if self._git_changes:
+                names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
+                self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
+                         f"programs ({names}). Check .git/config and .git/hooks.")
+        except Exception:  # noqa: BLE001
+            return
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],

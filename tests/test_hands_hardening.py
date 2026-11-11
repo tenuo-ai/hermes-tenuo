@@ -229,3 +229,83 @@ def test_the_reminder_is_given_when_the_server_ends_the_session(hub, folder, mon
     assert not running.thread.is_alive()
     assert any(line.startswith("The server ended this session") for line in running.lines)
     assert any(line.startswith("Before you use git in") and "core.fsmonitor" in line for line in running.lines)
+
+
+def test_gitwatch_decodes_quotes_and_comments_before_following_a_path(tmp_path):
+    _git(tmp_path)
+    with open(tmp_path / ".git" / "config", "a") as f:
+        f.write('[include]\n\tpath = "../extra.cfg" # shared settings\n'
+                '[alias]\n\tx = "!sh run.sh" ; runs a script\n\ty = status   # plain\n')
+    (tmp_path / "extra.cfg").write_text("[user]\n\tname = x\n")
+    before = gitwatch.settings(str(tmp_path))
+    assert set(before) == {"alias.x"}
+    (tmp_path / "extra.cfg").write_text('[core]\n\tfsmonitor = "./w.sh"\n')
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["core.fsmonitor"]
+    assert gitwatch._value('"a b"  # note') == "a b" and gitwatch._value('x\\ty "#no" ; yes') == "x\ty #no"
+
+
+def test_gitwatch_notices_a_hook_rewritten_in_place(tmp_path):
+    _git(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho one\n")
+    info = hook.stat()
+    before = gitwatch.settings(str(tmp_path))
+    hook.write_text("#!/bin/sh\necho two\n")                   # same length
+    os.utime(hook, ns=(info.st_atime_ns, info.st_mtime_ns))    # same time
+    assert hook.stat().st_size == info.st_size and hook.stat().st_mtime_ns == info.st_mtime_ns
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["hooks/pre-commit"]
+    # A hook that cannot be read as a program is named as such, not skipped.
+    (tmp_path / ".git" / "hooks" / "post-commit").symlink_to("/bin/echo")
+    os.mkfifo(tmp_path / ".git" / "hooks" / "pre-push")
+    found = gitwatch.settings(str(tmp_path))                    # returns at once
+    assert "hooks/post-commit (cannot be checked)" in found and "hooks/pre-push (cannot be checked)" in found
+
+
+def test_gitwatch_follows_a_pointer_file_to_a_folder_inside(tmp_path):
+    meta = tmp_path / "repo-meta"
+    (meta / "hooks").mkdir(parents=True)
+    (meta / "config").write_text("[core]\n\tbare = false\n")
+    (tmp_path / ".git").write_text("gitdir: repo-meta\n")
+    before = gitwatch.settings(str(tmp_path))
+    assert before == {}
+    with open(meta / "config", "a") as f:
+        f.write("[core]\n\tfsmonitor = ./w.sh\n")
+    (meta / "hooks" / "pre-push").write_text("#!/bin/sh\n")
+    assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["core.fsmonitor", "repo-meta/hooks/pre-push"]
+    # A worktree's shared settings folder, when it is inside too.
+    shared = tmp_path / "shared-meta"
+    (shared / "hooks").mkdir(parents=True)
+    (shared / "config").write_text('[alias]\n\tz = "!sh z.sh"\n')
+    (meta / "commondir").write_text("../shared-meta\n")
+    assert "alias.z" in gitwatch.settings(str(tmp_path))
+    # A pointer to somewhere outside the folder is not something commands can change.
+    (tmp_path / ".git").write_text(f"gitdir: {tmp_path.parent}/elsewhere/.git\n")
+    assert gitwatch.settings(str(tmp_path)) == {}
+
+
+def test_a_git_note_keeps_secrets_out_of_the_log_and_the_terminal(hub, folder):
+    _git(folder)
+    said = []
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True, say=said.append)
+    with open(folder / ".git" / "config", "a") as f:
+        f.write('[credential "https://deploy:hunter2-s3cret-value@example.com"]\n\thelper = store\n')
+    device._git_note()
+    assert any("credential." in line for line in said)
+    assert "hunter2-s3cret-value" not in " ".join(said) + device._log.read_text()
+    assert all("hunter2-s3cret-value" not in name for name in device._git_changes)
+
+
+def test_a_git_note_never_interrupts_the_device(hub, folder, monkeypatch):
+    _git(folder)
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True, say=lambda line: None)
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[core]\n\tfsmonitor = ./watch.sh\n")
+    device._log = folder / "no-such-folder" / "log.jsonl"       # the log cannot be written
+    device._git_note()
+    device.say = lambda line: (_ for _ in ()).throw(OSError("terminal closed"))
+    (folder / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    device._git_note()
+    device._git_reminder()
+    monkeypatch.setattr(gitwatch, "settings", lambda folder: (_ for _ in ()).throw(RuntimeError("unexpected")))
+    device._git_note()
+    device._git_reminder()
