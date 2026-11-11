@@ -281,3 +281,21 @@ def test_role_warrants_are_reminted_before_they_expire():
     pol._warrants["owner"] = (w1, time.monotonic() - 4000)  # pretend it aged past the TTL
     w2, _ = pol.warrant_for(user="u")
     assert w2 is not w1                                     # re-minted, so authority does not lapse
+
+
+def test_role_warrant_renews_when_wall_time_outpaces_monotonic(monkeypatch):
+    import time
+    from hermes_tenuo.access import build_access_policy
+
+    key = tenuo.SigningKey.generate()
+    monkeypatch.setattr(time, "monotonic", lambda: 1000)
+    policy = build_access_policy(
+        {"roles": {"guest": {"default": True, "allow": ["web_search"]}}},
+        control_key=key, holder=key.public_key, signing_key=key, ttl_seconds=2,
+    )
+    first, _ = policy.warrant_for()
+    time.sleep(2.1)  # SDK expiry uses wall time; monotonic deliberately stays fixed.
+    assert first.is_expired()
+    renewed, _ = policy.warrant_for()
+    assert renewed is not first
+    assert not renewed.is_expired()

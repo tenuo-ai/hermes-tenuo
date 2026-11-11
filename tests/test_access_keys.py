@@ -147,3 +147,71 @@ def test_a_broken_constraint_in_the_block_fails_closed(tmp_path, monkeypatch):
 
     with pytest.raises(WarrantLoadError):
         build_plugin_guard(None)
+
+
+@pytest.mark.parametrize("constraint", [{"patterns": ["^[$"]}, {"subpath": "relative"}])
+def test_sdk_constraint_errors_install_block_all_and_doctor_reports_failure(tmp_path, monkeypatch, capsys, constraint):
+    import hermes_tenuo as plugin
+    import hermes_tenuo._home as home
+    from argparse import Namespace
+    from hermes_tenuo.cli import cmd_doctor
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    block = {"roles": {"guest": {"default": True, "allow": {"read_file": {"path": constraint}}}}}
+    monkeypatch.setattr(home, "load_hermes_config", lambda: _config(block))
+    monkeypatch.setattr(plugin, "_register_skills", lambda ctx: None)
+    monkeypatch.setattr("hermes_tenuo.hands.register", lambda ctx: False)
+
+    class Context:
+        def __init__(self):
+            self.hooks = {}
+
+        def register_hook(self, name, hook):
+            self.hooks[name] = hook
+
+    ctx = Context()
+    plugin.register(ctx)
+    assert ctx.hooks["pre_tool_call"]("read_file")["action"] == "block"
+    assert cmd_doctor(Namespace()) == 1
+    assert "access config:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_concurrent_processes_share_one_access_identity(tmp_path, corrupt):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    key_path = tmp_path / "tenuo" / "access.key"
+    key_path.parent.mkdir()
+    if corrupt:
+        key_path.write_text("corrupt")
+    # Widen the read/write race in separate interpreters, exercising the OS lock
+    # rather than relying on threads or an in-process mutex.
+    script = """
+import time
+from hermes_tenuo import access
+original = access.load_access_key
+def slow_load():
+    value = original()
+    time.sleep(0.1)
+    return value
+access.load_access_key = slow_load
+print(access.load_or_create_signing_key().public_key.to_bytes().hex())
+"""
+    env = dict(os.environ, HERMES_HOME=str(tmp_path), PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    processes = [subprocess.Popen([sys.executable, "-c", script], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
+    identities = []
+    for process in processes:
+        out, err = process.communicate(timeout=15)
+        assert process.returncode == 0, err
+        identities.append(out.strip())
+    assert len(set(identities)) == 1
+    from tenuo import SigningKey
+    import base64
+    persisted = SigningKey.from_bytes(base64.b64decode(key_path.read_text()))
+    assert identities[0] == persisted.public_key.to_bytes().hex()

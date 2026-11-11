@@ -101,6 +101,18 @@ def current_sender() -> Optional[Dict[str, str]]:
 
 
 def _constraint(value: Any, where: str) -> Any:
+    """Keep SDK validation errors inside the fail-closed config error boundary."""
+    from tenuo.exceptions import TenuoError
+
+    try:
+        return _compile_constraint(value, where)
+    except AccessConfigError:
+        raise
+    except (TenuoError, ValueError, TypeError, OverflowError) as exc:
+        raise AccessConfigError(f"{where}: {exc}") from exc
+
+
+def _compile_constraint(value: Any, where: str) -> Any:
     """Compile one friendly argument value to a Tenuo constraint.
 
     Strings: ``"*"`` is unconstrained, ``"/a/**"`` is any path under ``/a``,
@@ -353,7 +365,8 @@ class AccessPolicy:
         with self._lock:
             entry = self._warrants.get(name)
             now = time.monotonic()
-            if entry is None or now >= entry[1] + self._ttl - margin:
+            if (entry is None or now >= entry[1] + self._ttl - margin
+                    or entry[0].ttl_remaining.total_seconds() <= margin):
                 role = next(r for r in self.config.roles if r.name == name)
                 warrant = mint_for_holder(self._control, self._holder, role.capabilities, self._ttl)
                 self._warrants[name] = (warrant, now)
@@ -399,24 +412,30 @@ def load_or_create_signing_key() -> Any:
     from tenuo import SigningKey
     from hermes_tenuo.issuance import write_private_file
 
-    key = load_access_key()
-    if key is not None:
-        return key
+    # A stable sidecar lock must cover reads and corruption recovery as well as
+    # creation. Locking the key itself would lock an obsolete inode after replace.
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise OSError("access key provisioning requires POSIX file locking") from exc
+    import os
+
     path = access_key_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    key = SigningKey.generate()
-    text = base64.b64encode(key.secret_key_bytes()).decode()
+    lock_fd = os.open(path.with_suffix(".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        write_private_file(path, text)                       # no-clobber
-    except FileExistsError:
-        # Another start created the file, or a corrupt one is already there. Reuse a
-        # valid key; replace only an unreadable one, so a concurrent valid key is kept.
-        existing = load_access_key()
-        if existing is not None:
-            return existing
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        key = load_access_key()
+        if key is not None:
+            return key
+        key = SigningKey.generate()
+        text = base64.b64encode(key.secret_key_bytes()).decode()
         write_private_file(path, text, overwrite=True)
-    logger.info("hermes-tenuo: created an access signing key at %s", path)
-    return key
+        logger.info("hermes-tenuo: created an access signing key at %s", path)
+        return key
+    finally:
+        os.close(lock_fd)  # releases the lock, including on read/write failure
+
 
 
 def build_access_policy(block: Any, *, control_key: Any, holder: Any, signing_key: Any,
