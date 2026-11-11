@@ -107,6 +107,22 @@ def test_doctor_reports_the_access_block(tmp_path, monkeypatch, capsys):
     assert "every role compiles to a warrant" in out
     # No static warrant is not a failure when access provides the authority.
     assert "role-based access (below) is the tool-call authority" in out
+    assert "turns with no chat sender → api_server, webhook, msgraph_webhook, cron: guest" in out
+
+
+def test_status_says_roles_are_the_authority_without_a_static_warrant(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    import hermes_tenuo._home as home
+    monkeypatch.setattr(home, "load_hermes_config", lambda: _config(ROLES))
+    from argparse import Namespace
+
+    from hermes_tenuo.cli import cmd_status
+
+    cmd_status(Namespace())
+    out = capsys.readouterr().out
+    assert "role-based access authorises chat, API, webhook and scheduled turns" in out
+    assert "general tool-call authorization is off" not in out
 
 
 def test_a_malformed_configured_key_fails_closed_without_provisioning(tmp_path, monkeypatch):

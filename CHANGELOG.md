@@ -17,8 +17,9 @@
   authorised per message; a sender no role grants is blocked. A constrained tool
   keeps its other arguments unless `strict: true`; `terminal` takes a `binaries`
   allowlist. The signing key is auto-provisioned under `$HERMES_HOME/tenuo` so no
-  key need be configured; `doctor` validates the block. Local (CLI/desktop) turns
-  and `delegate_task` children keep their existing authorization.
+  key need be configured; `doctor` validates the block. API-server, webhook and
+  scheduled turns match roles by platform; local (CLI/desktop) turns are not
+  governed. A `delegate_task` child gets a grant narrowed from its parent's role.
 
 ### Hands
 

@@ -399,6 +399,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"\n  A warrant is set but trusted_root is not — {_trust_failure_effect(entry.get('on_denial'))}.")
     elif get_require_warrant(None):
         print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
+    elif entry.get("access") is not None:
+        print("\n  No static warrant: role-based access authorises chat, API, webhook and scheduled turns.\n"
+              "  Local CLI and desktop turns are not checked. Run `hermes-tenuo doctor` to check the roles.")
     else:
         print("\n  No warrant — general tool-call authorization is off. Hands device grants are independent.")
     return 0
@@ -689,6 +692,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 check(True, "access: every role compiles to a warrant")
                 for role in cfg.roles:
                     note(f"  role {role.name}: {', '.join(sorted(role.capabilities)) or '(no tools)'}")
+                from hermes_tenuo.access import UNATTENDED_SURFACES
+                reach = {}
+                for surface in UNATTENDED_SURFACES:
+                    role = cfg.role_for(platform=surface)
+                    reach.setdefault(role.name if role is not None else "denied", []).append(surface)
+                note("access: turns with no chat sender → " + "; ".join(
+                    f"{', '.join(surfaces)}: {name}" for name, surfaces in reach.items()))
             except (AccessConfigError, ValueError, TypeError) as exc:
                 check(False, f"access role: {exc}", blocks)
 

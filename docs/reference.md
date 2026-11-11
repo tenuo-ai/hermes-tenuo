@@ -272,15 +272,26 @@ plugins:
   creates once under `$HERMES_HOME/tenuo/access.key` (set `TENUO_SIGNING_KEY`
   to use your own instead). `hermes-tenuo doctor` lists the roles and checks
   they compile.
-- **Scope.** Access governs messaging turns. A local CLI or desktop turn (the
-  operator) is not governed by it, and `delegate_task` children keep their
-  attenuated warrants. Warrant-backed delegation requires Hermes’s live subagent attribution;
-  older builds without it cannot spawn children under a role or static/session warrant. An unbound child
-  is denied if its lifecycle hook was missed. Child grants are never assigned
-  by session order when access is enabled. Local audit-only turns remain
-  unrestricted unless `require_session_warrant` is explicitly enabled.
-  A static `warrant:` is optional and covers those local
-  turns.
+- **Turns with no chat sender.** An API-server or webhook turn and a scheduled
+  (cron) run have no person behind them. They match only a role that names
+  their platform, for example `match: { platform: ["cron"] }` (`api_server`,
+  `webhook`, `msgraph_webhook` and `cron`); otherwise they get the default
+  role, or are denied. An identity such a caller supplies is not used. A role
+  that allows `cronjob_manage` lets its members schedule runs with the `cron`
+  role's tools, so keep that role no wider than the people who can schedule.
+- **Allowed binaries.** `binaries` checks which program a command starts, not
+  what the program then does. A program that runs other programs (`git`,
+  `env`, `xargs`, `find`, an interpreter) gives the role those too.
+- **Local turns.** A CLI, desktop or TUI turn is the operator and is not
+  matched against roles. A static `warrant:` is optional and covers those
+  turns; without one they are unrestricted unless `require_session_warrant` is
+  enabled.
+- **Children.** A `delegate_task` child gets a grant narrowed from its
+  parent's role, valid for up to an hour from the moment it is delegated.
+  This needs Hermes's live subagent attribution; an older build cannot spawn
+  children under a role or a static or session warrant. A child whose
+  lifecycle hook was missed is denied, and grants are never assigned by
+  session order when access is enabled.
 
 ## Hands: let your server's agent use your own machine
 
