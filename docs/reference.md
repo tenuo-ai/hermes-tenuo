@@ -274,8 +274,8 @@ plugins:
   they compile.
 - **Scope.** Access governs messaging turns. A local CLI or desktop turn (the
   operator) is not governed by it, and `delegate_task` children keep their
-  attenuated warrants. Delegation requires Hermes’s live subagent attribution;
-  older builds without it cannot spawn children in access mode. An unbound child
+  attenuated warrants. Messaging delegation requires Hermes’s live subagent attribution;
+  older builds without it cannot spawn children on messaging turns. An unbound child
   is denied if its lifecycle hook was missed. A static `warrant:` is optional and covers those local
   turns.
 

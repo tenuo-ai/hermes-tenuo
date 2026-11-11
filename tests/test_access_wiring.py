@@ -194,3 +194,21 @@ def test_access_delegation_is_denied_without_runtime_child_attribution(monkeypat
     assert denied and "requires Hermes subagent attribution" in denied["message"]
     assert not guard._planned_children
     assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="parent") is None
+
+
+@pytest.mark.parametrize("attribution_available", [False, True])
+def test_access_only_local_delegation_remains_unrestricted(monkeypatch, attribution_available):
+    key = tenuo.SigningKey.generate()
+    policy = build_access_policy({"roles": {"guest": {"default": True, "allow": ["web_search"]}}},
+                                 control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(access_policy=policy)
+    sender(monkeypatch)  # CLI/Desktop/API: no messaging identity
+    lookup = (lambda task: {"subagent_id": task} if task == "child-task" else None)
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: lookup if attribution_available else None)
+    assert guard.pre_tool_call("delegate_task", {"goal": "local work"}, session_id="parent", task_id="parent-task") is None
+    guard.on_subagent_start("parent", "child", child_goal="local work", child_task_id="child-task")
+    assert guard.pre_tool_call("read_file", {"path": "/local/file"}, session_id="child", task_id="child-task") is None
+    # The same unbound child is never allowed to fall back to a messaging role.
+    sender(monkeypatch, user="telegram:1", platform="telegram")
+    if attribution_available:
+        assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="child", task_id="child-task")
