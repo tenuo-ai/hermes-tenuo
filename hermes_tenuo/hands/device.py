@@ -1149,7 +1149,10 @@ class Device:
         """Tell the person when a command changed what git will run in this folder."""
         if self.read_only:
             return
-        now = gitwatch.settings(self.folder)
+        try:
+            now = gitwatch.settings(self.folder)
+        except Exception:  # noqa: BLE001 - a note must never keep a result from being sent
+            return
         new, self._git_seen = gitwatch.changed(self._git_seen, now), now
         if not new:
             return
@@ -1158,9 +1161,18 @@ class Device:
         self.say(f"  Note: that command changed git settings that run programs: {names}.")
         self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
                  "Check .git/config and .git/hooks before you do.")
-        with open(self._log, "a") as f:
+        with open(self._log, "a") as f:  # the same shape as a command's record, for `hands log`
             f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
-                                "note": f"git settings that run programs changed: {', '.join(new[:20])}"}) + "\n")
+                                "command": ", ".join(new[:20])[:500], "exit": None,
+                                "note": "git settings changed"}) + "\n")
+
+    def _git_reminder(self) -> None:
+        """Said once commands and what they left running have stopped, however Hands ends."""
+        self._git_note()  # a process left running may have written after its command returned
+        if self._git_changes:
+            names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
+            self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
+                     f"programs ({names}). Check .git/config and .git/hooks.")
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],
@@ -1279,6 +1291,7 @@ class Device:
                         continue
                 self._stop_runner()
                 self.say(f"The server ended this session: {ended}")
+                self._git_reminder()
                 self.say("If revoked, request a new /hands setup invite. Otherwise reconnect locally with: "
                          + self.reconnect_command())
                 return 1
@@ -1305,9 +1318,6 @@ class Device:
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         self.say("Commands and background processes have been stopped. This does not undo file changes.")
-        if self._git_changes:
-            names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
-            self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
-                     f"programs ({names}). Check .git/config and .git/hooks.")
+        self._git_reminder()
         self.say("To share again for a fresh time window, run locally: " + self.reconnect_command())
         return 0
