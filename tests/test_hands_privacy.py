@@ -167,3 +167,72 @@ def test_redaction_preserves_cwd_routing_metadata(folder):
     result = privacy.Redactor(str(folder)).clean('content ' + str(folder) + '\n' + marker + str(folder) + marker)
     assert result.startswith('content [redacted]\n')
     assert marker + str(folder) + marker in result
+
+
+@sandboxed
+@pytest.mark.parametrize('mutation', ['rm .env', "printf 'PASSWORD=replacement-value' > .env"])
+def test_initial_dotenv_secret_survives_first_command_mutation(hub, folder, mutation):
+    secret = 'first-command-secret-98765'
+    (folder / '.env').write_text('PASSWORD=' + secret)
+    running = up(hub, folder)
+    try:
+        output, code = run(hub, 'printf %s ' + shlex.quote(secret) + '; ' + mutation)
+        assert code == 0 and secret not in output and '[redacted]' in output
+        assert secret not in (device.home() / 'log.jsonl').read_text()
+    finally:
+        running.stop()
+        running.thread.join(5)
+
+
+def framed_sample(page):
+    import base64
+    marker = '__HERMES_RF_0123456789abcdef__'
+    encoded = base64.b64encode(page.encode()).decode()
+    return marker, f'{len(page)}\n{marker}\n{encoded}\n{marker}\n{page}{marker}\n0\n'
+
+
+@pytest.mark.parametrize('secret', ['secret', 'secret7', 'secret12', 'secret123'])
+def test_short_encoded_samples_redact_supported_secrets(folder, monkeypatch, secret):
+    import base64
+    monkeypatch.setenv('TEST_API_KEY', secret)
+    marker, raw = framed_sample(secret)
+    result = privacy.Redactor(str(folder)).clean(raw)
+    assert base64.b64decode(result.split(marker)[1]).decode() == '[redacted]'
+    assert result.split(marker)[2] == '\n[redacted]'
+
+
+def test_encoded_samples_remain_valid_when_encoded_bytes_match_secret(folder, monkeypatch):
+    import base64
+    monkeypatch.setenv('TEST_API_KEY', 'cGFzc3dv')
+    marker, raw = framed_sample('password1234')
+    redactor = privacy.Redactor(str(folder))
+    result = redactor.clean(raw)
+    assert base64.b64decode(result.split(marker)[1], validate=False).decode() == 'password1234'
+    assert result == raw
+    # A real plaintext secret that happens to be base64 is still redacted.
+    assert redactor.clean('cGFzc3dv') == '[redacted]'
+
+
+@sandboxed
+@pytest.mark.parametrize('read_home', [False, True])
+def test_exclusions_inside_existing_private_overlay_do_not_break_commands(hub, folder, monkeypatch, read_home):
+    import tempfile
+    from pathlib import Path
+    from hermes_tenuo.hands import sandbox
+    # Use a synthetic private directory in home: /tmp overlays are deliberately
+    # exempt from the final read-only remount, so they would miss this regression.
+    with tempfile.TemporaryDirectory(prefix='.hands-privacy-test-', dir=Path.home()) as hidden:
+        secret = Path(hidden) / 'credential'
+        secret.write_text('NEVER_SEND_THIS_CREDENTIAL')
+        original = sandbox._private_paths()
+        monkeypatch.setattr(sandbox, '_private_paths', lambda: [*original, hidden])
+        rules(str(secret))
+        running = up(hub, folder, read_home=read_home)
+        try:
+            output, code = run(hub, 'echo ordinary-command; cat ' + shlex.quote(str(secret)))
+            assert 'ordinary-command' in output
+            assert 'NEVER_SEND_THIS_CREDENTIAL' not in output
+            assert secret.read_text() == 'NEVER_SEND_THIS_CREDENTIAL'
+        finally:
+            running.stop()
+            running.thread.join(5)

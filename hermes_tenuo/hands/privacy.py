@@ -70,8 +70,9 @@ class Redactor:
     def __init__(self, folder: str):
         self.folder = Path(folder)
         self.values = {v for k, v in os.environ.items() if _SECRET_NAME.search(k) and len(v) >= 6}
+        self._refresh()
 
-    def clean(self, text: str) -> str:
+    def _refresh(self) -> None:
         # Refresh project-root dotenv values: a build can create or rotate them mid-session.
         # Do not follow symlinks, read devices, or read unbounded files.
         for path in self.folder.glob(".env*"):
@@ -91,6 +92,9 @@ class Redactor:
                         self.values.add(value)
             except (OSError, UnicodeError):
                 continue
+
+    def clean(self, text: str) -> str:
+        self._refresh()
         # Hermes file reads include a base64 sample and plaintext page between
         # random framing markers. Scrub both representations without consuming
         # a marker adjacent to a token (files need not end with a newline).
@@ -103,14 +107,28 @@ class Redactor:
                 continue
             part = parts[i]
             compact = "".join(part.split())
-            if len(compact) >= 16 and re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", compact):
+            # The first RF-delimited field is the encoded sample. Other fields
+            # are plaintext/status data, even when they happen to look like base64.
+            sample = (i > 0 and parts[i - 1].startswith("__HERMES_RF_")
+                      and parts.index(parts[i - 1]) == i - 1)
+            if len(compact) >= 8 and re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", compact):
                 try:
-                    decoded = base64.b64decode(compact, validate=True).decode("utf-8")
+                    data = base64.b64decode(compact, validate=True)
+                    try:
+                        decoded = data.decode("utf-8")
+                    except UnicodeError:
+                        if sample:
+                            continue  # preserve binary samples as valid base64
+                        raise
                     cleaned = self._text(decoded)
                     if cleaned != decoded:
                         leading = part[:len(part) - len(part.lstrip())]
                         trailing = part[len(part.rstrip()):]
                         part = leading + base64.b64encode(cleaned.encode("utf-8")).decode("ascii") + trailing
+                    if sample or cleaned != decoded:
+                        # Never perform literal replacement on encoded bytes.
+                        parts[i] = part
+                        continue
                 except (ValueError, UnicodeError, binascii.Error):
                     pass
             parts[i] = self._text(part)

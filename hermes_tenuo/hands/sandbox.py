@@ -177,13 +177,6 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
     for path in readable:
         argv += ["--ro-bind", path, path]
     argv += ["--bind" if writable else "--ro-bind", folder, folder, "--bind", tmp, tmp]
-    # An emptied folder is not a place to write: a write there would seem to work and be
-    # lost when the sandbox ends. What was put back inside it keeps its own setting.
-    shared_tmp = os.path.realpath("/tmp")
-    for path in emptied:
-        # One under /tmp is no longer there to change: the temp folder took /tmp's place.
-        if path != shared_tmp and not path.startswith(shared_tmp + os.sep):
-            argv += ["--remount-ro", path]
     # Make writable ancestors mount points too: otherwise Linux allows renaming
     # a parent of a masked directory, unlike Seatbelt's unlink denial.
     parents = sorted({a for p in excluded for a in _ancestors(os.path.realpath(p))
@@ -203,6 +196,13 @@ def _bwrap(folder: str, tmp: str, command: List[str], shared: bool = False,
             argv += ["--tmpfs", path, "--remount-ro", path]
         else:
             argv += ["--ro-bind", "/dev/null", path]
+    # An emptied folder is not a place to write: a write there would seem to work and be
+    # lost when the sandbox ends. What was put back inside it keeps its own setting.
+    shared_tmp = os.path.realpath("/tmp")
+    for path in emptied:
+        # One under /tmp is no longer there to change: the temp folder took /tmp's place.
+        if path != shared_tmp and not path.startswith(shared_tmp + os.sep):
+            argv += ["--remount-ro", path]
     return argv + ["--chdir", folder, "--", *command]
 
 
