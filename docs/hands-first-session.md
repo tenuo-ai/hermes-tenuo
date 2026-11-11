@@ -6,16 +6,17 @@ Supported devices: macOS with sandbox-exec, or Linux with working bubblewrap. Na
 
 ## 1. Install and enable on the server
 
-In the Hermes environment/profile serving your chat:
+For the unpublished 0.4.0 candidate, replace `COMMIT_SHA` with the exact reviewed
+commit. In the Hermes environment/profile serving your chat:
 
 ```sh
-hermes plugins install hermes-tenuo
+hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA
 hermes plugins enable hermes-tenuo
 ```
 
 Hands needs no manually minted warrant. Leave the optional enforcement credentials empty if you only want Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
 
-**Before the catalog update:** the catalog still points to an older release without Hands. PR reviewers should install this PR's commit using `hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA`, and run the laptop CLI from the same commit with `uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo …`. Do not advertise the catalog walkthrough as released until the checklist below is complete.
+**Before the catalog update:** the catalog still points to an older release without Hands. PR reviewers should install this PR's commit using `hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA`, and run the laptop CLI from the same commit with `uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo …`. Replace the `uvx hermes-tenuo` prefix in generated setup commands as well. Do not advertise the catalog walkthrough as released until the checklist below is complete.
 
 ## 2. Configure the connection once
 
@@ -28,7 +29,7 @@ The laptop connects outward; it needs no incoming port. Keep the laptop awake an
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if `uvx` is not available, then run:
 
 ```sh
-uvx hermes-tenuo hands demo
+uvx --from 'git+https://github.com/tenuo-ai/hermes-tenuo.git@COMMIT_SHA' hermes-tenuo hands demo
 ```
 
 It prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
@@ -62,7 +63,7 @@ The laptop prints a reconnect command that preserves your choices and the origin
 | `/hands` is unknown | Enable the plugin and restart the gateway/profile serving this chat; check its version includes Hands. |
 | Hands is off | Follow `/hands setup`; no laptop connection is possible until the server listener is configured. |
 | Cannot reach server / wrong service | Check `hands.url`, the proxy route, port and private-network connection. Run `hands check` locally. |
-| No sandbox | Follow `hands check` diagnostics. On Ubuntu, see the bubblewrap setup in the README. The demo does not need `--no-sandbox`. |
+| No sandbox | Follow `hands check` diagnostics. On Ubuntu, see the bubblewrap setup in the [reference](reference.md). The demo does not need `--no-sandbox`. |
 | Invite expired or already used | Generate a new invite; do not repeatedly reuse the old one. |
 | Install/download fails | Internet is off in read/edit shares. Choose online only if you want that access, then restart locally. |
 | Device disconnected or expired | Inspect the laptop terminal and use its reconnect command. No silent server fallback occurs. |
@@ -88,7 +89,7 @@ Personal exclusions live in `~/.config/hermes-tenuo/never-share`, one existing
 literal path per line, relative to the shared folder or absolute. For example,
 `customers/` keeps that directory's contents out of terminal and file operations.
 Missing paths are errors; globs are not supported. Restart Hands to apply rule
-changes. See the README for platform behavior and path-alias limitations.
+changes. See the [reference](reference.md) for platform behavior and path-alias limitations.
 
 Recognized secrets in results and command logs are redacted locally. A result
 says when redaction occurred; it does not modify project files. Detection is

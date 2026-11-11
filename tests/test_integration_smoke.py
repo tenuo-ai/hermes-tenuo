@@ -310,7 +310,7 @@ class TestHookRegistration:
                 assert ctx.registered("subagent_start")
                 (pre,) = ctx.hooks["pre_tool_call"]
                 assert pre("terminal", {"command": "ls"}, session_id="s1") is None
-        assert any("NOT enforced" in r.getMessage() for r in caplog.records)
+        assert any("general tool-call authorization is off" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

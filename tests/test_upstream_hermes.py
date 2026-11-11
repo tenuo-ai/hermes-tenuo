@@ -124,7 +124,7 @@ class TestDirectoryRoute:
         r = _run("directory", False, tmp_path)
         assert r["plugin"]["hooks"] == 6 and r["plugin"]["error"] is None
         assert r["deny"] == [] and r["allow"] == []
-        assert "NOT enforced" in r["stderr"]
+        assert "general tool-call authorization is off" in r["stderr"]
 
 
 @pytest.mark.skipif(not _plugin_installed(), reason="entrypoint route needs the package pip-installed")
@@ -141,4 +141,4 @@ class TestEntrypointRoute:
     def test_unconfigured_is_a_loud_noop(self, tmp_path):
         r = _run("entrypoint", False, tmp_path)
         assert r["plugin"]["hooks"] == 6 and r["deny"] == [] and r["allow"] == []
-        assert "NOT enforced" in r["stderr"]
+        assert "general tool-call authorization is off" in r["stderr"]

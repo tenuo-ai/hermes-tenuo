@@ -6,10 +6,14 @@
 # commit at least two weeks old, submitted by the repo owner, capabilities must
 # match what register() registers at that commit.
 name: hermes-tenuo
+title: Tenuo
+version: 0.4.0
+category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
 description: >-
-  Per-call authorization for Hermes tool calls, plus Hands: connect one conversation
+  Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
+  With Hands, connect one conversation
   to a sandboxed folder on your own macOS or Linux machine while keeping Hermes
   memory and skills on the server. Hands works without a manually minted warrant.
   Hands is off until configured; its optional HTTP listener accepts outbound device

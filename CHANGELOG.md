@@ -1,3 +1,10 @@
+# 0.4.0 (unreleased)
+
+- Add Hands: scoped, expiring local workspaces for remote Hermes, with sandboxing, per-conversation routing, setup/verify, privacy exclusions and local result redaction.
+- Reuse Tenuo path-jail for workspace containment.
+- Separate Hands and tool-authorization onboarding and diagnostics; align plugin and package descriptions.
+- Prefer the selected directory checkout, reject already-loaded conflicting installations, and validate release artifacts before publishing.
+
 # Changelog
 
 ## Unreleased

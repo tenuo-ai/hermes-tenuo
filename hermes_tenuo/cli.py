@@ -343,6 +343,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     from hermes_tenuo._home import config_path, hermes_cli_available
     from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw, task_warrant_path
 
+    from pathlib import Path
+    from hermes_tenuo._version import __version__
+    from hermes_tenuo.hands import settings
+    print(f"  hermes-tenuo {__version__}: {Path(__file__).resolve().parent}")
+    print("  This CLI's source and configuration; not proof of a running Hermes plugin.")
+    configured = bool(str(settings(None).get("listen") or "").strip())
+    print(f"  Hands: {'listener configured (runtime unverified)' if configured else 'listener not configured'}")
+    print("  Hands needs no manual warrant. Use /hands status and /hands verify in Hermes.")
+    print("  Tool-call authorization:")
     cfg_path = config_path()
     entry = _get_plugin_entry(None)
     via = "hermes_cli" if hermes_cli_available() else "plain read"
@@ -391,7 +400,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif get_require_warrant(None):
         print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
     else:
-        print("\n  No warrant — the plugin loads and enforces nothing.")
+        print("\n  No warrant — general tool-call authorization is off. Hands device grants are independent.")
     return 0
 
 
@@ -426,12 +435,14 @@ def _signed_by(warrant: Any, roots: list) -> bool:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """End-to-end install check.
+    """Tool-call authorization check.
 
     Verifies: tenuo importable, plugin entry point registered, Hermes config
     valid, warrant loadable and unexpired, signing key + trusted root present,
     enforcement path (registry hook vs. pre_tool_call fallback).
     """
+    print("Tool-call authorization doctor (not a Hands health check).")
+    print("For Hands, use `hands check` locally and `/hands verify` in Hermes.")
     ok = True
 
     def check(passed: bool, msg: str, hint: str = "") -> None:
@@ -543,8 +554,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(
             configured,
             "plugin configured (warrant)",
-            "set TENUO_WARRANT / warrant: — until then the plugin loads and does "
-            "not enforce (startup WARNING). Run doctor after install.",
+            "set TENUO_WARRANT / warrant: for general tool-call authorization. "
+            "Hands device grants are independent. Run doctor after configuration.",
         )
 
     if warrant is not None:
@@ -864,8 +875,10 @@ def _parse_ttl(ttl: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="hermes-tenuo",
-        description="Tenuo authorization plugin for Hermes Agent",
+        description="Scoped tool permissions and sandboxed local workspaces for Hermes Agent",
     )
+    from hermes_tenuo._version import __version__
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     keygen_p = subparsers.add_parser("keygen", help="Create private/public identity files")
@@ -904,7 +917,7 @@ def main() -> None:
     subparsers.add_parser("verify", help="Verify signature, expiry, and inspect the current warrant")
 
     # doctor
-    subparsers.add_parser("doctor", help="End-to-end install check: plugin discovery, warrant, enforcement path")
+    subparsers.add_parser("doctor", help="Tool-call authorization check: plugin discovery, warrant, enforcement path")
 
     # audit
     audit_p = subparsers.add_parser("audit", help="Show the local audit log (what the agent called, what was denied)")

@@ -141,7 +141,7 @@ def test_status_says_blocked_when_only_the_key_is_missing(install, capsys, monke
 
 def test_status_says_not_enforcing_when_no_warrant(install, capsys):
     install(warrant=None)
-    assert "enforces nothing" in _status(capsys)
+    assert "general tool-call authorization is off" in _status(capsys)
     install(warrant=None, require_warrant="true")
     assert "require_warrant is on — every tool call is blocked" in _status(capsys)
 
@@ -171,7 +171,7 @@ def test_status_reports_the_kanban_task_warrant(install, capsys, monkeypatch, gl
     out = _status(capsys)
     assert "not staged  (kanban task card-1:" in out
     assert "No warrant is staged for kanban task card-1 — every tool call is blocked" in out
-    assert "enforces nothing" not in out and "Ready for enforcement" not in out
+    assert "general tool-call authorization is off" not in out and "Ready for enforcement" not in out
 
     path = task_warrant_path("card-1")
     path.parent.mkdir(parents=True)

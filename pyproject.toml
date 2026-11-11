@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-tenuo"
-version = "0.3.1"
-description = "Tenuo authorization plugin for Hermes Agent"
+version = "0.4.0"
+description = "Scoped tool permissions and sandboxed local workspaces for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{ name = "Tenuo AI" }]
-keywords = ["hermes", "authorization", "agents", "security", "warrants", "tenuo"]
+keywords = ["hermes", "authorization", "agents", "security", "warrants", "tenuo", "sandbox", "workspace"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries",
 ]

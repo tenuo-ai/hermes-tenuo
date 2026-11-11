@@ -1,11 +1,10 @@
 name: hermes-tenuo
-version: 0.3.1
+version: 0.4.0
 description: >
-  Per-call authorization for Hermes Agent tool calls.
-  Each call is checked against a signed, expiring warrant before the
-  handler runs, including argument constraints. Hands connects one conversation
-  to a time-limited, sandboxed folder on your own machine; no manual warrant
-  is needed for Hands.
+  Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
+  With Hands, let your remote Hermes work in a folder on your Mac or Linux
+  machine while its memory and skills stay on the server. Choose the folder,
+  access level, and duration locally. Hands needs no manually minted warrant.
 author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
