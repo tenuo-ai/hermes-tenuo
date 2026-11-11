@@ -266,3 +266,5 @@ def test_a_profile_whose_backend_is_hands(tmp_path):
 def test_first_session_with_real_gateway_identity(tmp_path):
     out, project, server_dir = _run(tmp_path, "gateway")
     _on_the_device(out, project, server_dir)
+    assert out["after"]["text"].strip() == os.path.realpath(server_dir), out["after"]
+    assert out["fresh_after"]["text"].strip() == os.path.realpath(server_dir), out["fresh_after"]

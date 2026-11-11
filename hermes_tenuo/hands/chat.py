@@ -23,6 +23,7 @@ _wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one 
 _applied: Dict[str, tuple] = {}  # task -> (conversation it was switched for, the task id as Hermes knows it)
 _devices: Dict[str, str] = {}  # task -> device name
 _saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
+_cwd_before: Dict[str, Dict[str, Any]] = {}  # conversation -> gateway cwd records to restore on /hands off
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
 
@@ -329,6 +330,15 @@ def _release(conversation: str) -> None:
             except Exception as e:
                 logger.warning("hermes-tenuo hands: could not restore the task's settings (%s)", e)
 
+    with _lock:
+        cwds = _cwd_before.pop(conversation, {})
+    if cwds:
+        from tools.terminal_tool import clear_session_cwd, record_session_cwd
+        for key, before in cwds.items():
+            clear_session_cwd(key)
+            if before:
+                record_session_cwd(key, before)
+
 
 def _own_overrides(task: str) -> Dict[str, Any]:
     """The overrides Hermes holds for this task itself (registering replaces them all)."""
@@ -522,12 +532,29 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
                                    "/hands on there; this call was not run")
     if folder and not _inside(get_session_cwd(task), folder):
         record_session_cwd(task, folder)
-    if whole_profile:
-        return _marked(next_call(), tool_name, session)
-    token = set_terminal_scope(_policy_with_hands())
-    chosen = _route.set(wanted)
+    # Gateway terminals record cwd by approval/session key; file tools use task_id.
+    # Keep both anchors on the selected workspace and restore the server's record
+    # when switching off, otherwise relative writes and later server commands diverge.
+    cwd_key = ""
+    if folder and tool_name in ON_DEVICE:
+        try:
+            from tools.approval import get_current_session_key
+            cwd_key = get_current_session_key(default="") or ""
+        except ImportError:
+            pass  # older Hermes uses the task id for both tools
+        if cwd_key and cwd_key != task:
+            if not whole_profile:
+                with _lock:
+                    _cwd_before.setdefault(conversation, {}).setdefault(cwd_key, get_session_cwd(cwd_key))
+            record_session_cwd(cwd_key, get_session_cwd(task) or folder)
+    token = None if whole_profile else set_terminal_scope(_policy_with_hands())
+    chosen = _route.set(wanted) if not whole_profile else None
     try:
         return _marked(next_call(), tool_name, session)
     finally:
-        _route.reset(chosen)
-        reset_terminal_scope(token)
+        if cwd_key and cwd_key != task and _inside(get_session_cwd(cwd_key), folder):
+            record_session_cwd(task, get_session_cwd(cwd_key))
+        if chosen is not None:
+            _route.reset(chosen)
+        if token is not None:
+            reset_terminal_scope(token)
