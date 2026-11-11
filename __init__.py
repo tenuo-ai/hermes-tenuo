@@ -7,7 +7,9 @@ module. ``pip install`` users never touch it: Hermes finds the
 
 This shim makes the clone importable without putting the clone on
 ``sys.path``. The selected checkout is authoritative. An already loaded package
-from another installation is rejected to avoid mixing modules from two versions.
+from another installation is never mixed with it: the plugin then registers a
+hook that blocks every tool call and names both installations, so a second
+installation cannot leave Hermes running without enforcement.
 """
 
 from __future__ import annotations
@@ -19,13 +21,52 @@ from pathlib import Path
 _PKG_DIR = Path(__file__).resolve().parent / "hermes_tenuo"
 
 
+class InstallConflict(ImportError):
+    """Another hermes-tenuo installation was imported before this checkout."""
+
+
+def _blocking_register(message: str):
+    """A ``register`` that blocks every tool call with *message* (fail closed).
+
+    Raising instead would make Hermes drop the plugin and run every tool call
+    unchecked, with a configured warrant or access policy silently ignored.
+    """
+
+    def register(ctx):
+        import logging
+
+        logging.getLogger("hermes_tenuo").error("%s Every tool call is blocked.", message)
+        try:
+            from tools.registry import registry
+
+            if hasattr(registry, "set_enforcement_fn"):
+                try:
+                    from tools.registry import EnforcementDenied as denied
+                except ImportError:
+                    denied = PermissionError
+
+                def _deny(tool_name, args, **kwargs):
+                    raise denied(message)
+
+                registry.set_enforcement_fn(_deny)
+        except Exception:
+            pass  # the hook below still covers every dispatched call
+
+        def _block(tool_name="", **kwargs):
+            return {"action": "block", "message": message}
+
+        ctx.register_hook("pre_tool_call", _block)
+
+    return register
+
+
 def _load_package():
     loaded = sys.modules.get("hermes_tenuo")
     if loaded is not None:
         source = getattr(loaded, "__file__", None)
         if source and Path(source).resolve() == (_PKG_DIR / "__init__.py").resolve():
             return loaded
-        raise ImportError(
+        raise InstallConflict(
             f"hermes-tenuo installation conflict: {source} is already loaded, "
             f"but Hermes selected {_PKG_DIR}. Keep one plugin installation "
             "(directory or pip entry point), then restart Hermes."
@@ -47,6 +88,10 @@ def _load_package():
 
 try:
     _pkg = _load_package()
+except InstallConflict as exc:
+    _pkg = None
+    register = _blocking_register(str(exc))
+    __all__ = ["register"]
 except ModuleNotFoundError as exc:
     if exc.name in ("tenuo", "tenuo_core", "path_jail"):
         raise ModuleNotFoundError(
@@ -55,9 +100,9 @@ except ModuleNotFoundError as exc:
             "'tenuo>=0.3.6,<0.4' and 'path-jail>=0.3,<0.4' in the Hermes environment."
         ) from exc
     raise
+else:
+    register = _pkg.register
+    HermesGuard = _pkg.HermesGuard
+    HermesAuditEvent = _pkg.HermesAuditEvent
 
-register = _pkg.register
-HermesGuard = _pkg.HermesGuard
-HermesAuditEvent = _pkg.HermesAuditEvent
-
-__all__ = ["register", "HermesGuard", "HermesAuditEvent"]
+    __all__ = ["register", "HermesGuard", "HermesAuditEvent"]

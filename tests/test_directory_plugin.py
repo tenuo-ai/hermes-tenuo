@@ -57,15 +57,28 @@ def test_plugin_yaml_declares_tenuo_dependency():
     assert "python_dependencies" in text and "tenuo>=0.3.6,<0.4" in text
 
 
-def test_directory_rejects_already_loaded_other_install(monkeypatch, tmp_path):
+def test_directory_blocks_every_call_when_another_install_is_loaded(monkeypatch, tmp_path):
+    """A second installation must not leave Hermes running without the plugin."""
     from types import ModuleType
-    import pytest
+    from tests.test_integration_smoke import MockCtx
     stale = ModuleType('hermes_tenuo')
     stale.__file__ = str(tmp_path / 'old' / '__init__.py')
     monkeypatch.setitem(sys.modules, 'hermes_tenuo', stale)
-    with pytest.raises(ImportError, match='installation conflict'):
-        _load_as_hermes_does()
-    assert sys.modules['hermes_tenuo'] is stale
+    module = _load_as_hermes_does()
+    assert sys.modules['hermes_tenuo'] is stale, "the two installations are never mixed"
+    ctx = MockCtx()
+    module.register(ctx)
+    verdict = ctx.call_hook("pre_tool_call", tool_name="terminal", args={"command": "id"})
+    assert verdict["action"] == "block"
+    assert "installation conflict" in verdict["message"]
+    assert str(tmp_path / 'old') in verdict["message"] and str(ROOT) in verdict["message"]
+    assert ctx.call_hook("pre_tool_call", tool_name="memory", args={})["action"] == "block"
+
+
+def test_directory_reuses_itself_when_already_loaded():
+    first = _load_as_hermes_does()
+    second = _load_as_hermes_does("hermes_plugins.hermes_tenuo_again")
+    assert first.register is second.register
 
 
 def test_directory_ignores_unloaded_stale_package(tmp_path):
