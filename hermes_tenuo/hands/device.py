@@ -623,7 +623,7 @@ class Device:
         self._log = home() / "log.jsonl"
         # Git settings in the folder that run programs: what was there at the start, and
         # what commands have added or changed since (see gitwatch).
-        self._git_seen = gitwatch.settings(self.folder)
+        self._git_seen = gitwatch.settings(self.folder, also=(self.tmp,))
         self._git_changes: List[str] = []
 
     # -- talking to the server ------------------------------------------------
@@ -1153,7 +1153,7 @@ class Device:
         if self.read_only:
             return
         try:
-            now = gitwatch.settings(self.folder)
+            now = gitwatch.settings(self.folder, also=(self.tmp,))
             new, self._git_seen = gitwatch.changed(self._git_seen, now), now
             if not new:
                 return

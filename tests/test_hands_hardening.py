@@ -163,7 +163,7 @@ def test_gitwatch_follows_included_files_and_a_named_hooks_folder(tmp_path):
     (tmp_path / "extra.cfg").write_text("[user]\n\tname = x\n")
     (tmp_path / ".hooks").mkdir()
     before = gitwatch.settings(str(tmp_path))
-    assert set(before) == {"core.hookspath"}
+    assert set(before) == {"core.hookspath", "include.path"}
     # Neither change touches .git/config or .git/hooks.
     (tmp_path / "extra.cfg").write_text("[user]\n\tname = x\n[core]\n\tfsmonitor = ./w.sh\n")
     (tmp_path / ".hooks" / "post-checkout").write_text("#!/bin/sh\n")
@@ -185,7 +185,8 @@ def test_gitwatch_never_blocks_or_follows_a_link(tmp_path):
     config.write_text("x" * ((1 << 20) + 1))
     assert ".git/config (cannot be checked)" in gitwatch.settings(str(tmp_path))
     config.write_text("[include]\n\tpath = ../../outside.cfg\n\tpath = /etc/gitconfig\n\tpath = ~/.gitconfig\n")
-    assert gitwatch.settings(str(tmp_path)) == {}           # outside the folder: commands cannot change it
+    # Outside the folder commands cannot change the files; the setting itself is recorded.
+    assert set(gitwatch.settings(str(tmp_path))) == {"include.path"}
     (tmp_path / "linked").symlink_to(tmp_path.parent)
     config.write_text("[include]\n\tpath = ../linked/outside.cfg\n[core]\n\thooksPath = linked\n")
     found = gitwatch.settings(str(tmp_path))
@@ -250,7 +251,7 @@ def test_gitwatch_decodes_quotes_and_comments_before_following_a_path(tmp_path):
                 '[alias]\n\tx = "!sh run.sh" ; runs a script\n\ty = status   # plain\n')
     (tmp_path / "extra.cfg").write_text("[user]\n\tname = x\n")
     before = gitwatch.settings(str(tmp_path))
-    assert set(before) == {"alias.x"}
+    assert set(before) == {"alias.x", "include.path"}
     (tmp_path / "extra.cfg").write_text('[core]\n\tfsmonitor = "./w.sh"\n')
     assert gitwatch.changed(before, gitwatch.settings(str(tmp_path))) == ["core.fsmonitor"]
     assert gitwatch._value('"a b"  # note') == "a b" and gitwatch._value('x\\ty "#no" ; yes') == "x\ty #no"
@@ -406,3 +407,56 @@ def test_background_processes_stop_when_the_terminal_is_already_gone(hub, folder
     seen = (folder / "tick.txt").read_text()
     time.sleep(1)
     assert (folder / "tick.txt").read_text() == seen
+
+
+def test_gitwatch_reports_a_setting_that_pulls_in_a_file_and_follows_it_into_the_temp_folder(tmp_path):
+    project, temp = tmp_path / "project", tmp_path / "state" / "tmp"
+    project.mkdir()
+    temp.mkdir(parents=True)
+    _git(project)
+    before = gitwatch.settings(str(project), also=(str(temp),))
+    assert before == {}
+    # A command points the repository at a file in its own temp folder, outside the project.
+    with open(project / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {temp}/extra.cfg\n[core]\n\thooksPath = {temp}/hooks\n")
+    (temp / "extra.cfg").write_text("[user]\n\tname = x\n")
+    added = gitwatch.settings(str(project), also=(str(temp),))
+    assert gitwatch.changed(before, added) == ["core.hookspath", "include.path"]
+    # Later it changes only files in the temp folder.
+    (temp / "extra.cfg").write_text("[core]\n\tfsmonitor = ./w.sh\n")
+    (temp / "hooks").mkdir()
+    (temp / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    later = gitwatch.settings(str(project), also=(str(temp),))
+    assert gitwatch.changed(added, later) == ["core.fsmonitor", "temp folder/hooks/pre-commit"]
+
+
+@pytest.mark.parametrize("text, name", [
+    ('[filter.lfs]\n\tclean = run\n', "filter.lfs.clean"),                       # the older section spelling
+    ('\ufeff[core]\n\tfsmonitor = ./w.sh\n', "core.fsmonitor"),                 # a byte-order mark
+    ('[remote "origin"]\n\turl = ext::sh -c run\n', "remote.origin.url"),
+    ('[remote "origin"]\n\tuploadpack = run\n', "remote.origin.uploadpack"),
+    ('[url "ext::sh -c run "]\n\tinsteadOf = https://example.com/\n', "url.ext::sh -c run .insteadof"),
+    ('[submodule "lib"]\n\tupdate = !run\n', "submodule.lib.update"),
+    ('[gpg "ssh"]\n\tprogram = run\n', "gpg.ssh.program"),
+    ('[gpg]\n\tprogram = run\n', "gpg.program"),
+    ('[interactive]\n\tdiffFilter = run\n', "interactive.difffilter"),
+    ('[trailer "sign"]\n\tcommand = run\n', "trailer.sign.command"),
+    ('[sendemail]\n\ttoCmd = run\n', "sendemail.tocmd"),
+])
+def test_gitwatch_knows_the_settings_git_runs(tmp_path, text, name):
+    _git(tmp_path)
+    with open(tmp_path / ".git" / "config", "a", encoding="utf-8") as f:
+        f.write("\n" + text if not text.startswith("\ufeff") else "")
+    if text.startswith("\ufeff"):
+        (tmp_path / ".git" / "config").write_text(text, encoding="utf-8")
+    assert name in gitwatch.settings(str(tmp_path))
+
+
+def test_gitwatch_leaves_ordinary_settings_alone(tmp_path):
+    _git(tmp_path)
+    with open(tmp_path / ".git" / "config", "a") as f:
+        f.write('[remote "origin"]\n\turl = git@example.com:a/b.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n'
+                '[branch "main"]\n\tremote = origin\n[submodule "lib"]\n\tupdate = rebase\n\turl = https://example.com/l.git\n'
+                '[url "git@example.com:"]\n\tinsteadOf = https://example.com/\n[alias]\n\tst = status\n'
+                '[user]\n\tname = x\n[sendemail]\n\tsmtpServer = smtp.example.com\n')
+    assert gitwatch.settings(str(tmp_path)) == {}
