@@ -120,12 +120,86 @@ def test_current_sender_reads_real_hermes_session_context():
         assert access.current_sender() == {"user": "telegram:7", "chat": "telegram:r", "platform": "telegram"}
     finally:
         ctx.clear_session_vars(t)
-    for local in ("cli", "desktop", "api_server"):
+    for local in ("cli", "desktop", "tui"):
         t = ctx.set_session_vars(platform=local, session_key="k")
         try:
-            assert access.current_sender() is None, local   # non-messaging: access does not govern
+            assert access.current_sender() is None, local   # the operator: access does not govern
         finally:
             ctx.clear_session_vars(t)
+
+
+def test_turns_with_no_chat_sender_are_identified_by_platform_only():
+    ctx = pytest.importorskip("gateway.session_context")
+    for surface in ("api_server", "webhook", "msgraph_webhook"):
+        # Whatever identity the caller supplies is not used.
+        t = ctx.set_session_vars(platform=surface, user_id="1", actor_id="1", chat_id="c", session_key="k")
+        try:
+            assert access.current_sender() == {"user": "", "chat": "", "platform": surface}
+        finally:
+            ctx.clear_session_vars(t)
+    # A scheduled run clears the platform and marks the context instead.
+    if "HERMES_CRON_SESSION" not in getattr(ctx, "_VAR_MAP", {}):
+        pytest.skip("this Hermes does not mark scheduled runs in the session context")
+    t = ctx.set_session_vars(platform="", session_key="")
+    token = ctx._VAR_MAP["HERMES_CRON_SESSION"].set("1")
+    try:
+        assert access.current_sender() == {"user": "", "chat": "", "platform": "cron"}
+    finally:
+        ctx._VAR_MAP["HERMES_CRON_SESSION"].reset(token)
+        ctx.clear_session_vars(t)
+
+
+def test_a_turn_with_no_chat_sender_gets_the_default_role_never_a_person(guard, monkeypatch):
+    for surface in ("api_server", "webhook", "cron"):
+        sender(monkeypatch, user="", chat="", platform=surface)
+        assert not blocked(guard, "web_search", {"query": "x"}), surface          # guest (default)
+        assert blocked(guard, "terminal", {"command": "git status"}), surface     # not the owner
+        assert blocked(guard, "read_file", {"path": "/data/reports/q3"}), surface  # not the analyst
+
+
+def test_a_turn_with_no_chat_sender_is_denied_without_a_default_role(monkeypatch):
+    key = tenuo.SigningKey.generate()
+    roles = {"roles": {"owner": {"match": {"user": ["telegram:1"]}, "allow": ["terminal"]}}}
+    policy = build_access_policy(roles, control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy)
+    sender(monkeypatch, user="", chat="", platform="api_server")
+    verdict = guard.pre_tool_call("terminal", {"command": "id"}, session_id="s")
+    assert verdict and "no access role" in verdict["message"]
+
+
+def test_a_role_can_name_a_platform_with_no_chat_sender(monkeypatch):
+    key = tenuo.SigningKey.generate()
+    roles = {"roles": {
+        "jobs": {"match": {"platform": ["cron"]}, "allow": {"terminal": {"command": {"binaries": ["git"]}}}},
+        "guest": {"default": True, "allow": ["web_search"]},
+    }}
+    policy = build_access_policy(roles, control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy)
+    sender(monkeypatch, user="", chat="", platform="cron")
+    assert not blocked(guard, "terminal", {"command": "git pull"})
+    sender(monkeypatch, user="", chat="", platform="api_server")
+    assert blocked(guard, "terminal", {"command": "git pull"})
+
+
+def test_a_child_gets_a_full_lifetime_whenever_it_is_delegated(monkeypatch):
+    """A child's grant is capped to its parent's expiry, so the role warrant is minted afresh."""
+    import time
+    from hermes_tenuo.access import AccessPolicy, parse_access
+    key = tenuo.SigningKey.generate()
+    config = parse_access({"roles": {"owner": {"match": {"user": ["telegram:1"]},
+                                               "allow": ["terminal", "delegate_task"]}}})
+    policy = AccessPolicy(config, control_key=key, holder=key.public_key, signing_key=key, ttl_seconds=60)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy)
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: (lambda task_id: None))
+    sender(monkeypatch, user="telegram:1", chat="", platform="telegram")
+    assert not blocked(guard, "terminal", {"command": "id"}, session="p")
+    first, _ = policy.warrant_for(user="telegram:1", platform="telegram")
+    time.sleep(2.2)                                                   # the role warrant ages
+    assert not blocked(guard, "delegate_task", {"goal": "x"}, session="p")
+    guard.on_subagent_start("p", "child", child_goal="x")
+    child, _ = guard._session_warrants["child"]
+    assert child.ttl_remaining.total_seconds() > first.ttl_remaining.total_seconds() + 1
+    assert not blocked(guard, "terminal", {"command": "id"}, session="child")
 
 
 def test_access_enforces_through_real_session_context():

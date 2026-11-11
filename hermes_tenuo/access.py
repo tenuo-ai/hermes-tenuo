@@ -55,16 +55,34 @@ class AccessConfigError(ValueError):
 NOBODY = "?"
 
 
+# Turns that reach Hermes from outside but carry no chat sender: API callers,
+# webhooks and scheduled runs. They are matched against roles by platform only.
+UNATTENDED_SURFACES = ("api_server", "webhook", "msgraph_webhook", "cron")
+# The operator's own surfaces, for a Hermes without the messaging-surface check.
+_LOCAL_SURFACES = ("cli", "desktop", "local", "tui", "codex", "tool", "gateway", "kanban")
+
+
+def _unattended(platform: str) -> Dict[str, str]:
+    """A sender with no person and no chat: only a role naming *platform* can match."""
+    return {"user": "", "chat": "", "platform": platform}
+
+
 def current_sender() -> Optional[Dict[str, str]]:
-    """The current turn's sender, for role matching, or None off a gateway.
+    """The current turn's sender, for role matching, or None on a local turn.
 
     ``user`` and ``chat`` are ``"<platform>:<id>"``; ``platform`` is the bare
     platform. The identity follows the message's actual sender where Hermes names
     it (``HERMES_SESSION_ACTOR_ID``), so a shared group chat is authorised per
     message rather than per session — the sender a model believes it is talking
     to never changes who the tool call is authorised as. A messaging turn with no
-    single sender is ``NOBODY``. A non-gateway turn (CLI / local, no platform)
-    returns None so access does not govern it.
+    single sender is ``NOBODY``.
+
+    An API-server or webhook turn and a scheduled (cron) run have no chat sender;
+    they carry an empty ``user`` and ``chat``, so only a role that names their
+    platform matches them, and otherwise they get the default role or are denied.
+    Any identity such a caller supplies is not used. Only the operator's own
+    surfaces (CLI, desktop, TUI) return None, leaving the turn to the static
+    warrant.
     """
     try:
         from gateway import session_context as context
@@ -74,16 +92,16 @@ def current_sender() -> Optional[Dict[str, str]]:
         import inspect
 
         read = context.get_session_env
+        scheduled = str(read("HERMES_CRON_SESSION", "") or "").strip().lower()
+        if scheduled not in ("", "0", "false", "no", "off"):
+            return _unattended("cron")
         platform = str(read("HERMES_SESSION_PLATFORM", "") or "")
         if not platform:
             return None
-        # Access governs only messaging (gateway) turns. A CLI, desktop or API turn
-        # has a platform too, but it is the operator, not a chat user: leave it to
-        # the static warrant (return None). Fall back to a small local-surface list
-        # on a Hermes without the messaging-surface check.
+        if platform.strip().lower() in UNATTENDED_SURFACES:
+            return _unattended(platform.strip().lower())
         messaging = getattr(context, "session_is_messaging_surface", None)
-        is_messaging = messaging() if callable(messaging) else platform not in (
-            "cli", "desktop", "local", "api_server", "tui", "codex", "tool", "webhook")
+        is_messaging = messaging() if callable(messaging) else platform not in _LOCAL_SURFACES
         if not is_messaging:
             return None
         chat = str(read("HERMES_SESSION_CHAT_ID", "") or "")
@@ -382,7 +400,7 @@ class AccessPolicy:
         self._warrants: Dict[str, Tuple[Any, float]] = {}   # role name → (warrant, minted monotonic)
         self._lock = threading.Lock()
 
-    def _role_warrant(self, name: str) -> Any:
+    def _role_warrant(self, name: str, fresh: bool = False) -> Any:
         import time
         from hermes_tenuo.issuance import mint_for_holder
 
@@ -390,7 +408,7 @@ class AccessPolicy:
         with self._lock:
             entry = self._warrants.get(name)
             now = time.monotonic()
-            if (entry is None or now >= entry[1] + self._ttl - margin
+            if (fresh or entry is None or now >= entry[1] + self._ttl - margin
                     or entry[0].ttl_remaining.total_seconds() <= margin):
                 role = next(r for r in self.config.roles if r.name == name)
                 warrant = mint_for_holder(self._control, self._holder, role.capabilities, self._ttl)
@@ -398,11 +416,14 @@ class AccessPolicy:
                 return warrant
             return entry[0]
 
-    def warrant_for(self, *, user: str = "", chat: str = "", platform: str = "") -> Tuple[Optional[Any], Optional[Any]]:
+    def warrant_for(self, *, user: str = "", chat: str = "", platform: str = "",
+                    fresh: bool = False) -> Tuple[Optional[Any], Optional[Any]]:
+        """The sender's role warrant. ``fresh`` mints a new one with the full lifetime,
+        for a delegation: a child's grant cannot outlive the warrant it comes from."""
         role = self.config.role_for(user=user, chat=chat, platform=platform)
         if role is None:
             return None, None
-        return self._role_warrant(role.name), self.signing_key
+        return self._role_warrant(role.name, fresh), self.signing_key
 
     def role_name_for(self, *, user: str = "", chat: str = "", platform: str = "") -> Optional[str]:
         role = self.config.role_for(user=user, chat=chat, platform=platform)

@@ -569,6 +569,23 @@ class HermesGuard:
     # delegate_task: one grant per child, staged when the call is allowed
     # ------------------------------------------------------------------
 
+    def _delegating_warrant(self, session_id: str) -> Tuple[Optional[Any], Optional[Any]]:
+        """The warrant a ``delegate_task`` call in *session_id* delegates from.
+
+        A child's grant is capped to its parent's expiry. A role warrant is
+        shared and renewed on a schedule, so it is minted afresh here: the
+        child gets the full lifetime whenever in that schedule it starts.
+        """
+        with self._session_lock:
+            bound = session_id in self._session_warrants
+        if not bound and not self._overflowed and self._access_policy is not None:
+            from hermes_tenuo.access import current_sender
+            ident = current_sender()
+            if ident is not None:
+                warrant, key = self._access_policy.warrant_for(**ident, fresh=True)
+                return (warrant, key) if warrant is not None else (_NO_ROLE, None)
+        return self._resolve_warrant(session_id)
+
     def _tools_for_toolsets(self, toolsets: List[str], tools: List[str]) -> set:
         """The subset of *tools* (warrant tool names) that *toolsets* cover.
 
@@ -645,7 +662,7 @@ class HermesGuard:
         """
         from tenuo import SigningKey
 
-        parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
+        parent_warrant, parent_key = self._delegating_warrant(parent_session_id)
         if parent_warrant is None or _marker_reason(parent_warrant) or parent_key is None:
             return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
         chain = self._chain_for(parent_session_id) + [parent_warrant]
@@ -722,7 +739,7 @@ class HermesGuard:
         if level is None:
             return {"action": "block",
                     "message": f"tenuo: delegation depth {depth} is beyond the delegation plan (max {plan.max_depth})"}
-        parent_warrant, parent_key = self._resolve_warrant(parent_session_id)
+        parent_warrant, parent_key = self._delegating_warrant(parent_session_id)
         if parent_warrant is None or _marker_reason(parent_warrant) or parent_key is None:
             return {"action": "block", "message": "tenuo: no warrant to delegate from in this session"}
         chain = self._chain_for(parent_session_id) + [parent_warrant]
