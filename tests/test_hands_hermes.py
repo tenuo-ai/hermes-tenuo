@@ -64,6 +64,16 @@ SCRIPT = textwrap.dedent('''
             time.sleep(0.05)
         return device, thread
 
+    if sys.argv[2] == "gateway":
+        import inspect
+        from gateway.session_context import set_session_vars
+        params = dict(platform="telegram", source="telegram", chat_id="123", chat_type="dm",
+                      user_id="alice", session_key="first-session-gateway", session_id="s1")
+        if "actor_id" in inspect.signature(set_session_vars).parameters:
+            params["actor_id"] = "alice"
+        set_session_vars(**params)
+        assert chat._owner() == "telegram:alice"
+
     if whole_profile:
         # The profile's backend is `hands`, and Hermes was started in a server folder.
         os.environ["TERMINAL_ENV"], os.environ["TERMINAL_CWD"] = "hands", str(server_dir)
@@ -71,10 +81,14 @@ SCRIPT = textwrap.dedent('''
     else:
         tool("before", "terminal", {"command": "pwd"})
         out["on_without_device"] = chat.command("on")
-        invite = chat.command("invite").split("'")[1]
+        invite = chat.command("setup edit").split("'")[1]
     device, serving = up(device_dir, invite=invite)
     if not whole_profile:
         out["on"] = chat.command("on")
+    out["verified"] = chat.command("verify")
+    from hermes_cli.plugins import invoke_hook
+    out["execution_context"] = next(item for item in invoke_hook("pre_llm_call")
+                                    if isinstance(item, dict) and item.get("context", "").startswith("Hands"))
     # A relative write before any command has run must still land on the device.
     tool("first", "write_file", {"path": "first.txt", "content": "first\\n"})
     tool("pwd", "terminal", {"command": "pwd"})
@@ -189,6 +203,8 @@ def _run(tmp_path, mode):
 
 def _on_the_device(out, project, server_dir):
     there = os.path.realpath(project)
+    assert "Shared folder verified: " + there in out["verified"], out["verified"]
+    assert "laptop" in out["execution_context"]["context"]
     assert (project / "first.txt").read_text() == "first\n", out["first"]
     assert out["pwd"]["text"].strip() == there
     assert out["cd"]["text"].strip() == os.path.join(there, "src")
@@ -245,3 +261,10 @@ def test_a_profile_whose_backend_is_hands(tmp_path):
     assert "cannot move" in out["off"] and "server again" not in out["off"], out["off"]
     assert out["after"]["text"].strip().startswith(os.path.realpath(project)), out["after"]
     assert "the server" not in out["status"].splitlines()[-1], out["status"]
+
+
+def test_first_session_with_real_gateway_identity(tmp_path):
+    out, project, server_dir = _run(tmp_path, "gateway")
+    _on_the_device(out, project, server_dir)
+    assert out["after"]["text"].strip() == os.path.realpath(server_dir), out["after"]
+    assert out["fresh_after"]["text"].strip() == os.path.realpath(server_dir), out["fresh_after"]

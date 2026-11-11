@@ -441,7 +441,7 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
-          network: bool = False) -> list:
+          network: bool = False, allow_unsandboxed: bool = False) -> list:
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
@@ -458,6 +458,8 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
     kind = sandbox.available()
     if kind:
         found.append((True, f"sandbox: {kind}" + (" (read-only)" if read_only else "")))
+    elif allow_unsandboxed and not read_only:
+        found.append((None, "No sandbox: --no-sandbox explicitly gives commands your full user access."))
     else:
         found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
                              "commands your full access"))
@@ -477,11 +479,12 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
             found.append((False, f"{saved} is damaged: pair again with a new `/hands invite` line"))
     else:
         found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
-    if url and wire.plain_and_public(url):
+    unsafe = bool(url and wire.plain_and_public(url))
+    if unsafe:
         found.append((None if plain_http else False,
                       UNENCRYPTED.format(url=url) if not plain_http else
                       f"{url} is not encrypted (--plain-http): commands and output can be read on the way"))
-    if url:
+    if url and (not unsafe or plain_http):
         # A Hands server answers a request from no device with "no session here" (410).
         # Anything else that answers is a proxy, another service, or a wrong address.
         request = urllib.request.Request(url + wire.API + "/poll", b"{}", {"Content-Type": "application/json"})
@@ -496,6 +499,20 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
                                  "another machine, set hands.url there to an address this machine can reach"))
         if status == 410:
             found.append((True, f"server reachable: {url}"))
+            try:
+                hello = _post(url + wire.API + "/hello", {}, timeout=10)
+                if not isinstance(hello, dict) or hello.get("protocol") != 1:
+                    found.append((False, "Hands protocol mismatch: update the server plugin and laptop package together"))
+                else:
+                    found.append((True, "server and laptop speak Hands protocol 1"))
+            except HandsError as e:
+                if getattr(e.__cause__, "code", None) == 404:
+                    found.append((None, "Server has no compatibility endpoint; it answers Hands v1. "
+                                  "Update the server plugin for first-session checks."))
+                else:
+                    found.append((False, f"compatibility check refused: {e}"))
+            except ConnectionError as e:
+                found.append((False, f"compatibility check failed: {e}"))
         elif status is not None:
             found.append((False, f"{url} answered (HTTP {status}), but not as a Hands server: check the address, "
                                  "and that hands.listen is set in the plugin config on the server"))
@@ -520,6 +537,12 @@ class Device:
             raise HandsError("point Hands at a project folder, not your home folder or /")
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
+        self.ttl_seconds = ttl_seconds
+        self.plain_http = plain_http
+        # A command-local CA setting disappears in a fresh shell. Resolve it now,
+        # before a reconnect can be printed or run from a different directory.
+        ca_file = os.environ.get("SSL_CERT_FILE")
+        self.ssl_cert_file = os.path.abspath(ca_file) if ca_file else ""
         self.allow_unsandboxed = allow_unsandboxed
         self.read_only = read_only  # commands may look at the folder and not change it
         self.network = network      # commands may use the internet (to install, clone, download)
@@ -1129,13 +1152,33 @@ class Device:
         if from_signal and self._waiting:
             raise _Stopped()  # leave the open request now; a running command is stopped by its own loop
 
+    def reconnect_command(self) -> str:
+        """A fresh local consent action; never include the consumed invite or its secret."""
+        args = ["env", f"TENUO_HANDS_HOME={self.state}"]
+        if self.ssl_cert_file:
+            args.append(f"SSL_CERT_FILE={self.ssl_cert_file}")
+        args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
+                     "--for", f"{self.ttl_seconds}s", "--name", self.name])
+        for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
+                              (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox")):
+            if enabled:
+                args.append(flag)
+        for path in self.named:
+            args.extend(("--read", path))
+        # Preserve only an explicitly accepted unencrypted public connection.
+        if self.plain_http:
+            args.append("--plain-http")
+        return shlex.join(args)
+
     def serve(self) -> int:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
         for line in self.summary():
             self.say("  " + line)
-        self.say("Press Ctrl-C to stop. Commands appear below as they run.")
+        self.say("Press Ctrl-C to stop device access. /hands off only changes chat routing.")
+        self.say("Back in the originating Hermes chat, run /hands verify to confirm this connection.")
+        self.say("Reconnect or renew locally with: " + self.reconnect_command())
         failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
@@ -1177,6 +1220,8 @@ class Device:
                         continue
                 self._stop_runner()
                 self.say(f"The server ended this session: {ended}")
+                self.say("If revoked, request a new /hands setup invite. Otherwise reconnect locally with: "
+                         + self.reconnect_command())
                 return 1
             except ConnectionError as e:
                 if time.time() >= self.expires:
@@ -1200,4 +1245,6 @@ class Device:
         self._drain_results()  # commands are already stopped; only reporting may continue
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
+        self.say("Commands and background processes have been stopped. This does not undo file changes.")
+        self.say("To share again for a fresh time window, run locally: " + self.reconnect_command())
         return 0

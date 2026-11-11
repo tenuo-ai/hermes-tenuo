@@ -8,7 +8,15 @@
 name: hermes-tenuo
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
-description: Per-call authorization for Hermes tool calls. Each call is checked against a signed, expiring warrant, arguments included, before the handler runs.
+description: >-
+  Per-call authorization for Hermes tool calls, plus Hands: connect one conversation
+  to a sandboxed folder on your own macOS or Linux machine while keeping Hermes
+  memory and skills on the server. Hands works without a manually minted warrant.
+  Hands is off until configured; its optional HTTP listener accepts outbound device
+  connections. Devices grant a folder and time window locally; internet is off by
+  default. Commands and results travel to the Hermes server; use HTTPS or a private
+  network. Browser/MCP tools do not move. Unsandboxed and broader-read modes require
+  explicit device flags. Authorization decisions are written to a local audit log.
 maintainer: tenuo-ai
 tier: community
 requires_hermes: ">=0.20"
@@ -22,7 +30,8 @@ capabilities:
     - on_session_start
     - on_session_end
     - subagent_start
-  provides_middleware: []
+    - pre_llm_call
+  provides_middleware: [tool_execution]
   requires_env:
     - TENUO_WARRANT
     - TENUO_SIGNING_KEY

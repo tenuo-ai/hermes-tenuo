@@ -778,6 +778,10 @@ def cmd_hands(args: argparse.Namespace) -> int:
 
     from hermes_tenuo.hands import device
     from hermes_tenuo.hands.sandbox import SandboxUnavailable
+    if args.hands_command == "demo":
+        from hermes_tenuo.hands.onboarding import create_demo
+        print(create_demo())
+        return 0
     if args.hands_command == "log":
         path = device.home() / "log.jsonl"
         lines = path.read_text().splitlines()[-args.last:] if path.is_file() else []
@@ -802,7 +806,19 @@ def cmd_hands(args: argparse.Namespace) -> int:
               "--dir FOLDER | hermes-tenuo hands log")
         return 2
     try:
-        dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
+        duration = _parse_ttl(args.ttl)
+        if duration <= 0:
+            raise ValueError("the time window must be positive")
+        print("Checking this machine before pairing…")
+        checks = device.check(args.invite, args.dir, read_only=args.read_only,
+                              plain_http=args.plain_http, network=args.network,
+                              allow_unsandboxed=args.no_sandbox)
+        for passed, text in checks:
+            print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {device.printable(text)}")
+        if any(passed is False for passed, _ in checks):
+            print("Nothing was paired. Fix the lines marked ✗, then run the same command again.")
+            return 1
+        dev = device.Device(args.invite, args.dir, duration, name=args.name,
                             allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
                             plain_http=args.plain_http, read_home=args.read_home, read=args.read or (),
                             network=args.network)
@@ -896,6 +912,7 @@ def main() -> None:
 
     hands_p = subparsers.add_parser("hands", help="Let your Hermes server use a folder on this machine")
     hands_sub = hands_p.add_subparsers(dest="hands_command")
+    hands_sub.add_parser("demo", help="Create a disposable practice project; pairs nothing")
     up_p = hands_sub.add_parser("up", help="Share one folder with the server for a set time")
     up_p.add_argument("invite", nargs="?", metavar="INVITE",
                       help="The hands://... line from `/hands invite` (only needed the first time)")

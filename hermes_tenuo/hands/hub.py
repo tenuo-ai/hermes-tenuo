@@ -296,6 +296,10 @@ class Hub:
 
     # -- what devices send -----------------------------------------------------------
 
+    def hello(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Public protocol discovery; contains no identity or authorization state."""
+        return {"protocol": 1}
+
     def pair(self, body: Dict[str, Any]) -> Dict[str, Any]:
         from tenuo import Warrant
         device = str(body.get("device", ""))
@@ -535,7 +539,7 @@ class Hub:
                         self.server.recount(self.connection, None)
 
             def _answer(self) -> None:
-                routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
+                routes = {wire.API + "/hello": hub.hello, wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
                           wire.API + "/bye": hub.bye, wire.API + "/watch": hub.watch}
                 handler = routes.get(self.path)
                 try:
