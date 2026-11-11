@@ -280,7 +280,7 @@ def test_gitwatch_follows_a_pointer_file_to_a_folder_inside(tmp_path):
     (meta / "config").write_text("[core]\n\tbare = false\n")
     (tmp_path / ".git").write_text("gitdir: repo-meta\n")
     before = gitwatch.settings(str(tmp_path))
-    assert before == {}
+    assert set(before) == {".git pointer"}
     with open(meta / "config", "a") as f:
         f.write("[core]\n\tfsmonitor = ./w.sh\n")
     (meta / "hooks" / "pre-push").write_text("#!/bin/sh\n")
@@ -291,9 +291,9 @@ def test_gitwatch_follows_a_pointer_file_to_a_folder_inside(tmp_path):
     (shared / "config").write_text('[alias]\n\tz = "!sh z.sh"\n')
     (meta / "commondir").write_text("../shared-meta\n")
     assert "alias.z" in gitwatch.settings(str(tmp_path))
-    # A pointer to somewhere outside the folder is not something commands can change.
+    # An outside target is not read, but retargeting metadata must be reported.
     (tmp_path / ".git").write_text(f"gitdir: {tmp_path.parent}/elsewhere/.git\n")
-    assert gitwatch.settings(str(tmp_path)) == {}
+    assert ".git (cannot be checked)" in gitwatch.settings(str(tmp_path))
 
 
 def test_a_git_note_keeps_secrets_out_of_the_log_and_the_terminal(hub, folder):
@@ -460,3 +460,79 @@ def test_gitwatch_leaves_ordinary_settings_alone(tmp_path):
                 '[url "git@example.com:"]\n\tinsteadOf = https://example.com/\n[alias]\n\tst = status\n'
                 '[user]\n\tname = x\n[sendemail]\n\tsmtpServer = smtp.example.com\n')
     assert gitwatch.settings(str(tmp_path)) == {}
+
+
+@pytest.mark.parametrize("common", [False, True])
+def test_gitwatch_follows_metadata_into_the_commands_temp_folder(tmp_path, common):
+    project, temp = tmp_path / "project", tmp_path / "temp"
+    project.mkdir()
+    meta = temp / "metadata"
+    (meta / "hooks").mkdir(parents=True)
+    (meta / "config").write_text("[core]\n\tbare = false\n")
+    if common:
+        (project / ".git").mkdir()
+        (project / ".git" / "commondir").write_text(str(meta) + "\n")
+    else:
+        (project / ".git").write_text(f"gitdir: {meta}\n")
+    before = gitwatch.settings(str(project), also=(str(temp),))
+    (meta / "config").write_text("[core]\n\tfsmonitor = ./watch.sh\n")
+    (meta / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    changes = gitwatch.changed(before, gitwatch.settings(str(project), also=(str(temp),)))
+    assert changes == ["core.fsmonitor", "temp folder/metadata/hooks/pre-commit"]
+
+
+def test_gitwatch_reports_uninspectable_pointer_changes_without_reading_outside(tmp_path):
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (outside / "config").write_text("[core]\n\tfsmonitor = secret-command\n")
+    (project / ".git").write_text(f"gitdir: {outside}\n")
+    before = gitwatch.settings(str(project))
+    assert ".git (cannot be checked)" in before and "core.fsmonitor" not in before
+    (project / ".git").write_text(f"gitdir: {outside}/other\n")
+    assert gitwatch.changed(before, gitwatch.settings(str(project))) == [".git (cannot be checked)", ".git pointer"]
+
+
+@pytest.mark.parametrize("linked_root", [False, True])
+def test_gitwatch_does_not_follow_metadata_links_into_unshared_folders(tmp_path, linked_root):
+    project, temp, outside = tmp_path / "project", tmp_path / "temp", tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (outside / "config").write_text("[core]\n\tfsmonitor = secret-command\n")
+    if linked_root:
+        temp.symlink_to(outside, target_is_directory=True)
+        target = temp
+    else:
+        temp.mkdir()
+        target = temp / "metadata"
+        target.symlink_to(outside, target_is_directory=True)
+    (project / ".git").write_text(f"gitdir: {target}\n")
+    found = gitwatch.settings(str(project), also=(str(temp),))
+    assert "core.fsmonitor" not in found
+    assert any("cannot be checked" in name for name in found)
+
+
+@sandboxed
+@mac
+def test_device_reports_git_directory_moved_into_temp_by_a_sandboxed_command(hub, folder):
+    import shlex
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(folder)], check=True)
+    running = up(hub, folder)
+    temp = running.device.tmp
+    destination = os.path.join(temp, "moved-git")
+    try:
+        out, code = run(hub, f"mv .git {shlex.quote(destination)} && "
+                        f"printf '%s\\n' {shlex.quote('gitdir: ' + destination)} > .git && "
+                        "git config core.fsmonitor ./watch.sh")
+        assert code == 0, out
+        assert any("core.fsmonitor" in line for line in running.lines)
+        # Subsequent writes are monitored even though the pointer is unchanged.
+        running.lines.clear()
+        out, code = run(hub, "git config core.fsmonitor ./changed.sh")
+        assert code == 0, out
+        assert any("core.fsmonitor" in line for line in running.lines)
+    finally:
+        running.stop()
+        running.thread.join(timeout=10)

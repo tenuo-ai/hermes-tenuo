@@ -73,17 +73,6 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def _inside(folder: str, path: str, base: str) -> Optional[str]:
-    """*path* (as git reads it from a file in *base*) relative to *folder*, or None if outside."""
-    if path.startswith("~"):
-        return None
-    full = os.path.normpath(path if os.path.isabs(path) else os.path.join(folder, base, path))
-    root = os.path.normpath(folder)
-    if full != root and not full.startswith(root + os.sep):
-        return None
-    return os.path.relpath(full, root)
-
-
 def _locate(roots: List[Tuple[str, int, str]], path: str, origin: int, base: str) -> Optional[Tuple[int, str]]:
     """Which writable folder *path* is in, and where: (index into *roots*, relative path).
 
@@ -257,35 +246,48 @@ def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], bud
         os.close(fd)
 
 
-def _git_dirs(folder: str, folder_fd: int, kind: int, found: Dict[str, str]) -> List[str]:
-    """The repository's own folders inside *folder* (relative to it) that hold its settings."""
+def _path_label(roots: List[Tuple[str, int, str]], index: int, relative: str) -> str:
+    return relative if not roots[index][2] else os.path.join(roots[index][2], relative)
+
+
+def _git_dirs(roots: List[Tuple[str, int, str]], kind: int,
+              found: Dict[str, str]) -> List[Tuple[int, str]]:
+    """Repository metadata in any writable root, including the commands' temp folder."""
     if stat.S_ISDIR(kind):
-        dirs = [".git"]
+        dirs = [(0, ".git")]
     elif stat.S_ISREG(kind):
-        # A pointer file. Its target matters only inside the folder: commands cannot
-        # change anything outside it.
         try:
-            text = _read(folder_fd, ".git") or ""
+            text = _read(roots[0][1], ".git") or ""
         except OSError:
             found[f".git ({_UNCHECKED})"] = "unchecked"
             return []
+        # Retargeting metadata is itself worth reporting, even when the new
+        # target is outside the roots we can inspect or contains no run settings.
+        found[".git pointer"] = _digest(text)
         pointer = re.match(r"gitdir:[ \t]*(.+)", text.strip())
-        target = _inside(folder, pointer.group(1).strip(), "") if pointer else None
-        if target in (None, "."):
+        target = _locate(roots, pointer.group(1).strip(), 0, "") if pointer else None
+        if target is None:
+            found[f".git ({_UNCHECKED})"] = _digest(text)
             return []
         dirs = [target]
     else:
         found[f".git ({_UNCHECKED})"] = "unchecked"
         return []
-    for gitdir in list(dirs):   # a worktree keeps its settings and hooks in a shared folder
+    for index, gitdir in list(dirs):
         name = os.path.join(gitdir, "commondir")
+        shown = _path_label(roots, index, name)
         try:
-            common = _read(folder_fd, name)
+            common = _read(roots[index][1], name)
         except OSError:
-            found[f"{name} ({_UNCHECKED})"] = "unchecked"
+            found[f"{shown} ({_UNCHECKED})"] = "unchecked"
             continue
-        target = _inside(folder, common.strip(), gitdir) if common else None
-        if target not in (None, ".") and target not in dirs:
+        if common is None:
+            continue
+        found[shown] = _digest(common)
+        target = _locate(roots, common.strip(), index, gitdir)
+        if target is None:
+            found[f"{shown} ({_UNCHECKED})"] = _digest(common)
+        elif target not in dirs:
             dirs.append(target)
     return dirs
 
@@ -317,16 +319,16 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
             return found      # no repository here
         for extra in also:
             try:
-                roots.append((os.path.normpath(extra), os.open(extra, flags), "temp folder"))
+                roots.append((os.path.normpath(extra), os.open(extra, flags | os.O_NOFOLLOW), "temp folder"))
             except OSError:
                 continue      # not there (yet): nothing in it to read
 
         def label(index: int, relative: str) -> str:
-            return relative if not roots[index][2] else os.path.join(roots[index][2], relative)
+            return _path_label(roots, index, relative)
 
-        git_dirs = _git_dirs(folder, folder_fd, kind, found)
+        git_dirs = _git_dirs(roots, kind, found)
         # Each of the repository's folders may hold shared and per-worktree settings.
-        queue = [(0, os.path.join(gitdir, name)) for gitdir in git_dirs for name in ("config", "config.worktree")]
+        queue = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
         seen: set = set()
         hook_folders: List[Tuple[int, str]] = []
         while queue:
@@ -359,9 +361,10 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
                 elif _runs(section, sub, key, value):
                     found[name] = _digest(found.get(name, "") + value)
         budget = [_HOOK_BYTES]
-        for gitdir in git_dirs:
+        for index, gitdir in git_dirs:
             hooks = os.path.join(gitdir, "hooks")
-            _hooks(folder_fd, hooks, "hooks" if gitdir == ".git" else hooks, found, budget)
+            shown = "hooks" if (index, gitdir) == (0, ".git") else label(index, hooks)
+            _hooks(roots[index][1], hooks, shown, found, budget)
         # Git uses the last hooks path it reads; every one named is looked at, so the
         # order files were read in here cannot hide the one in effect.
         for index, relative in hook_folders[:_HOOK_FOLDERS]:
