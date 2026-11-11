@@ -521,6 +521,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             check(False, f"{message}; Hermes does not load the plugin, so nothing is enforced", remedy)
         else:
             note(f"{message}; {remedy}")
+    if not hermes_cli_available():
+        note(f"hermes_cli not importable here — reading {config_path()} directly")
     try:
         config = load_hermes_config()
         plugins_cfg = config.get("plugins") or {}
