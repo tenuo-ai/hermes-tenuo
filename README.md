@@ -236,6 +236,12 @@ Runnable versions of the first three live in
 
 ## Hands: let your server's agent use your own machine
 
+**Start here:** [your first Hands session](docs/hands-first-session.md) uses a disposable project,
+permission presets and `/hands verify`. In chat, `/hands setup` explains server configuration
+when Hands is off, or offers read/edit/online choices when it is ready. On your laptop,
+`uvx hermes-tenuo hands demo` creates the practice project without pairing anything.
+
+
 Your Hermes runs on a server, with its skills and memory. Your code is on your
 laptop. Hands lets a conversation with that server run its commands and file
 tools in one folder on the laptop, for a time you choose. It needs no
@@ -273,6 +279,8 @@ someone else in a shared chat does not run on it.
 
 | Command | Where | What it does |
 |---|---|---|
+| `/hands setup [read\|edit\|online]` | chat | Guided setup and a one-hour permission preset. |
+| `/hands verify` | chat | A read-only folder probe, with machine, permissions and time remaining. |
 | `/hands invite` | chat | Prints the line to run on your machine. Works once, for 10 minutes. |
 | `/hands on [name]` | chat | This conversation runs on that machine. |
 | `/hands off` | chat | This conversation runs on the server again. |

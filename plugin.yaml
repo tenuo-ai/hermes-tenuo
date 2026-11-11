@@ -3,7 +3,9 @@ version: 0.3.1
 description: >
   Per-call authorization for Hermes Agent tool calls.
   Each call is checked against a signed, expiring warrant before the
-  handler runs, including argument constraints.
+  handler runs, including argument constraints. Hands connects one conversation
+  to a time-limited, sandboxed folder on your own machine; no manual warrant
+  is needed for Hands.
 author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
@@ -12,13 +14,14 @@ kind: standalone
 python_dependencies:
   - "tenuo>=0.3.6,<0.4"
 requires_hermes: ">=0.20"
-tags: [security, authorization, warrants, tenuo]
+tags: [security, authorization, warrants, tenuo, remote, workspace]
 provides_hooks:
   - pre_tool_call
   - post_tool_call
   - on_session_start
   - on_session_end
   - subagent_start
+  - pre_llm_call
 requires_env:
   - name: TENUO_WARRANT
     description: "Base64-encoded warrant or path to a .warrant file. Required to activate enforcement (or set plugins.entries.hermes-tenuo.warrant)."
