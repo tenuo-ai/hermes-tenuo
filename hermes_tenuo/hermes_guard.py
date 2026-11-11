@@ -1078,9 +1078,11 @@ class HermesGuard:
             return self._block(tool_name, args, reason, session_id, task_id, tool_call_id)
 
         # No warrant on this call: an unconfigured single-agent guard is a
-        # documented no-op.
+        # documented no-op. In access mode this is only a non-gateway turn
+        # (CLI/local) falling through — gateway turns are enforced by role, so
+        # the audit-only warning would be misleading and is suppressed.
         if warrant is None:
-            if not self._audit_only_warned:
+            if self._access_policy is None and not self._audit_only_warned:
                 self._audit_only_warned = True
                 logger.warning(
                     "hermes-tenuo: AUDIT-ONLY — no warrant configured; all tool calls "

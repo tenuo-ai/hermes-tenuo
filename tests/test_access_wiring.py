@@ -147,3 +147,15 @@ def test_access_enforces_through_real_session_context():
     assert not under(dict(platform="telegram", actor_id="7"), "terminal", {"command": "git log"})       # owner
     assert under(dict(platform="telegram", user_id="42", actor_id="999"), "terminal", {"command": "git log"})  # not owner
     assert not under(dict(platform="telegram", actor_id="999"), "web_search", {"query": "x"})           # guest default
+
+
+def test_access_mode_does_not_warn_audit_only_on_a_local_fallthrough(monkeypatch, caplog):
+    import logging
+    key = tenuo.SigningKey.generate()
+    pol = build_access_policy({"roles": {"owner": {"match": {"user": ["telegram:1"]}, "allow": {"web_search": {}}}}},
+                              control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=pol)
+    monkeypatch.setattr(access, "current_sender", lambda: None)   # CLI/local: not a gateway turn
+    with caplog.at_level(logging.WARNING):
+        assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="s") is None   # passes through
+    assert "AUDIT-ONLY" not in caplog.text and guard._audit_only_warned is False
