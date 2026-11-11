@@ -39,7 +39,8 @@ import math
 import os
 import re
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -434,6 +435,32 @@ def _signed_by(warrant: Any, roots: list) -> bool:
     return False
 
 
+def _second_installation() -> Optional[Tuple[Path, str]]:
+    """The Hermes plugin directory when this package is installed beside it, else None.
+
+    Only meaningful inside the environment Hermes runs in: there Hermes imports
+    this package first and then selects the directory. The second value says
+    what that directory's loader does on the conflict: ``"blocks"`` every tool
+    call, ``"drops"`` the plugin (Hermes then enforces nothing), or ``"reuses"``
+    this package.
+    """
+    from hermes_tenuo._home import hermes_cli_available, hermes_home
+
+    if not hermes_cli_available():
+        return None
+    directory = hermes_home() / "plugins" / "hermes-tenuo"
+    package = directory / "hermes_tenuo" / "__init__.py"
+    try:
+        if not package.is_file() or package.resolve() == Path(__file__).resolve().parent / "__init__.py":
+            return None
+        shim = (directory / "__init__.py").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "_blocking_register" in shim:
+        return directory, "blocks"
+    return directory, "drops" if "installation conflict" in shim else "reuses"
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Tool-call authorization check.
 
@@ -482,6 +509,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # 3. Hermes config — is the plugin enabled?
     config_entry: dict = {}
     from hermes_tenuo._home import config_path, hermes_cli_available, load_hermes_config
+    second = _second_installation()
+    if second is not None:
+        directory, effect = second
+        message = f"two installations: this package and the plugin directory {directory}"
+        remedy = ("keep one: uninstall hermes-tenuo from the Hermes environment (uvx still runs "
+                  "this command), or remove the directory, then restart Hermes")
+        # The outcome depends on Hermes importing this package before it loads the
+        # directory, which it does when it scans enabled plugins for model providers.
+        if effect == "blocks":
+            check(False, f"{message}; when Hermes loads both, every tool call is blocked", remedy)
+        elif effect == "drops":
+            check(False, f"{message}; when Hermes loads both, the plugin is not loaded and nothing is enforced", remedy)
+        else:
+            note(f"{message}; {remedy}")
     if not hermes_cli_available():
         note(f"hermes_cli not importable here — reading {config_path()} directly")
     try:
