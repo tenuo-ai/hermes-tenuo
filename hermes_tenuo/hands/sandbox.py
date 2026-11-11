@@ -21,7 +21,9 @@ PRIVATE = (".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".azure", "
            ".zsh_history", ".bash_history", ".Xauthority", ".ICEauthority", "Library/Cookies",
            "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
            "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
-           ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware")
+           ".mozilla", ".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+           # Every program's settings on macOS, as files; the service that serves them is refused too.
+           "Library/Preferences")
 
 # The only system services a command may reach on macOS: name lookups, logging, DNS and
 # certificate checks. Everything else is refused, including the services that launch apps,

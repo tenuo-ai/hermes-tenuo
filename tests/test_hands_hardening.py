@@ -81,6 +81,17 @@ def test_a_command_cannot_read_preferences_or_other_programs_temp_files(hub, fol
 
 @sandboxed
 @mac
+def test_preference_files_stay_unreadable_with_the_home_folder_shown(hub, folder):
+    prefs = os.path.expanduser("~/Library/Preferences")
+    if not os.path.isdir(prefs):
+        pytest.skip("no preferences folder on this machine")
+    up(hub, folder, read_home=True)
+    out, _ = run(hub, f'ls "{prefs}" 2>/dev/null | wc -l; defaults read -g AppleLocale >/dev/null 2>&1; echo rc=$?')
+    assert out.split()[0] == "0" and "rc=0" not in out
+
+
+@sandboxed
+@mac
 def test_a_folder_inside_the_shared_temp_area_still_works(hub, tmp_path, monkeypatch):
     import tempfile
     monkeypatch.setenv("TENUO_HANDS_HOME", str(tmp_path / "device-state"))
