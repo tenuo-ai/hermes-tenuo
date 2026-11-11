@@ -123,6 +123,29 @@ def test_status_says_roles_are_the_authority_without_a_static_warrant(tmp_path, 
     out = capsys.readouterr().out
     assert "role-based access authorises chat, API, webhook and scheduled turns" in out
     assert "general tool-call authorization is off" not in out
+    assert "Local CLI and desktop turns are not checked" in out
+
+
+@pytest.mark.parametrize("extra, local", [
+    ({"require_warrant": True}, "are not checked"),
+    ({"require_session_warrant": True}, "are blocked unless they hold a session warrant"),
+])
+def test_status_follows_the_runtime_when_other_switches_are_set(tmp_path, monkeypatch, capsys, extra, local):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    monkeypatch.delenv("TENUO_REQUIRE_SESSION_WARRANT", raising=False)
+    config = _config(ROLES)
+    config["plugins"]["entries"]["hermes-tenuo"].update(extra)
+    import hermes_tenuo._home as home
+    monkeypatch.setattr(home, "load_hermes_config", lambda: config)
+    from argparse import Namespace
+
+    from hermes_tenuo.cli import cmd_status
+
+    cmd_status(Namespace())
+    out = capsys.readouterr().out
+    assert "role-based access authorises" in out and f"Local CLI and desktop turns {local}" in out
+    assert "every tool call is blocked" not in out
 
 
 def test_a_malformed_configured_key_fails_closed_without_provisioning(tmp_path, monkeypatch):

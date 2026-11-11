@@ -397,11 +397,15 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("\n  A warrant is set but the signing key is not — every tool call is blocked until it is.")
     elif warrant_set:
         print(f"\n  A warrant is set but trusted_root is not — {_trust_failure_effect(entry.get('on_denial'))}.")
+    elif entry.get("access") is not None:
+        # Roles are the authority here, so require_warrant does not block them.
+        from hermes_tenuo._config import get_require_session_warrant
+        local = ("are blocked unless they hold a session warrant (require_session_warrant is on)"
+                 if get_require_session_warrant(None) is True else "are not checked")
+        print("\n  No static warrant: role-based access authorises chat, API, webhook and scheduled turns.\n"
+              f"  Local CLI and desktop turns {local}. Run `hermes-tenuo doctor` to check the roles.")
     elif get_require_warrant(None):
         print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
-    elif entry.get("access") is not None:
-        print("\n  No static warrant: role-based access authorises chat, API, webhook and scheduled turns.\n"
-              "  Local CLI and desktop turns are not checked. Run `hermes-tenuo doctor` to check the roles.")
     else:
         print("\n  No warrant — general tool-call authorization is off. Hands device grants are independent.")
     return 0

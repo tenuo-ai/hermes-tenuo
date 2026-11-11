@@ -138,6 +138,8 @@ def test_turns_with_no_chat_sender_are_identified_by_platform_only():
         finally:
             ctx.clear_session_vars(t)
     # A scheduled run clears the platform and marks the context instead.
+    if "HERMES_CRON_SESSION" not in getattr(ctx, "_VAR_MAP", {}):
+        pytest.skip("this Hermes does not mark scheduled runs in the session context")
     t = ctx.set_session_vars(platform="", session_key="")
     token = ctx._VAR_MAP["HERMES_CRON_SESSION"].set("1")
     try:
