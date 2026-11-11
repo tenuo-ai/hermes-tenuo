@@ -306,8 +306,11 @@ local process during a session.
 
 Hands redacts recognized credentials from tool results on the device before
 signing or sending them, and from commands recorded in its local log. It matches
-common token formats, sensitive values from the launch environment, and values
-of at least six characters from regular project-root `.env*` files up to 64 KiB.
+common token formats, and the values (of at least six characters) of
+secret-looking keys — secret, token, password, api key, credential and the like
+— in both the launch environment and regular project-root `.env*` files up to
+64 KiB. A value under an unrecognized key is not collected this way, though a
+known token format or a URL credential in it is still matched.
 Redacted text uses `[redacted]`; the local console reports redaction, and
 ordinary terminal results include a notice. Hermes file-read base64 samples
 are scrubbed along with their plaintext pages, preserving transport framing.
