@@ -207,8 +207,8 @@ register = _pkg.register
 
 
 @pytest.mark.parametrize("shim, effect, said, fails", [
-    (_THIS_SHIM, "blocks", "Hermes blocks every tool call until one is removed", True),
-    (_RAISING_SHIM, "drops", "Hermes does not load the plugin, so nothing is enforced", True),
+    (_THIS_SHIM, "blocks", "when Hermes loads both, every tool call is blocked", True),
+    (_RAISING_SHIM, "drops", "when Hermes loads both, the plugin is not loaded and nothing is enforced", True),
     (_REUSING_SHIM, "reuses", "—  two installations", False),
 ])
 def test_doctor_reports_a_second_installation_by_what_its_loader_does(

@@ -12,6 +12,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -57,15 +59,43 @@ def test_plugin_yaml_declares_tenuo_dependency():
     assert "python_dependencies" in text and "tenuo>=0.3.6,<0.4" in text
 
 
-def test_directory_blocks_every_call_when_another_install_is_loaded(monkeypatch, tmp_path):
-    """A second installation must not leave Hermes running without the plugin."""
+def _fake_registry(monkeypatch, enforcement: bool, denied: bool):
+    """Stand in for Hermes's ``tools.registry``, with or without registry enforcement."""
     from types import ModuleType
-    from tests.test_integration_smoke import MockCtx
+
+    class Registry:
+        def __init__(self):
+            self.installed = []
+
+    if enforcement:
+        Registry.set_enforcement_fn = lambda self, fn: self.installed.append(fn)
+    module = ModuleType("tools.registry")
+    module.registry = Registry()
+    if denied:
+        module.EnforcementDenied = type("EnforcementDenied", (Exception,), {})
+    package = ModuleType("tools")
+    package.__path__ = []
+    package.registry = module
+    monkeypatch.setitem(sys.modules, "tools", package)
+    monkeypatch.setitem(sys.modules, "tools.registry", module)
+    return module
+
+
+def _conflicting_load(monkeypatch, tmp_path):
+    from types import ModuleType
     stale = ModuleType('hermes_tenuo')
     stale.__file__ = str(tmp_path / 'old' / '__init__.py')
     monkeypatch.setitem(sys.modules, 'hermes_tenuo', stale)
     module = _load_as_hermes_does()
     assert sys.modules['hermes_tenuo'] is stale, "the two installations are never mixed"
+    return module
+
+
+def test_directory_blocks_every_call_when_another_install_is_loaded(monkeypatch, tmp_path):
+    """A second installation must not leave Hermes running without the plugin."""
+    from tests.test_integration_smoke import MockCtx
+    registry = _fake_registry(monkeypatch, enforcement=False, denied=False)
+    module = _conflicting_load(monkeypatch, tmp_path)
     ctx = MockCtx()
     module.register(ctx)
     verdict = ctx.call_hook("pre_tool_call", tool_name="terminal", args={"command": "id"})
@@ -73,6 +103,23 @@ def test_directory_blocks_every_call_when_another_install_is_loaded(monkeypatch,
     assert "installation conflict" in verdict["message"]
     assert str(tmp_path / 'old') in verdict["message"] and str(ROOT) in verdict["message"]
     assert ctx.call_hook("pre_tool_call", tool_name="memory", args={})["action"] == "block"
+    assert registry.registry.installed == []
+
+
+@pytest.mark.parametrize("denied", [True, False])
+def test_directory_conflict_also_denies_through_the_registry(monkeypatch, tmp_path, denied):
+    """Where Hermes offers registry enforcement, the conflict blocks there and in the hook."""
+    from tests.test_integration_smoke import MockCtx
+    registry = _fake_registry(monkeypatch, enforcement=True, denied=denied)
+    module = _conflicting_load(monkeypatch, tmp_path)
+    ctx = MockCtx()
+    module.register(ctx)
+    assert len(registry.registry.installed) == 1
+    expected = registry.EnforcementDenied if denied else PermissionError
+    with pytest.raises(expected) as raised:
+        registry.registry.installed[0]("terminal", {"command": "id"}, session_id="s1")
+    assert str(tmp_path / 'old') in str(raised.value) and str(ROOT) in str(raised.value)
+    assert ctx.call_hook("pre_tool_call", tool_name="terminal", args={})["action"] == "block"
 
 
 def test_directory_reuses_itself_when_already_loaded():

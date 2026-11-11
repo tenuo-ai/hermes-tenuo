@@ -515,10 +515,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         message = f"two installations: this package and the plugin directory {directory}"
         remedy = ("keep one: uninstall hermes-tenuo from the Hermes environment (uvx still runs "
                   "this command), or remove the directory, then restart Hermes")
+        # The outcome depends on Hermes importing this package before it loads the
+        # directory, which it does when it scans enabled plugins for model providers.
         if effect == "blocks":
-            check(False, f"{message}; Hermes blocks every tool call until one is removed", remedy)
+            check(False, f"{message}; when Hermes loads both, every tool call is blocked", remedy)
         elif effect == "drops":
-            check(False, f"{message}; Hermes does not load the plugin, so nothing is enforced", remedy)
+            check(False, f"{message}; when Hermes loads both, the plugin is not loaded and nothing is enforced", remedy)
         else:
             note(f"{message}; {remedy}")
     if not hermes_cli_available():
