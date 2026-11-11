@@ -26,9 +26,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from hermes_tenuo.hands import sandbox, wire
+from hermes_tenuo.hands import gitwatch, sandbox, wire
 from hermes_tenuo.hands.paths import workspace
 from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
 
@@ -588,6 +588,9 @@ class Device:
         self.say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
+        # The name is shown in the chat and to the agent, on one line.
+        if not self.name.strip() or len(self.name) > 64 or not self.name.isprintable():
+            raise HandsError("the machine name must be 1 to 64 printable characters on one line: pass --name")
         saved = home() / "server.json"
         if invite:
             parsed = wire.Invite.parse(invite)
@@ -618,6 +621,10 @@ class Device:
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
         self._log = home() / "log.jsonl"
+        # Git settings in the folder that run programs: what was there at the start, and
+        # what commands have added or changed since (see gitwatch).
+        self._git_seen = gitwatch.settings(self.folder)
+        self._git_changes: List[str] = []
 
     # -- talking to the server ------------------------------------------------
 
@@ -1135,7 +1142,25 @@ class Device:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
+        self._git_note()
         self._deliver(job_id, output, code)
+
+    def _git_note(self) -> None:
+        """Tell the person when a command changed what git will run in this folder."""
+        if self.read_only:
+            return
+        now = gitwatch.settings(self.folder)
+        new, self._git_seen = gitwatch.changed(self._git_seen, now), now
+        if not new:
+            return
+        self._git_changes += [name for name in new if name not in self._git_changes]
+        names = ", ".join(printable(name)[:60] for name in new[:6]) + (" and more" if len(new) > 6 else "")
+        self.say(f"  Note: that command changed git settings that run programs: {names}.")
+        self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
+                 "Check .git/config and .git/hooks before you do.")
+        with open(self._log, "a") as f:
+            f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
+                                "note": f"git settings that run programs changed: {', '.join(new[:20])}"}) + "\n")
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],
@@ -1280,5 +1305,9 @@ class Device:
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         self.say("Commands and background processes have been stopped. This does not undo file changes.")
+        if self._git_changes:
+            names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
+            self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
+                     f"programs ({names}). Check .git/config and .git/hooks.")
         self.say("To share again for a fresh time window, run locally: " + self.reconnect_command())
         return 0
