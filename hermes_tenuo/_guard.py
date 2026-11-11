@@ -32,6 +32,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         get_on_denial,
         get_require_session_warrant,
         get_signing_key,
+        get_signing_key_raw,
         get_trusted_roots,
         load_warrant,
         resolve_warrant_text,
@@ -40,6 +41,8 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     # Role-based access: the plugin mints one warrant per role from config and
     # resolves each gateway turn to its sender's role. It needs a signing key to
     # mint and present those warrants (its public key becomes a trusted root).
+    # Every failure below raises WarrantLoadError so register() installs block-all
+    # rather than losing enforcement to an escaped exception.
     access_policy = None
     access_block = get_access_block(ctx)
     if access_block is not None:
@@ -47,16 +50,26 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
 
         access_key = get_signing_key(ctx)
         if access_key is None:
-            # No key configured: provision one under $HERMES_HOME/tenuo so access
-            # works with no key management. A configured key still takes precedence.
+            if get_signing_key_raw(ctx):
+                # Configured but undecodable: fail closed, never provision a different key.
+                raise WarrantLoadError(
+                    "the configured signing key (signing_key_env / TENUO_SIGNING_KEY) could not be "
+                    "loaded — every tool call is blocked until it is fixed"
+                )
+            # Absent: provision one under $HERMES_HOME/tenuo so access needs no key management.
             from hermes_tenuo.access import access_key_path, load_or_create_signing_key
-            access_key = load_or_create_signing_key()
+            try:
+                access_key = load_or_create_signing_key()
+            except OSError as exc:
+                raise WarrantLoadError(
+                    f"could not provision an access signing key ({exc}) — every tool call is blocked"
+                ) from exc
             logger.info("hermes-tenuo: access signing key auto-provisioned at %s", access_key_path())
         try:
             access_policy = build_access_policy(
                 access_block, control_key=access_key, holder=access_key.public_key, signing_key=access_key,
             )
-        except AccessConfigError as exc:
+        except (AccessConfigError, ValueError, TypeError) as exc:
             raise WarrantLoadError(f"{exc} — every tool call is blocked until access is fixed") from exc
 
     try:
@@ -78,9 +91,12 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
                 "TENUO_WARRANT is set but could not be loaded — "
                 "every tool call is blocked until the warrant is fixed"
             )
-    elif access_policy is not None:
+    elif access_policy is not None and source == "none":
         # Access mode supplies authority through the per-role warrants; a static
-        # warrant is optional (it would only cover non-gateway, local turns).
+        # warrant is optional (it would only cover non-gateway, local turns). Only
+        # a genuinely unconfigured static warrant is allowed to be empty here — a
+        # kanban worker with no staged warrant, or an empty warrant file, still
+        # fails closed below.
         warrant = None
     elif source == "none" or source.startswith("kanban:"):
         # Not configured, or a kanban worker with no staged task warrant

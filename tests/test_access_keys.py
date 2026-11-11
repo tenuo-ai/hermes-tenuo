@@ -107,3 +107,43 @@ def test_doctor_reports_the_access_block(tmp_path, monkeypatch, capsys):
     assert "every role compiles to a warrant" in out
     # No static warrant is not a failure when access provides the authority.
     assert "role-based access (below) is the tool-call authority" in out
+
+
+def test_a_malformed_configured_key_fails_closed_without_provisioning(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TENUO_SIGNING_KEY", "not-a-valid-base64-key!!!")
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    import hermes_tenuo._home as home
+    monkeypatch.setattr(home, "load_hermes_config", lambda: _config(ROLES))
+    from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
+    from hermes_tenuo.access import access_key_path
+
+    with pytest.raises(WarrantLoadError, match="could not be loaded"):
+        build_plugin_guard(None)
+    assert not access_key_path().is_file()   # did not provision a different key behind a bad one
+
+
+def test_access_with_an_empty_static_warrant_still_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_SIGNING_KEY", raising=False)
+    import hermes_tenuo._config as cfgmod
+    import hermes_tenuo._home as home
+    monkeypatch.setattr(home, "load_hermes_config", lambda: _config(ROLES))
+    monkeypatch.setattr(cfgmod, "resolve_warrant_text", lambda ctx: ("", "env"))  # configured but empty
+    from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
+
+    with pytest.raises(WarrantLoadError, match="empty"):
+        build_plugin_guard(None)
+
+
+def test_a_broken_constraint_in_the_block_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("TENUO_WARRANT", raising=False)
+    import hermes_tenuo._home as home
+    bad = {"roles": {"r": {"match": {"user": ["u"]}, "allow": {"wait": {"seconds": {"range": [1]}}}}}}
+    monkeypatch.setattr(home, "load_hermes_config", lambda: _config(bad))
+    from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
+
+    with pytest.raises(WarrantLoadError):
+        build_plugin_guard(None)

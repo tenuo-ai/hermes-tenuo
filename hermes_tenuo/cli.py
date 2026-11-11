@@ -690,8 +690,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 check(True, "access: every role compiles to a warrant")
                 for role in cfg.roles:
                     note(f"  role {role.name}: {', '.join(sorted(role.capabilities)) or '(no tools)'}")
-            except AccessConfigError as exc:
+            except (AccessConfigError, ValueError, TypeError) as exc:
                 check(False, f"access role: {exc}", blocks)
+
+        # The child-warrant and delegation-plan files are loaded at startup whether
+        # or not a static warrant is set, but the warrant block above checks them
+        # only when one is. For an access-only install, check them here too.
+        if warrant is None:
+            plan_path = get_delegation_plan_path(None)
+            if plan_path:
+                from hermes_tenuo.delegation import DelegationPlanError, load_plan
+                try:
+                    load_plan(plan_path)
+                    check(True, "delegation plan loads")
+                except DelegationPlanError as exc:
+                    check(False, f"delegation plan: {exc}", blocks)
+            try:
+                child_raw = get_child_warrant_raw(None)
+            except OSError as exc:
+                check(False, f"child warrant path cannot be read: {exc}", blocks)
+            else:
+                if child_raw is not None and load_warrant(child_raw) is None:
+                    check(False, "child_warrant is set but could not be loaded", blocks)
+                elif child_raw is not None and plan_path:
+                    check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
 
     # 9. on_denial
     on_denial = config_entry.get("on_denial", "block")
