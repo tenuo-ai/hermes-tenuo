@@ -32,6 +32,8 @@ with zipfile.ZipFile(root / f'dist/hermes_tenuo-{version}-py3-none-any.whl') as 
 with tarfile.open(root / f'dist/hermes_tenuo-{version}.tar.gz') as archive:
     names = {n.split('/', 1)[1] for n in archive.getnames() if '/' in n}
     for path in ('__init__.py', 'plugin.yaml', 'tests/conftest.py', 'tests/__init__.py',
-                 'docs/hands-first-session.md', 'scripts/check_release_artifacts.py'):
+                 'docs/hands-first-session.md', 'scripts/check_release_artifacts.py',
+                 'examples/walkthrough/setup.sh', 'examples/walkthrough/wire_profile.py',
+                 'examples/walkthrough/notes.md'):
         assert path in names, path
 print(f'Validated wheel, sdist and manifest for {version}')
