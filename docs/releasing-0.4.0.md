@@ -8,14 +8,14 @@ this preparation PR.
 
 Short description (package, GitHub About and catalog summary):
 
-> Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
+> Signed, expiring tool permissions and local workspaces for Hermes Agent.
 
 Expanded description:
 
-> Give Hermes scoped, expiring tool permissions. With Hands, let your remote
-> Hermes work in a folder on your Mac or Linux machine while its memory and skills
-> stay on the server. Choose the folder, access level, and duration locally.
-> Hands requires no manually minted warrant.
+> Tenuo warrants control which tools and arguments each task can use, including
+> delegated agents. Hands lets your remote Hermes work in a folder on your Mac
+> or Linux machine while memory and skills stay on the server. Use either feature
+> independently or together.
 
 Keep the operational disclosures in the catalog draft: optional listener,
 commands/results sent to the server, network off by default, platform sandbox
@@ -58,7 +58,7 @@ commands. This substitution belongs in release testing, not user onboarding.
 3. Verify a fresh `uvx --from hermes-tenuo==0.4.0 hermes-tenuo --version` and
    a full Hands session against the proposed catalog commit.
 4. Update GitHub About using the short copy above. Suggested topics: hermes-agent,
-   agents, security, authorization, sandbox, remote-workspace.
+   agents, authorization, warrants, hands, sandbox, remote-workspace.
 5. Replace the all-zero SHA in `plugin-catalog-entry.yaml` with the release commit
    and validate against current upstream catalog requirements. Submit upstream
    only after its review/age requirements and all first-session checks pass.

@@ -12,15 +12,16 @@ category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
 description: >-
-  Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
-  With Hands, connect one conversation
-  to a sandboxed folder on your own macOS or Linux machine while keeping Hermes
-  memory and skills on the server. Hands works without a manually minted warrant.
-  Hands is off until configured; its optional HTTP listener accepts outbound device
-  connections. Devices grant a folder and time window locally; internet is off by
-  default. Commands and results travel to the Hermes server; use HTTPS or a private
-  network. Browser/MCP tools do not move. Unsandboxed and broader-read modes require
-  explicit device flags. Authorization decisions are written to a local audit log.
+  Signed, expiring tool permissions and local workspaces for Hermes Agent.
+  Tenuo warrants control which tools and arguments each task can use, including
+  delegated agents. Hands connects a folder on your Mac or Linux machine to an
+  existing Hermes conversation while memory and skills stay on the server.
+  Use either feature independently or together. Hands is off until configured;
+  its optional HTTP listener accepts outbound device connections. Internet is off
+  by default. Commands and results travel to the Hermes server and its model;
+  use HTTPS or a private network. Browser/MCP tools do not move. Unsandboxed and
+  broader-read modes require explicit device flags. Authorization decisions are
+  written to a local audit log.
 maintainer: tenuo-ai
 tier: community
 requires_hermes: ">=0.20"

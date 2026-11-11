@@ -1,4 +1,4 @@
-"""hermes-tenuo: Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
+"""hermes-tenuo: Signed, expiring tool permissions and local workspaces for Hermes Agent.
 
 Hermes calls ``register(ctx)`` at startup. See ``hermes-tenuo demo``
 for a transcript with no Hermes process.

@@ -1,70 +1,165 @@
 # Tenuo for Hermes Agent
 
-**Scoped tool permissions and sandboxed local workspaces for Hermes Agent.**
+**Let Hermes work. Decide what it can do.**
 
-Give Hermes scoped, expiring tool permissions. With **Hands**, let your remote
-Hermes work in a folder on your Mac or Linux machine while its memory and skills
-stay on the server. Choose the folder, access level, and duration locally.
+Give your Hermes agent **signed, expiring permissions** with Tenuo warrants:
+which tools it may call, which arguments it may use, and for how long.
+With **Hands**, connect your remote Hermes to a project on your Mac or Linux
+laptop while its memory and skills stay on the server.
 
-## Choose your first task
+| What do you want Hermes to do? | Start here |
+|---|---|
+| Run a task with clear limits on tools, files and duration | [Try Tenuo warrants](#try-tenuo-warrants) |
+| Work in a local project from your existing remote chat | [Try Hands](#try-hands) |
 
-| I want to… | Start here | Manual warrant? |
-|---|---|---|
-| Let remote Hermes work in a local project | [Your first Hands session](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md) | No |
-| Restrict which tools and arguments Hermes may use | [Tool authorization setup](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes) | Yes |
+Use either feature on its own, or both together.
 
-These features work independently or together. Installing the plugin alone does
-not turn on a Hands listener or configure general tool-call authorization.
+## Try Tenuo warrants
 
-## Install
+Give a nightly report job access to its reports folder, let a researcher search
+without writing files, or give a delegated agent fewer permissions than its
+parent. The limits are checked before the tool handler runs.
 
-On the Hermes server, install and enable the plugin, then restart the gateway or
-profile serving your chat:
+A warrant is a signed permission slip with an expiry. Here is a shortened
+example from the runnable demo:
+
+```text
+ALLOW  read_file  path=/data/reports/q3.csv
+DENY   read_file  path=/opt/private/payroll.csv
+DENY   terminal  command=ls
+After expiry: DENY read_file path=/data/reports/q3.csv
+```
+
+**See the checks run locally—no Hermes process or model API key needed:**
+
+```sh
+uvx --refresh hermes-tenuo demo
+```
+
+**Apply it to your Hermes:** [install and configure Tenuo](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes),
+mint a warrant for the task, and run `hermes-tenuo doctor` to check the configuration.
+For example, this grants only `web_search` for one hour:
+
+```sh
+uvx hermes-tenuo mint --ttl 1h --allow web_search
+```
+
+The command prints the configuration and signing-key instructions. Apply them
+in the Hermes profile serving the task, check the configuration, and restart
+that profile. Installing the plugin alone does not activate tool authorization.
+
+[See a real-model prompt-injection walkthrough](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/walkthrough.md)
+or explore [argument constraints and delegation](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#scoping-arguments).
+Tool-call authorization checks the calls and arguments it covers; Hands adds
+an OS sandbox for work on the connected device.
+
+## Give your remote Hermes hands
+
+**Your Hermes lives on a server. Your project is on your laptop.**
+
+Open the Hermes chat you already use, connect a folder, and ask it to get to work.
+You keep the same agent, memory and skills. Hands needs no manually minted warrant.
+
+### From your chat to your local files
+
+Ask Hermes:
+
+> Run the tests in this folder. Fix the invoice calculation without changing
+> the tests, then rerun them.
+
+The practice project gives you a small, visible result:
+
+```text
+On your laptop                         In your existing Hermes chat
+───────────────────────────────────    ─────────────────────────────
+invoice.py + two failing tests     ←    Run the tests and inspect the code
+invoice.py updated                ←    Fix the calculation
+Two tests pass                    ←    Run the tests again
+```
+
+```diff
+ def total_after_discount(subtotal, discount):
+-    return subtotal * discount
++    return subtotal * (1 - discount)
+```
+
+The edited file is on your laptop, ready for you to inspect. Your Hermes keeps
+its existing memory and skills. Then try your own project: investigate a test
+failure, review local changes, or write a script for files in the shared folder.
+
+You choose the folder and how long to share it. Internet access is off by default.
+Press **Ctrl-C on your laptop to end access**. Commands and results are sent to
+your remote Hermes and its model; keep private files out with
+[personal exclusions](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md#preview-and-keep-private-files-out).
+
+## Try Hands
+
+You'll need a running Hermes with terminal-provider and tool-middleware support,
+and a Mac or Linux laptop with Python 3. macOS uses its built-in sandbox;
+Linux needs [bubblewrap](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine).
+Hands supports terminal and file work, not GUI or browser control.
+
+**1. Server — install and connect once.**
 
 ```sh
 hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
 hermes plugins enable hermes-tenuo
 ```
 
-Leave optional warrant credentials empty if you only want Hands. Enable installs
-the runtime dependencies. Run `/hands setup` in your chat to configure the connection.
+Leave the optional credential prompts empty. Enable installs the dependencies.
+Follow the [Tailscale connection setup](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md#2-connect-your-server-and-laptop)
+to connect the server and laptop, then restart the Hermes gateway/profile serving
+your chat. An existing HTTPS endpoint works too; the guide covers both.
 
-On your Mac or Linux laptop, install [uv](https://docs.astral.sh/uv/getting-started/installation/)
-if needed, then check the CLI and create a practice project:
+**2. Laptop — create a practice folder.**
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed:
 
 ```sh
 uvx --refresh hermes-tenuo --version
 uvx hermes-tenuo hands demo
 ```
 
-Hands requires hermes-tenuo 0.4.0 or newer. The refresh ensures an older cached CLI
-is updated. Follow the printed `cd` command to enter the practice folder.
+Check that the version is 0.4.0 or newer. Follow the printed `cd` command.
+The demo creates a new temporary project; it does not change your existing files.
 
-If you manage the Hermes Python environment yourself, installing
-`hermes-tenuo==0.4.0` into that environment with pip is an alternative to the
-directory plugin. Use one installation route. `hermes-tenuo status` reports the
-invoked CLI's version and source path.
+**3. Hermes chat — connect this folder.**
 
-## First success with Hands
+Run `/hands setup edit`. Copy the command it prints into your laptop terminal
+inside the practice folder. This shares the project for one hour, with internet off.
+Keep that terminal open, then run `/hands verify` in the same chat.
 
-1. In Hermes, run `/hands setup` and configure a reachable HTTPS or private-network listener.
-2. On the laptop, run `uvx hermes-tenuo hands demo` and enter its disposable folder.
-3. In Hermes, run `/hands setup edit`; run its command locally.
-4. Run `/hands verify` in the same chat, then ask Hermes to fix the demo's invoice test.
-5. Press Ctrl-C on the laptop to end access. `/hands off` switches routing but does not end the grant.
+**4. Hermes chat — ask for the fix.**
 
-Follow the [complete walkthrough](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md)
-for prerequisites, troubleshooting, privacy exclusions and permission choices.
-Devices need macOS sandbox-exec or Linux bubblewrap; Linux network access also
-requires Landlock ABI 6. Internet is off by default. Commands and results go to
-remote Hermes and its model. Browser/MCP tools remain on the server. Secret
-redaction is best effort; exclude files that must never leave the device.
+> Run `python3 -m unittest -v` in the shared folder. Fix the invoice calculation
+> in invoice.py without changing the tests, then rerun the tests.
 
-## Documentation
+Inspect the local change. When you're done, press **Ctrl-C** in the laptop's
+sharing terminal, then `/hands off` in chat to return tools to the server.
+`/hands off` alone changes routing; it does not end the laptop grant.
 
-- [Authorization, argument constraints, delegation, audit and configuration reference](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md)
-- [Hands operational reference and Linux sandbox setup](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine)
-- [0.4.0 release checklist](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/releasing-0.4.0.md)
+**[Troubleshooting and the full walkthrough →](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md)**
+
+## Keep using the Hermes you know
+
+Hands adds a local workspace to your existing remote Hermes. Your laptop connects
+outward, so it needs no incoming port or SSH server. You approve the connection
+locally and can switch the conversation back to server tools when you're done.
+
+Hermes also supports SSH terminal backends. Hands is useful when you want to
+connect a laptop temporarily, choose the folder locally, and attach it to one
+conversation. Browser and MCP tools stay on the server.
+
+For read-only work, use `/hands setup read`. If a task needs network access,
+choose `/hands setup online` explicitly. Linux online shares also require
+Landlock ABI 6. Secret redaction is best effort; exclude files that must not be
+sent to Hermes or its model.
+
+## More
+
+- [Hands settings, platform requirements and troubleshooting](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine)
+- [Warrants, tool authorization, delegation and advanced configuration](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes)
 - [Changelog](https://github.com/tenuo-ai/hermes-tenuo/blob/main/CHANGELOG.md)
 
-Apache-2.0. [License](https://github.com/tenuo-ai/hermes-tenuo/blob/main/LICENSE).
+Hands ships in **hermes-tenuo**, the Tenuo plugin for Hermes Agent.
+[Apache-2.0 license](https://github.com/tenuo-ai/hermes-tenuo/blob/main/LICENSE).

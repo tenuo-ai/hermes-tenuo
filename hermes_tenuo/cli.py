@@ -875,7 +875,7 @@ def _parse_ttl(ttl: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="hermes-tenuo",
-        description="Scoped tool permissions and sandboxed local workspaces for Hermes Agent",
+        description="Signed, expiring tool permissions and local workspaces for Hermes Agent",
     )
     from hermes_tenuo._version import __version__
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

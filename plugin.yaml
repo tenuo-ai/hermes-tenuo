@@ -1,10 +1,11 @@
 name: hermes-tenuo
 version: 0.4.0
 description: >
-  Scoped tool permissions and sandboxed local workspaces for Hermes Agent.
-  With Hands, let your remote Hermes work in a folder on your Mac or Linux
-  machine while its memory and skills stay on the server. Choose the folder,
-  access level, and duration locally. Hands needs no manually minted warrant.
+  Signed, expiring tool permissions and local workspaces for Hermes Agent.
+  Tenuo warrants control which tools and arguments each task can use, including
+  delegated agents. Hands lets your remote Hermes work in a folder on your Mac
+  or Linux machine while memory and skills stay on the server. Use either feature
+  independently or together.
 author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
@@ -14,7 +15,7 @@ python_dependencies:
   - "path-jail>=0.3,<0.4"
   - "tenuo>=0.3.6,<0.4"
 requires_hermes: ">=0.20"
-tags: [security, authorization, warrants, tenuo, remote, workspace]
+tags: [authorization, warrants, hands, remote, workspace, sandbox, tenuo]
 provides_hooks:
   - pre_tool_call
   - post_tool_call

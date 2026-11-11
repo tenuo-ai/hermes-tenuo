@@ -13,15 +13,71 @@ hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
 hermes plugins enable hermes-tenuo
 ```
 
-Hands needs no manually minted warrant. Leave the optional enforcement credentials empty if you only want Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
+Leave the optional credential prompts empty for Hands. Restart that Hermes gateway/profile after installation. `/hands setup` is available even before its listener is configured.
 
 Hands requires hermes-tenuo 0.4.0 or newer on both the server and laptop.
 
-## 2. Configure the connection once
+## 2. Connect your server and laptop
 
-In the chat, run `/hands setup`. Follow its server configuration instructions: an HTTPS URL forwarded to the loopback Hands listener, or a Tailscale IP bound on that private network. This is **not** the Hermes Desktop gateway port. Restart the gateway/profile after changing configuration.
+For a first session, use **Tailscale** to connect the two machines privately.
+You do not need a public domain, a reverse proxy, or an incoming port on your laptop.
+If you already have an HTTPS endpoint for Hands, use the alternative below.
 
-The laptop connects outward; it needs no incoming port. Keep the laptop awake and its sharing terminal open. Server-side configuration cannot prove your laptop can reach the address: preflight on the laptop checks that.
+1. [Install Tailscale](https://tailscale.com/download) on the server and laptop,
+   sign both into the same tailnet, and keep Tailscale connected on both.
+2. On the **server**, run `tailscale ip -4` and copy its address.
+3. In the **server's Hermes config** (`~/.hermes/config.yaml`, or the config for
+   the profile serving your chat), merge the following into your existing
+   `plugins` settings. Replace both occurrences of `100.64.0.10` with the
+   server address you just copied; preserve your other plugin settings:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      hands:
+        listen: "100.64.0.10:8765"
+        url: "http://100.64.0.10:8765"
+```
+
+4. Restart that Hermes gateway/profile. In your **Hermes chat**, run `/hands setup`.
+   It should now offer the read/edit/online choices.
+5. On the **laptop**, confirm the server is reachable with
+   `tailscale ping 100.64.0.10`, using your server's address.
+   Your tailnet policy and the server firewall must allow the laptop to reach
+   TCP port 8765 on the Tailscale interface. There is no need to expose it on
+   the server's public interface.
+
+The `http://` address here travels over your private Tailscale network. This is
+Hands' own listener, not the Hermes Desktop gateway port. A successful Tailscale
+ping checks the network path; the Hands preflight in the next steps checks the
+actual service. See Tailscale's [connection guide](https://tailscale.com/docs/how-to/connect-to-devices)
+if the machines cannot reach each other.
+
+<details>
+<summary>Already have an HTTPS reverse proxy?</summary>
+
+Use a dedicated Hands URL, forward it to this loopback listener, and restart
+Hermes after merging the configuration:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      hands:
+        listen: "127.0.0.1:8765"
+        url: "https://hands.example.com"
+```
+
+Replace `https://hands.example.com` with your actual HTTPS endpoint. The proxy
+must reach port 8765 in the same network namespace as Hermes and support the
+Hands client's long-poll requests. Run `/hands setup` after restarting Hermes.
+
+</details>
+
+The laptop connects outward. Keep it awake and its sharing terminal open for
+the session. If Hermes runs in a container, the private listener address must
+be available inside that container; otherwise use the HTTPS proxy route.
 
 ## 3. Create a practice folder on the laptop
 
