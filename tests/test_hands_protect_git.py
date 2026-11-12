@@ -390,6 +390,29 @@ def test_a_settings_path_too_long_to_open_is_not_walked(folder, tmp_path, step, 
     assert time.monotonic() - started < 3
 
 
+@pytest.mark.parametrize("lead, outcome", [("/nowhere-{}/", "more paths named in settings (cannot be checked)"),
+                                           ("../missing-{}/", "is named in git settings and does not exist")])
+def test_many_long_paths_that_lead_nowhere_do_not_hold_up_the_look(folder, tmp_path, lead, outcome):
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n" + "".join("\tpath = " + lead.format(n) + "a/" * 1900 + "x.cfg\n" for n in range(200)))
+    started = time.monotonic()
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert time.monotonic() - started < 5          # one such path took seconds, and a settings file holds hundreds
+    assert paths == [] and any(outcome in text for text in problems), problems
+    assert "more paths named in settings (cannot be checked)" in problems and all(len(text) < 400 for text in problems)
+    started = time.monotonic()
+    assert "include.path" in gitwatch.settings(str(folder))
+    assert time.monotonic() - started < 5
+
+
+def test_a_path_to_nothing_outside_the_folder_is_left_alone(folder, tmp_path):
+    """Commands cannot put anything there, so git never reads it."""
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {tmp_path}/absent/../project/extra.cfg\n[core]\n\thooksPath = {tmp_path}/absent/hooks\n")
+    (folder / "extra.cfg").write_text("")
+    assert _sources(folder, tmp_path) == ([], [], [])
+
+
 def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path):
     shouted = folder.parent / folder.name.upper()
     if not shouted.exists() or not os.path.samefile(shouted, folder):

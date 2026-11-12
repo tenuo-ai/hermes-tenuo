@@ -69,6 +69,7 @@ _HOOK_NAMES = (
 )
 _UNCHECKED = "cannot be checked"
 _LONGEST = 4096       # characters in a path: no system here opens a longer one
+_PATHS = 64           # paths that settings name (included files, hooks folders) followed in one look
 
 
 def _digest(text: str) -> str:
@@ -226,7 +227,8 @@ def _spelled(value: str, base: str) -> str:
 def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optional[str]:
     """Where *value*, a path in a settings file in folder *base*, really leads, taken one
     component at a time the way the system does. None when commands could make it lead
-    somewhere else, or when it cannot be told.
+    somewhere else, or when it cannot be told. Empty when nothing is there and commands
+    cannot put anything there, so git can never open it.
 
     That is the case when it follows a link that is in a folder commands can write, and
     when it goes into such a folder and back up with `..`: the folder it went into can be
@@ -255,7 +257,19 @@ def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optio
             here = os.path.dirname(here)
             continue
         step = os.path.join(here, part)
-        if os.path.islink(step):
+        try:
+            mode = os.lstat(step).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            # Nothing is here, so nothing is below it either: the walk ends, however much
+            # of the path is left.
+            if not (went_in or writable(here)):
+                return ""
+            if ".." in parts:
+                return None
+            return os.path.join(step, *(name for name in parts if name not in ("", ".")))
+        except OSError:
+            return None
+        if stat.S_ISLNK(mode):
             hops += 1
             if hops > 40 or writable(here):
                 return None
@@ -531,6 +545,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
         most = _FILES + len(queue)
         seen: set = set()
         hook_folders: List[Tuple[int, str]] = []
+        named = 0     # paths followed so far: a settings file can name far more than git needs
         while queue:
             index, relative = queue.pop(0)
             if (index, relative) in seen:
@@ -553,6 +568,12 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                 continue
             for section, sub, key, value in _entries(text):
                 name = ".".join(part for part in (section, sub, key) if part)
+                if (section, key) in (("include", "path"), ("includeif", "path"), ("core", "hookspath")):
+                    named += 1
+                    if named > _PATHS:
+                        found[name] = _digest(found.get(name, "") + value)
+                        found[f"more paths named in settings ({_UNCHECKED})"] = "unchecked"
+                        continue
                 if (section, key) in (("include", "path"), ("includeif", "path")):
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
@@ -563,13 +584,13 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                         continue
                     # Before locking, the file is the one the system would open, not the
                     # one the path reads as once `..` is taken out of it.
-                    ends = _followed(roots, value, here) if full else None
+                    ends = _followed(roots, value, here) if full else ""
                     target = _locate(roots, ends, 0, "") if ends else None
-                    if full and ends is None:
+                    if ends is None:
                         found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"   # commands can change where it leads
                     elif target is not None and target[1] != ".":
                         queue.append(target)
-                    elif target is None and full:
+                    elif target is None and ends:
                         queue.append((None, _spelled(value, here)))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
@@ -579,13 +600,13 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                             hook_folders.append(target)   # "." is the folder itself
                         continue
                     full = _full(value, roots[0][0])
-                    ends = _followed(roots, value, roots[0][0]) if full else None
+                    ends = _followed(roots, value, roots[0][0]) if full else ""
                     target = _locate(roots, ends, 0, "") if ends else None
-                    if full and ends is None:
+                    if ends is None:
                         found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"
                     elif target is not None and target not in hook_folders:
                         hook_folders.append(target)
-                    elif target is None and full:
+                    elif target is None and ends:
                         issues: List[str] = []
                         _outside_hooks(roots, _spelled(value, roots[0][0]), issues)
                         for issue in issues:
@@ -636,14 +657,14 @@ def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str]
     elif kind is not None and stat.S_ISDIR(kind) and (
             read.get("git_dirs") != [(0, ".git")] or os.path.lexists(os.path.join(top, ".git", "commondir"))):
         problems.append(".git/commondir sends git to another folder for its settings")
-    problems += [f"{os.path.relpath(path, top)} is named in git settings and does not exist"
+    problems += [f"{_shown(os.path.relpath(path, top))} is named in git settings and does not exist"
                  for path in read.get("missing", ())]
     paths: List[str] = []
     for path in [*read.get("files", ()), *read.get("hooks", ())]:
         if path in (top, *map(os.path.normpath, also)):
             problems.append("core.hooksPath names a whole folder commands work in")
         elif not os.path.lexists(path):
-            problems.append(f"{os.path.relpath(path, top)} is named in git settings and does not exist")
+            problems.append(f"{_shown(os.path.relpath(path, top))} is named in git settings and does not exist")
         elif path not in paths:
             paths.append(path)
     return paths, problems, sorted(odd)
