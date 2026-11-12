@@ -625,6 +625,7 @@ class Device:
         # what commands have added or changed since (see gitwatch).
         self._git_seen = gitwatch.settings(self.folder, also=(self.tmp,))
         self._git_changes: List[str] = []
+        self._git_reminded = False
 
     # -- talking to the server ------------------------------------------------
 
@@ -1172,6 +1173,9 @@ class Device:
 
     def _git_reminder(self) -> None:
         """Said once commands and what they left running have stopped, however Hands ends."""
+        if self._git_reminded:
+            return
+        self._git_reminded = True
         self._git_note()  # a process left running may have written after its command returned
         try:
             if self._git_changes:
@@ -1267,11 +1271,13 @@ class Device:
         try:
             return self._serve()
         finally:
-            # However serving ends, nothing a command started is left running.
+            # However serving ends, nothing a command started is left running, and the
+            # person hears about git settings commands changed (once).
             try:
                 self._stop_runner()
             except Exception:  # noqa: BLE001
                 pass
+            self._git_reminder()
 
     def _serve(self) -> int:
         self.pair()

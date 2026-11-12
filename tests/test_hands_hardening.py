@@ -602,3 +602,42 @@ def test_a_read_only_session_still_watches_the_temp_folder(hub, folder):
         f.write("[core]\n\tfsmonitor = ./w.sh\n")
     device._git_note()
     assert any("core.fsmonitor" in line for line in said)
+
+
+def test_gitwatch_follows_a_path_under_the_home_folder(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project, temp = home / "work" / "app", tmp_path / "state" / "tmp"
+    project.mkdir(parents=True)
+    temp.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _git(project)
+    (project / "extra.cfg").write_text("[core]\n\tfsmonitor = ./w.sh\n")
+    (project / ".hooks").mkdir()
+    (project / ".hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    with open(project / ".git" / "config", "a") as f:
+        f.write("[include]\n\tpath = ~/work/app/extra.cfg\n[core]\n\thooksPath = ~/work/app/.hooks\n")
+    found = gitwatch.settings(str(project), also=(str(temp),))
+    assert "core.fsmonitor" in found and ".hooks/pre-commit" in found
+    # Elsewhere under the home folder is outside what commands can write.
+    (home / "other.cfg").write_text("[core]\n\tsshCommand = never-read\n")
+    (project / ".git" / "config").write_text("[include]\n\tpath = ~/other.cfg\n\tpath = ~nobody-here/x.cfg\n")
+    assert set(gitwatch.settings(str(project), also=(str(temp),))) == {"include.path"}
+
+
+def test_the_reminder_is_given_once_even_when_serving_fails(hub, folder, monkeypatch):
+    _git(folder)
+    said = []
+    device = Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True, say=said.append)
+    monkeypatch.setattr(device, "_stop_runner", lambda: None)
+
+    def fails():
+        with open(folder / ".git" / "config", "a") as f:        # a command changed this, then serving broke
+            f.write("[core]\n\tfsmonitor = ./watch.sh\n")
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(device, "_serve", fails)
+    with pytest.raises(RuntimeError):
+        device.serve()
+    reminders = [line for line in said if line.startswith("Before you use git in")]
+    assert len(reminders) == 1 and "core.fsmonitor" in reminders[0]
+    device._git_reminder()
+    assert len([line for line in said if line.startswith("Before you use git in")]) == 1

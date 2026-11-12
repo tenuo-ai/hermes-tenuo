@@ -79,6 +79,10 @@ def _locate(roots: List[Tuple[str, int, str]], path: str, origin: int, base: str
     *path* is as git reads it from a file in folder *base* of root *origin*. None when it
     is in none of them, where commands cannot change it.
     """
+    if path.startswith("~"):
+        # Git expands this for whoever runs it; that is the person at this machine, and
+        # the shared folder is usually somewhere under their home folder.
+        path = os.path.expanduser(path)
     if not path or path.startswith("~"):
         return None
     full = os.path.normpath(path if os.path.isabs(path) else os.path.join(roots[origin][0], base, path))
