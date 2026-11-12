@@ -94,7 +94,7 @@ def _mac_git_lock(locked: Sequence[str], q) -> List[str]:
         f'(deny file-write* (regex #"{git}$"))',
         f'(deny file-write* (regex #"{git}/({settings})$"))',
         f'(deny file-write* (regex #"{git}/({_any_case("hooks")}|{_any_case("modules")})(/.*)?$"))',
-        f'(deny file-write* (regex #"{worktree}/[^/]+/({settings})$"))',
+        f'(deny file-write* (regex #"{worktree}/[^/]+/({settings}|{_any_case("gitdir")}|{_any_case("hooks")})(/.*)?$"))',
         f'(deny file-write-create file-write-unlink (regex #"{worktree}(/[^/]+)?$"))',
         f'(deny file-write* (regex #"{git}/{odd}$"))',
         f'(deny file-write* (regex #"{worktree}/[^/]+/{odd}$"))',

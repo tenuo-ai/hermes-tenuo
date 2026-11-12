@@ -183,14 +183,25 @@ def _full(value: str, base: str) -> str:
 
 
 def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
-    """Whether a file outside the writable folders is reached through a link inside one."""
-    for _ in range(40):
-        if not os.path.islink(path):
-            return False
-        path = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path)))
-        if _locate(roots, path, 0, "") is not None:
+    """Detect writable links in any component, including links reached via outside aliases."""
+    pending = os.path.abspath(path).split(os.sep)
+    current, links = os.sep, 0
+    while pending:
+        part = pending.pop(0)
+        if not part or part == ".":
+            continue
+        current = os.path.normpath(os.path.join(current, part))
+        if _locate(roots, current, 0, "") is not None:
             return True
-    return True
+        if os.path.islink(current):
+            links += 1
+            if links > 40:
+                return True
+            target = os.readlink(current)
+            target = target if os.path.isabs(target) else os.path.join(os.path.dirname(current), target)
+            pending = target.split(os.sep) + pending
+            current = os.sep
+    return False
 
 
 def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str]:
@@ -529,7 +540,7 @@ def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str]
     return paths, problems, sorted(odd)
 
 
-_WALKED = 150000    # folders looked into for repositories, in one start
+_WALKED = 150000    # directory entries inspected for repositories, in one start
 _CHECKED = 200000   # files looked at inside git folders, in one start
 # Object files are shared between repositories on purpose, and git runs none of them.
 _OBJECT = re.compile(r"/objects/(?:[0-9a-f]{2}/[0-9a-f]{38,62}|pack/[^/]+\.(?:pack|idx|rev|bitmap|mtimes))$")
@@ -568,30 +579,45 @@ def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> T
         real = os.path.realpath(target)
         return _held(real) or not any(real == r or real.startswith(r + os.sep) for r in reach)
 
-    def plain(path: str, links: bool = False) -> Optional[os.stat_result]:
+    def plain(path: str, links: bool = False, objects: bool = False) -> Optional[os.stat_result]:
         try:
             info = os.lstat(path)
-        except OSError:
+        except FileNotFoundError:
             return None
+        except OSError:
+            problems.append(f"{name(path)} cannot be inspected")
+            return None
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            problems.append(f"{name(path)} is not a regular file or directory")
         if stat.S_ISLNK(info.st_mode) and not links:
             problems.append(f"{name(path)} is a link")
-        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not _OBJECT.search(path):
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not (objects and _OBJECT.search(path)):
             problems.append(f"{name(path)} has a second name (a hard link)")
         return info
 
-    def tree(path: str, links: bool) -> None:
+    def tree(path: str, links: bool, objects: bool = False) -> None:
         info = plain(path)
         stack = [path] if info is not None and stat.S_ISDIR(info.st_mode) else []
         while stack and left[0] >= 0:
             here = stack.pop()
             try:
-                entries = [entry.path for entry in os.scandir(here)]
+                with os.scandir(here) as scan:
+                    entries = []
+                    for entry in scan:
+                        entries.append(entry.path)
+                        if len(entries) > left[0]:
+                            left[0] = -1
+                            return
             except OSError:
                 problems.append(f"{name(here)} cannot be read")
                 continue
             left[0] -= len(entries) + 1
             for entry in entries:
-                info = plain(entry, links)
+                info = plain(entry, links, objects)
+                if not links and os.path.basename(entry).lower() == "commondir":
+                    target = pointer(entry, os.path.dirname(entry))
+                    if target is not None and not held(target):
+                        problems.append(f"{name(entry)} sends git to a folder the lock does not hold")
                 if info is not None and stat.S_ISDIR(info.st_mode):
                     stack.append(entry)
 
@@ -600,6 +626,7 @@ def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> T
         try:
             text = (_read_outside(path) or "").strip()
         except OSError:
+            problems.append(f"{name(path)} cannot be read")
             return None
         if prefix and not text.startswith(prefix):
             return None
@@ -611,7 +638,7 @@ def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> T
         if nested and os.path.lexists(os.path.join(meta, "commondir")):
             problems.append(f"{name(meta)}/commondir sends git to another folder for its settings")
         tree(os.path.join(meta, "hooks"), links=True)   # a hook may be a link; the folder may not
-        tree(os.path.join(meta, "modules"), links=False)
+        tree(os.path.join(meta, "modules"), links=False, objects=True)
         records = os.path.join(meta, "worktrees")
         tree(records, links=False)
         try:
@@ -623,13 +650,20 @@ def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> T
             if target is not None and not held(target):
                 problems.append(f"{name(os.path.join(records, record))}/commondir sends git to a folder the lock does not hold")
 
-    walked, stack = _WALKED, [top]
+    walked, stack = _WALKED, [top, *(p for p in also if os.path.isdir(p))]
     while stack and walked >= 0:
         here = stack.pop()
         walked -= 1
         try:
-            entries = list(os.scandir(here))
+            with os.scandir(here) as scan:
+                entries = []
+                for entry in scan:
+                    walked -= 1
+                    if walked < 0:
+                        break
+                    entries.append(entry)
         except OSError:
+            problems.append(f"{name(here)} cannot be read")
             continue
         for entry in entries:
             if entry.name.lower() != ".git":
@@ -642,6 +676,8 @@ def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> T
                 continue
             if stat.S_ISDIR(info.st_mode):
                 repository(entry.path, nested)
+                # A repository can itself contain repositories (even under objects/).
+                stack.append(entry.path)
             elif stat.S_ISREG(info.st_mode) and nested:
                 target = pointer(entry.path, here, "gitdir:")
                 if target is not None and not held(target):

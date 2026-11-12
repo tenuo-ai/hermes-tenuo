@@ -80,6 +80,8 @@ _PLANTS = [
     "printf x > '.git/config.wor\u212atree'",        # a letter the file system reads as k
     "mkdir -p .git/modules/planted",
     "mkdir -p .git/worktrees/planted",
+    "mkdir -p .git/worktrees/other/hooks",
+    "printf changed > .git/worktrees/other/gitdir",
     "printf '%s\n' \"$TMPDIR\" > .git/worktrees/other/commondir",
     "mv .git/worktrees/other \"$TMPDIR/other-record\"",
     "mv .git/worktrees \"$TMPDIR/records\"",
@@ -421,3 +423,74 @@ def test_the_device_does_not_start_with_a_lock_that_would_not_hold(hub, folder):
     assert any(ok is False and "does not exist" in text
                for ok, text in device_module.check(hub.invite(), str(folder), protect_git=True))
     assert not hub.sessions()
+
+
+@pytest.mark.parametrize("location", [".git/objects/nested", "deep/nested"])
+def test_repositories_inside_metadata_are_inspected(folder, location):
+    nested = folder / location
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    os.link(nested / ".git" / "config", folder / "alias")
+    problems, complete = gitwatch.loose(str(folder))
+    assert complete and any("has a second name" in p for p in problems)
+
+
+def test_module_commondir_cannot_redirect_to_writable_metadata(folder):
+    meta = _module(folder, "lib")
+    (meta / "commondir").write_text("../../../unheld\n")
+    problems, complete = gitwatch.loose(str(folder))
+    assert complete and any("commondir" in p and "does not hold" in p for p in problems)
+
+
+def test_unreadable_workspace_is_not_called_clean(folder, monkeypatch):
+    original = os.scandir
+    hidden = folder / "hidden"
+    hidden.mkdir()
+    def unreadable(path):
+        if os.fspath(path) == str(hidden):
+            raise PermissionError("unreadable")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", unreadable)
+    problems, _ = gitwatch.loose(str(folder))
+    assert any("hidden cannot be read" in p for p in problems)
+
+
+def test_settings_fifo_is_not_called_clean(folder):
+    config = folder / ".git" / "config"
+    config.unlink()
+    os.mkfifo(config)
+    problems, _ = gitwatch.loose(str(folder))
+    assert any("config is not a regular" in p for p in problems)
+
+
+def test_writable_temp_metadata_is_also_inspected(folder, tmp_path):
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    git(temp, "init", "-q")
+    os.link(temp / ".git" / "config", temp / "alias")
+    problems, _ = gitwatch.loose(str(folder), also=(str(temp),))
+    assert any("has a second name" in p for p in problems)
+
+
+
+def test_outside_include_cannot_traverse_writable_directory_link(folder, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config").write_text("[user]\nname = t\n")
+    (folder / "redirect").symlink_to(outside, target_is_directory=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(folder / "redirect", target_is_directory=True)
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[include]\npath = {alias}/config\n")
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("cannot be checked" in p for p in problems)
+
+
+
+def test_included_settings_do_not_get_the_shared_object_exemption(folder):
+    config = folder / ".git" / "objects" / "pack" / "settings.pack"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text("[user]\nname = t\n")
+    os.link(config, folder / "alias")
+    problems, _ = gitwatch.loose(str(folder), paths=(str(config),))
+    assert any("has a second name" in p for p in problems)
