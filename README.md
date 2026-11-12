@@ -102,7 +102,7 @@ Hands supports terminal and file work, not GUI or browser control.
 **1. Server — install and connect once.**
 
 ```sh
-hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
+hermes plugins install tenuo-ai/hermes-tenuo
 hermes plugins enable hermes-tenuo
 ```
 

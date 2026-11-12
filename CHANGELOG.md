@@ -1,13 +1,36 @@
-# 0.4.0 (unreleased)
-
-- Add Hands: scoped, expiring local workspaces for remote Hermes, with sandboxing, per-conversation routing, setup/verify, privacy exclusions and local result redaction.
-- Reuse Tenuo path-jail for workspace containment.
-- Separate Hands and tool-authorization onboarding and diagnostics; align plugin and package descriptions.
-- Prefer the selected directory checkout, reject already-loaded conflicting installations, and validate release artifacts before publishing.
-
 # Changelog
 
 ## Unreleased
+
+### Hands
+
+- `hands up --protect-git` (macOS): commands cannot change a repository's settings or
+  hooks, move or replace `.git`, or create a repository, instead of having such changes
+  reported. The flag is refused on Linux, where bubblewrap cannot hold it; changes are
+  reported there as before.
+
+## 0.4.0 - 2026-11-11
+
+### Upgrading from 0.3
+
+- Keep one installation. With hermes-tenuo installed both by pip in the Hermes
+  environment and as a directory plugin, 0.4.0 blocks every tool call until one
+  is removed. `hermes-tenuo doctor` says which two it found.
+- Nothing else changes for an existing `warrant:` configuration. Hands and
+  `access:` are off until configured.
+
+### Packaging and onboarding
+
+- Give warrants and Hands separate, outcome-led getting-started paths, with
+  runnable demos and a concrete private-network setup guide.
+- Add version/source diagnostics and distinguish tool authorization from Hands.
+- Load the selected directory plugin checkout. If another hermes-tenuo
+  installation is already loaded, block every tool call and name both, instead
+  of silently using an older pip package; `doctor` reports a second installation.
+- Validate wheel/source contents, bundled skills and clean wheel installation
+  before publication. Include the runnable walkthrough in source archives.
+- Use the supported repository install command in user guides; Hermes `--ref`
+  accepts a full commit SHA rather than a release tag.
 
 ### Access
 
@@ -22,29 +45,6 @@
   governed. A `delegate_task` child gets a grant narrowed from its parent's role.
 
 ### Hands
-
-- Reuse Tenuo’s Python `path-jail` for workspace selection and signed command
-  directory containment. Keep sandbox enforcement and the canonical-path rule
-  for commands; this is validation at call time, not descriptor-pinned access.
-
-- Preview sharing locally with `hands up --preview`, without connecting or pairing.
-- Enforce personal literal-path exclusions from `~/.config/hermes-tenuo/never-share`
-  in both terminal and file operations; retain the policy location on reconnect.
-- Redact recognized secrets on the device before sending results or recording
-  command logs, including Hermes's encoded file-read samples. Detection is best effort.
-  A `.env` value is treated as a secret only under a secret-looking key, and an assignment to
-  a secret-named field redacts a quoted string literal while leaving a bare expression, a
-  reference or a file path as is, so ordinary settings and source are not redacted.
-- Keep serving when the server's answer is not in the expected form: it is retried like a
-  lost connection instead of ending the device.
-- On macOS, commands can no longer open other terminal devices, read user preferences, or
-  read other programs' temporary files.
-- The laptop reports git settings a command added or changed that make git run programs.
-- `hands up --protect-git` (macOS) refuses those changes instead: commands cannot change a
-  repository's settings or hooks, move or replace `.git`, or create a repository. The flag is
-  refused on Linux, where bubblewrap cannot hold it; changes are reported there as before.
-- A machine name is one printable line; closing the terminal stops Hands as Ctrl-C does.
-- Exercise both client/server directions against a pinned previous Hands version in CI.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file
   tools in one folder on your own machine, for a set time. `/hands invite`,
@@ -88,6 +88,24 @@
   as on Ubuntu 24.04.
 - Off unless `hands.listen` is configured. Works with or without an
   enforcement warrant.
+- Reuse Tenuo’s Python `path-jail` for workspace selection and signed command
+  directory containment. Keep sandbox enforcement and the canonical-path rule
+  for commands; this is validation at call time, not descriptor-pinned access.
+- Preview sharing locally with `hands up --preview`, without connecting or pairing.
+- Enforce personal literal-path exclusions from `~/.config/hermes-tenuo/never-share`
+  in both terminal and file operations; retain the policy location on reconnect.
+- Redact recognized secrets on the device before sending results or recording
+  command logs, including Hermes's encoded file-read samples. Detection is best effort.
+  A `.env` value is treated as a secret only under a secret-looking key, and an assignment to
+  a secret-named field redacts a quoted string literal while leaving a bare expression, a
+  reference or a file path as is, so ordinary settings and source are not redacted.
+- Keep serving when the server's answer is not in the expected form: it is retried like a
+  lost connection instead of ending the device.
+- On macOS, commands can no longer open other terminal devices, read user preferences, or
+  read other programs' temporary files.
+- The laptop reports git settings a command added or changed that make git run programs.
+- A machine name is one printable line; closing the terminal stops Hands as Ctrl-C does.
+- Exercise both client/server directions against a pinned previous Hands version in CI.
 
 ## 0.3.1 - 2026-11-10
 

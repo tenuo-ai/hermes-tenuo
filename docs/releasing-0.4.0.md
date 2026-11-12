@@ -23,8 +23,9 @@ requirements, and browser/MCP tools staying on the server.
 
 ## Testing before the release exists
 
-The user guides describe the published 0.4.0 experience. Until the tag and PyPI
-package exist, maintainers test the candidate commit instead:
+The user guides describe the published 0.4.0 experience. The repository install
+uses its default branch; Hermes `--ref` accepts a full commit SHA, not a version
+tag. Until the PyPI package exists, maintainers test the candidate commit instead:
 
 ```sh
 hermes plugins install tenuo-ai/hermes-tenuo --ref COMMIT_SHA
@@ -43,16 +44,20 @@ commands. This substitution belongs in release testing, not user onboarding.
   tests. The wheel must be built from the source archive, not just the checkout.
 - Complete a two-host Hands session with the candidate wheel on both ends:
   setup/pair, verify, read/write, sandbox exclusions, redaction and disconnect.
-- Complete the first-session demo in Desktop and a messaging gateway on supported
-  macOS/Linux devices; record Hermes versions. Backend tests do not prove UI behavior.
-- Do not announce the user walkthrough until its v0.4.0 tag and PyPI package exist.
+- Complete the first-session demo in Desktop on a supported device and record
+  the Hermes version. Record messaging-gateway UI coverage separately; do not
+  claim it from backend tests. Missing messaging UI coverage is a documented
+  limitation, not a blocker for the independently validated core release.
+- Do not announce the user walkthrough until the default branch includes the
+  release and its PyPI package exists.
 - Check version agreement across pyproject, plugin manifest, source version and lockfile.
 - Record outstanding validation below; do not publish with unchecked required gates.
 
 ## Publication and catalog order (separate approval/action)
 
-1. Mark the changelog released. Confirm the user guides target `v0.4.0` and the
-   published CLI; keep prerelease testing substitutions in this checklist only.
+1. Mark the changelog released. Confirm the repository install resolves to the
+   released code and the CLI comes from PyPI; keep candidate SHA substitutions
+   in this checklist only.
 2. Tag the reviewed commit `v0.4.0`; the publication workflow validates the tag,
    artifacts and isolated installed-wheel smoke checks before PyPI publication.
 3. Verify a fresh `uvx --from hermes-tenuo==0.4.0 hermes-tenuo --version` and
@@ -70,3 +75,52 @@ commands. This substitution belongs in release testing, not user onboarding.
 
 Results and remaining gates are recorded in the preparation PR. Publication and
 catalog repinning remain separate actions even if every automated check passes.
+
+### Candidate code validation — 2026-11-11
+
+Run against the default branch at `d21e998`, the code this release tags, with
+tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
+
+- Unit and integration tests: 729 passed on macOS (Python 3.12) and 724 on
+  Ubuntu 24.04 with bubblewrap; the Hermes-enabled tests passed under the
+  installed Hermes.
+- Role-based access through a real Hermes agent loop with a scripted model and
+  real tool execution: per-sender roles, parallel calls, inline and background
+  children, `execute_code`, shared sessions, API-server and webhook turns, and a
+  scheduled run through Hermes's cron scheduler. Six malformed `access:` blocks
+  each blocked every call.
+- A 0.3-style static-warrant configuration behaved as it does on 0.3.1.
+- With hermes-tenuo installed both by pip (0.3.1, then 0.4.0) and as a
+  directory plugin, every tool call was blocked with the message naming both.
+- Hands on macOS: first session, daily work, lifecycle, privacy exclusions,
+  multi-person use, and the sandbox boundary checks.
+- Wheel and source archive built; a clean install reported 0.4.0, and `doctor`
+  and `status` were correct for a static warrant and for an `access:`-only home.
+
+Not covered here: a live messaging-app conversation, and Windows.
+
+### Desktop acceptance — 2026-11-11
+
+Passed with Hermes Desktop 0.23.1+1096, Hermes backend 0.23.1, and the
+0.4.0 wheel in a fresh local Python environment. The backend and device used
+separate temporary state directories. Model credentials remained on the Mac.
+
+- `/hands setup` displayed read/edit/online choices in Desktop.
+- `/hands setup edit` produced a one-use invite; device preflight and pairing passed.
+- `/hands verify` showed the chosen folder, read/write access and internet off.
+- A real gpt-4o-mini conversation ran the invoice tests, observed two failures,
+  edited `invoice.py`, and reran both tests successfully. An independent local
+  test run passed and the original test file was byte-for-byte unchanged.
+- Stopping the device made `/hands status` report it not answering;
+  `/hands off` returned the conversation to server tools.
+- Desktop was restored to its original local gateway and the test connection removed.
+
+The supported repository-install command also passed in a separate fresh Hermes
+home; `hermes plugins doctor hermes-tenuo` confirmed discovery, manifest parsing,
+import and registration. A pre-existing multi-profile install hit an upstream
+workspace collision with duplicate package names; the clean install did not.
+
+This Desktop check used a loopback backend. The earlier GCP-to-Mac integration
+run separately validated the two-host execution path. No messaging-app UI test
+is claimed. CI, artifact checks and final PyPI smoke checks are recorded with the
+release PR and publication run.
