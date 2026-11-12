@@ -296,6 +296,10 @@ class Hub:
 
     # -- what devices send -----------------------------------------------------------
 
+    def hello(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Public protocol discovery; contains no identity or authorization state."""
+        return {"protocol": 1}
+
     def pair(self, body: Dict[str, Any]) -> Dict[str, Any]:
         from tenuo import Warrant
         device = str(body.get("device", ""))
@@ -319,6 +323,9 @@ class Hub:
             raise Refused("this pairing request doesn't match what was signed")
         if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):
             raise Refused("this device's temp folder has a path Hands can't use")
+        # The name is repeated in the chat and to the agent: one printable line.
+        if not name.strip() or not name.isprintable():
+            raise Refused("this device's name has characters Hands can't use")
         if not wire.same_key(grant.issuer, device_key) or not wire.same_key(grant.authorized_holder, self.key.public_key):
             raise Refused("the grant is not from this device to this server")
         if grant.is_expired() or wire.TOOL not in grant.tools:
@@ -535,7 +542,7 @@ class Hub:
                         self.server.recount(self.connection, None)
 
             def _answer(self) -> None:
-                routes = {wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
+                routes = {wire.API + "/hello": hub.hello, wire.API + "/pair": hub.pair, wire.API + "/poll": hub.poll, wire.API + "/result": hub.result,
                           wire.API + "/bye": hub.bye, wire.API + "/watch": hub.watch}
                 handler = routes.get(self.path)
                 try:

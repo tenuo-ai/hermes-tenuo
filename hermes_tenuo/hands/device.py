@@ -26,9 +26,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from hermes_tenuo.hands import sandbox, wire
+from hermes_tenuo.hands import gitwatch, sandbox, wire
+from hermes_tenuo.hands.paths import workspace
+from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
 
 MAX_OUTPUT = 8 * 1024 * 1024
 
@@ -418,7 +420,7 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     request = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read(wire.MAX_BODY))
+            answer = json.loads(response.read(wire.MAX_BODY))
     except urllib.error.HTTPError as e:
         if e.code >= 500:
             # A proxy in front of the server, or the server itself failing: not an answer
@@ -438,29 +440,43 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
                 "uses its own certificate authority or a self-signed certificate, set SSL_CERT_FILE to that "
                 "certificate file and run this again") from e
         raise ConnectionError(str(reason)) from e
+    if not isinstance(answer, dict):
+        # The server answered with something that is not an object (a buggy or incompatible
+        # server, or anything injected on an unencrypted link). It is not an answer about this
+        # device, so it is retried like any lost connection rather than crashing the device.
+        raise ConnectionError("the server's answer was not in the expected form")
+    return answer
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
-          network: bool = False) -> list:
+          network: bool = False, allow_unsandboxed: bool = False) -> list:
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
-    real = os.path.realpath(os.path.expanduser(folder))
-    if not os.path.isdir(real):
-        found.append((False, f"{folder} is not a folder"))
-    elif real in ("/", os.path.realpath(os.path.expanduser("~"))):
-        found.append((False, "point Hands at a project folder, not your home folder or /"))
-    else:
-        found.append((True, f"folder to share: {real}"))
+    try:
+        real = workspace(folder).root
+    except ValueError as exc:
+        return [(False, str(exc))]
+    found.append((True, f"folder to share: {real}"))
     state = os.path.realpath(home())
     if _within(state, real) or _within(real, state):
         found.append((False, f"the shared folder and Hands's own folder ({state}) must be separate"))
     kind = sandbox.available()
     if kind:
         found.append((True, f"sandbox: {kind}" + (" (read-only)" if read_only else "")))
+    elif allow_unsandboxed and not read_only:
+        found.append((None, "No sandbox: --no-sandbox explicitly gives commands your full user access."))
     else:
         found.append((False, f"no sandbox on this machine: {sandbox.why_not()}. Or use --no-sandbox to give "
                              "commands your full access"))
+    try:
+        excluded = exclusions(real)
+        if excluded and (allow_unsandboxed or not kind):
+            raise ValueError("never-share rules require a sandbox; cannot use --no-sandbox")
+        found.extend((True, f"excluded from commands: {path}") for path in excluded)
+    except ValueError as exc:
+        found.append((False, str(exc)))
+        return found
     if network and kind == "bwrap" and not sandbox.scopes_sockets():
         found.append((False, "--network needs enabled Landlock ABI 6 or later; omit --network or upgrade the kernel"))
     url = ""
@@ -477,11 +493,12 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
             found.append((False, f"{saved} is damaged: pair again with a new `/hands invite` line"))
     else:
         found.append((False, "no server yet: run `/hands invite` in a Hermes chat and pass the line it prints"))
-    if url and wire.plain_and_public(url):
+    unsafe = bool(url and wire.plain_and_public(url))
+    if unsafe:
         found.append((None if plain_http else False,
                       UNENCRYPTED.format(url=url) if not plain_http else
                       f"{url} is not encrypted (--plain-http): commands and output can be read on the way"))
-    if url:
+    if url and (not unsafe or plain_http):
         # A Hands server answers a request from no device with "no session here" (410).
         # Anything else that answers is a proxy, another service, or a wrong address.
         request = urllib.request.Request(url + wire.API + "/poll", b"{}", {"Content-Type": "application/json"})
@@ -496,6 +513,20 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
                                  "another machine, set hands.url there to an address this machine can reach"))
         if status == 410:
             found.append((True, f"server reachable: {url}"))
+            try:
+                hello = _post(url + wire.API + "/hello", {}, timeout=10)
+                if not isinstance(hello, dict) or hello.get("protocol") != 1:
+                    found.append((False, "Hands protocol mismatch: update the server plugin and laptop package together"))
+                else:
+                    found.append((True, "server and laptop speak Hands protocol 1"))
+            except HandsError as e:
+                if getattr(e.__cause__, "code", None) == 404:
+                    found.append((None, "Server has no compatibility endpoint; it answers Hands v1. "
+                                  "Update the server plugin for first-session checks."))
+                else:
+                    found.append((False, f"compatibility check refused: {e}"))
+            except ConnectionError as e:
+                found.append((False, f"compatibility check failed: {e}"))
         elif status is not None:
             found.append((False, f"{url} answered (HTTP {status}), but not as a Hands server: check the address, "
                                  "and that hands.listen is set in the plugin config on the server"))
@@ -513,13 +544,24 @@ class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
                  allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
                  plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False):
-        self.folder = os.path.realpath(os.path.expanduser(folder))
-        if not os.path.isdir(self.folder):
-            raise HandsError(f"{folder} is not a folder")
-        if self.folder in ("/", os.path.realpath(os.path.expanduser("~"))):
-            raise HandsError("point Hands at a project folder, not your home folder or /")
+        try:
+            self._workspace = workspace(folder)
+        except ValueError as exc:
+            raise HandsError(str(exc)) from exc
+        self.folder = self._workspace.root
         if ttl_seconds <= 0:
             raise HandsError("the time window must be positive")
+        self.config_home = str(policy_file().parent.parent.resolve())
+        self.excluded = exclusions(self.folder)
+        if self.excluded and (allow_unsandboxed or sandbox.available() is None):
+            raise HandsError("never-share rules require a sandbox; cannot use --no-sandbox")
+        self.redactor = Redactor(self.folder)
+        self.ttl_seconds = ttl_seconds
+        self.plain_http = plain_http
+        # A command-local CA setting disappears in a fresh shell. Resolve it now,
+        # before a reconnect can be printed or run from a different directory.
+        ca_file = os.environ.get("SSL_CERT_FILE")
+        self.ssl_cert_file = os.path.abspath(ca_file) if ca_file else ""
         self.allow_unsandboxed = allow_unsandboxed
         self.read_only = read_only  # commands may look at the folder and not change it
         self.network = network      # commands may use the internet (to install, clone, download)
@@ -542,10 +584,13 @@ class Device:
         self._prepare_home(self.tmp)
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
                      writable=not read_only, home_visible=read_home, tools=self.shown,
-                     network=network)  # fail before pairing
-        self.say = say
+                     network=network, excluded=self.excluded)  # fail before pairing
+        self._say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
+        # The name is shown in the chat and to the agent, on one line.
+        if not self.name.strip() or len(self.name) > 64 or not self.name.isprintable():
+            raise HandsError("the machine name must be 1 to 64 printable characters on one line: pass --name")
         saved = home() / "server.json"
         if invite:
             parsed = wire.Invite.parse(invite)
@@ -576,6 +621,11 @@ class Device:
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
         self._log = home() / "log.jsonl"
+        # Git settings in the folder that run programs: what was there at the start, and
+        # what commands have added or changed since (see gitwatch).
+        self._git_seen = gitwatch.settings(self.folder, also=(self.tmp,))
+        self._git_changes: List[str] = []
+        self._git_reminded = False
 
     # -- talking to the server ------------------------------------------------
 
@@ -612,7 +662,10 @@ class Device:
         reply = _post(self.url + wire.API + "/poll", {
             "device": self.me, "nonce": nonce, "sig": self._request("poll", nonce),
         }, timeout=min(wire.POLL_SECONDS + 15, max(1.0, self.expires - time.time() + 1)))
-        return reply.get("job")
+        job = reply.get("job")
+        # A command is an object; anything else here is not one Hands can run. Treat it as
+        # "nothing to do" (the signed command chain is still verified in verify()).
+        return job if isinstance(job, dict) else None
 
     def bye(self) -> None:
         """Tell the server this device is going down, so callers hear it now instead of waiting."""
@@ -625,7 +678,14 @@ class Device:
             pass
 
     def report(self, job_id: str, output: str, returncode: int, timeout: float = 60) -> None:
-        output = wire.fit(output)
+        cleaned = self.redactor.clean(output)
+        if cleaned != output:
+            self.say("Recognized secrets were redacted on the device before sending a result.")
+            # File-tool frames carry status fields: appending prose can make a
+            # successful read fall back or turn the notice into file content.
+            if not any(marker in output for marker in ("__HERMES_RF_", "__HERMES_RB_", "__HERMES_WF_")):
+                cleaned += "\nhands: recognized secrets were redacted on the device\n"
+        output = wire.fit(cleaned)
         args = {"job": job_id, "digest": wire.digest(output, returncode)}
         _post(self.url + wire.API + "/result", {
             "device": self.me, "job": job_id, "output": output, "returncode": returncode,
@@ -700,10 +760,13 @@ class Device:
         wire.check(chain, self.key.public_key, wire.TOOL, args, job["pop"])
         # The warrants were checked against the folder as written, so it must be the real
         # path: a link inside an allowed folder must not lead the command somewhere else.
-        real = os.path.realpath(where)
+        try:
+            real = self._workspace.contains(where)
+        except (OSError, ValueError) as exc:
+            raise HandsError("the command is for a folder this device isn't serving") from exc
         if real != where:
             raise HandsError("the command names its folder through a link; it must use the real path")
-        if not (real == self.folder or real.startswith(self.folder + os.sep)) or not os.path.isdir(real):
+        if not os.path.isdir(real):
             raise HandsError("the command is for a folder this device isn't serving")
         self._seen.add(job_id)
         return real
@@ -862,7 +925,7 @@ class Device:
                 command.append("--scope-sockets")
             argv = sandbox.wrap(folder, tmp, command,
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
-                                hidden=[self.state], writable=not self.read_only,
+                                hidden=[self.state], excluded=self.excluded, writable=not self.read_only,
                                 home_visible=self.read_home, tools=self.shown, network=self.network)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
@@ -1057,7 +1120,7 @@ class Device:
 
     def handle(self, job: Dict[str, Any]) -> None:
         job_id = str(job.get("id", ""))
-        shown = str(job.get("shown") or "(session setup)")[:500]
+        shown = str(job.get("shown") or "(session setup)")
         try:
             folder = self.verify(job)
             timeout = self.budget(job)
@@ -1080,15 +1143,55 @@ class Device:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
+        self._git_note()
         self._deliver(job_id, output, code)
 
+    def _git_note(self) -> None:
+        """Tell the person when a command changed what git will run in this folder.
+
+        Advice only: nothing here may keep a result from being sent or cleanup from running.
+        """
+        try:
+            # Also in a read-only session: commands can still write their temp folder.
+            now = gitwatch.settings(self.folder, also=(self.tmp,))
+            new, self._git_seen = gitwatch.changed(self._git_seen, now), now
+            if not new:
+                return
+            # A name can carry a secret (a credential URL as a subsection, a hook's file name).
+            new = [self.redactor.clean(name) for name in new]
+            self._git_changes += [name for name in new if name not in self._git_changes]
+            names = ", ".join(printable(name)[:60] for name in new[:6]) + (" and more" if len(new) > 6 else "")
+            self.say(f"  Note: that command changed git settings that run programs: {names}.")
+            self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
+                     "Check .git/config and .git/hooks before you do.")
+            with open(self._log, "a") as f:  # the same shape as a command's record, for `hands log`
+                f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
+                                    "command": ", ".join(new[:20])[:500], "exit": None,
+                                    "note": "git settings changed"}) + "\n")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _git_reminder(self) -> None:
+        """Said once commands and what they left running have stopped, however Hands ends."""
+        if self._git_reminded:
+            return
+        self._git_reminded = True
+        self._git_note()  # a process left running may have written after its command returned
+        try:
+            if self._git_changes:
+                names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
+                self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
+                         f"programs ({names}). Check .git/config and .git/hooks.")
+        except Exception:  # noqa: BLE001
+            return
+
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
-        line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": shown,
-                "exit": code, "note": note}
+        line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],
+                "exit": code, "note": self.redactor.clean(note)}
         with open(self._log, "a") as f:
             f.write(json.dumps(line) + "\n")
         self.say(f"  {time.strftime('%H:%M:%S')}  {'refused' if code is None else f'exit {code}'}  "
-                 f"{printable(shown[:100])}")
+                 f"{printable(self.redactor.clean(shown)[:100])}")
 
     # -- the loop ---------------------------------------------------------------
 
@@ -1122,6 +1225,8 @@ class Device:
                          "(start with --network to let them install or download).")
         if kind == "sandbox-exec":
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
+        lines.extend(f"Excluded from commands: {p}" for p in self.excluded)
+        lines.append("Results go to remote Hermes and may go to its model provider; recognized secrets are redacted locally.")
         return lines
 
     def stop(self, *from_signal: Any) -> None:
@@ -1129,13 +1234,60 @@ class Device:
         if from_signal and self._waiting:
             raise _Stopped()  # leave the open request now; a running command is stopped by its own loop
 
+    def reconnect_command(self) -> str:
+        """A fresh local consent action; never include the consumed invite or its secret."""
+        args = ["env", f"TENUO_HANDS_HOME={self.state}", f"XDG_CONFIG_HOME={self.config_home}"]
+        if self.ssl_cert_file:
+            args.append(f"SSL_CERT_FILE={self.ssl_cert_file}")
+        args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
+                     "--for", f"{self.ttl_seconds}s", "--name", self.name])
+        for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
+                              (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox")):
+            if enabled:
+                args.append(flag)
+        for path in self.named:
+            args.extend(("--read", path))
+        # Preserve only an explicitly accepted unencrypted public connection.
+        if self.plain_http:
+            args.append("--plain-http")
+        return shlex.join(args)
+
+    @property
+    def say(self) -> Callable[[str], None]:
+        """Print for the person at the machine. Their terminal may be gone (it was closed,
+        or its output is a broken pipe); that must never interrupt a command or cleanup."""
+        def tolerant(line: str) -> None:
+            try:
+                self._say(line)
+            except (OSError, ValueError):
+                pass
+        return tolerant
+
+    @say.setter
+    def say(self, value: Callable[[str], None]) -> None:
+        self._say = value
+
     def serve(self) -> int:
+        try:
+            return self._serve()
+        finally:
+            # However serving ends, nothing a command started is left running, and the
+            # person hears about git settings commands changed (once).
+            try:
+                self._stop_runner()
+            except Exception:  # noqa: BLE001
+                pass
+            self._git_reminder()
+
+    def _serve(self) -> int:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
         for line in self.summary():
             self.say("  " + line)
-        self.say("Press Ctrl-C to stop. Commands appear below as they run.")
+        self.say("Press Ctrl-C to stop device access. /hands off only changes chat routing.")
+        self.say("Back in the originating Hermes chat, run /hands verify to confirm this connection.")
+        self.say("Reconnect or renew locally with: " + self.reconnect_command())
         failures, rejoins = 0, 0
         while not self._stop and time.time() < self.expires:
             try:
@@ -1177,6 +1329,9 @@ class Device:
                         continue
                 self._stop_runner()
                 self.say(f"The server ended this session: {ended}")
+                self._git_reminder()
+                self.say("If revoked, request a new /hands setup invite. Otherwise reconnect locally with: "
+                         + self.reconnect_command())
                 return 1
             except ConnectionError as e:
                 if time.time() >= self.expires:
@@ -1200,4 +1355,7 @@ class Device:
         self._drain_results()  # commands are already stopped; only reporting may continue
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
+        self.say("Commands and background processes have been stopped. This does not undo file changes.")
+        self._git_reminder()
+        self.say("To share again for a fresh time window, run locally: " + self.reconnect_command())
         return 0

@@ -1,1 +1,5 @@
-include CHANGELOG.md
+include CHANGELOG.md plugin.yaml __init__.py uv.lock
+recursive-include docs *.md *.yaml
+recursive-include tests *.py
+recursive-include scripts *.py
+recursive-include examples *.py *.yaml *.md *.sh

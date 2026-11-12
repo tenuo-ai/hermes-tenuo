@@ -1,4 +1,4 @@
-"""hermes-tenuo: Tenuo authorization plugin for Hermes Agent.
+"""hermes-tenuo: Signed, expiring tool permissions and local workspaces for Hermes Agent.
 
 Hermes calls ``register(ctx)`` at startup. See ``hermes-tenuo demo``
 for a transcript with no Hermes process.
@@ -106,7 +106,8 @@ def register(ctx: Any) -> None:
     try:
         # Hands is its own feature: it works with or without an enforcement warrant.
         from hermes_tenuo import hands
-        hands.register(ctx)
+        hands_started = hands.register(ctx)
+        logger.info("hermes-tenuo: Hands %s", "running" if hands_started else "off")
     except Exception as exc:
         logger.warning("hermes-tenuo: Hands did not start (%s)", exc)
     from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
@@ -139,8 +140,8 @@ def register(ctx: Any) -> None:
             )
         else:
             logger.warning(
-                "hermes-tenuo: plugin loaded but no warrant is set — "
-                "tool calls are NOT enforced. Set TENUO_WARRANT (or warrant: in "
+                "hermes-tenuo: no tool-call authorization warrant is set — "
+                "general tool-call authorization is off; Hands device grants are independent. Set TENUO_WARRANT (or warrant: in "
                 "config) to enforce. Run `hermes-tenuo doctor` to verify."
             )
             _register_passthrough_hooks(ctx)

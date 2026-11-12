@@ -39,7 +39,8 @@ import math
 import os
 import re
 import sys
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -343,6 +344,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     from hermes_tenuo._home import config_path, hermes_cli_available
     from hermes_tenuo.kanban import current_task_id, load_task_warrant_raw, task_warrant_path
 
+    from pathlib import Path
+    from hermes_tenuo._version import __version__
+    from hermes_tenuo.hands import settings
+    print(f"  hermes-tenuo {__version__}: {Path(__file__).resolve().parent}")
+    print("  This CLI's source and configuration; not proof of a running Hermes plugin.")
+    configured = bool(str(settings(None).get("listen") or "").strip())
+    print(f"  Hands: {'listener configured (runtime unverified)' if configured else 'listener not configured'}")
+    print("  Hands needs no manual warrant. Use /hands status and /hands verify in Hermes.")
+    print("  Tool-call authorization:")
     cfg_path = config_path()
     entry = _get_plugin_entry(None)
     via = "hermes_cli" if hermes_cli_available() else "plain read"
@@ -388,10 +398,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("\n  A warrant is set but the signing key is not — every tool call is blocked until it is.")
     elif warrant_set:
         print(f"\n  A warrant is set but trusted_root is not — {_trust_failure_effect(entry.get('on_denial'))}.")
+    elif entry.get("access") is not None:
+        # Roles are the authority here, so require_warrant does not block them.
+        from hermes_tenuo._config import get_require_session_warrant
+        local = ("are blocked unless they hold a session warrant (require_session_warrant is on)"
+                 if get_require_session_warrant(None) is True else "are not checked")
+        print("\n  No static warrant: role-based access authorises chat, API, webhook and scheduled turns.\n"
+              f"  Local CLI and desktop turns {local}. Run `hermes-tenuo doctor` to check the roles.")
     elif get_require_warrant(None):
         print("\n  No warrant, and require_warrant is on — every tool call is blocked.")
     else:
-        print("\n  No warrant — the plugin loads and enforces nothing.")
+        print("\n  No warrant — general tool-call authorization is off. Hands device grants are independent.")
     return 0
 
 
@@ -425,13 +442,41 @@ def _signed_by(warrant: Any, roots: list) -> bool:
     return False
 
 
+def _second_installation() -> Optional[Tuple[Path, str]]:
+    """The Hermes plugin directory when this package is installed beside it, else None.
+
+    Only meaningful inside the environment Hermes runs in: there Hermes imports
+    this package first and then selects the directory. The second value says
+    what that directory's loader does on the conflict: ``"blocks"`` every tool
+    call, ``"drops"`` the plugin (Hermes then enforces nothing), or ``"reuses"``
+    this package.
+    """
+    from hermes_tenuo._home import hermes_cli_available, hermes_home
+
+    if not hermes_cli_available():
+        return None
+    directory = hermes_home() / "plugins" / "hermes-tenuo"
+    package = directory / "hermes_tenuo" / "__init__.py"
+    try:
+        if not package.is_file() or package.resolve() == Path(__file__).resolve().parent / "__init__.py":
+            return None
+        shim = (directory / "__init__.py").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "_blocking_register" in shim:
+        return directory, "blocks"
+    return directory, "drops" if "installation conflict" in shim else "reuses"
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """End-to-end install check.
+    """Tool-call authorization check.
 
     Verifies: tenuo importable, plugin entry point registered, Hermes config
     valid, warrant loadable and unexpired, signing key + trusted root present,
     enforcement path (registry hook vs. pre_tool_call fallback).
     """
+    print("Tool-call authorization doctor (not a Hands health check).")
+    print("For Hands, use `hands check` locally and `/hands verify` in Hermes.")
     ok = True
 
     def check(passed: bool, msg: str, hint: str = "") -> None:
@@ -471,6 +516,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # 3. Hermes config — is the plugin enabled?
     config_entry: dict = {}
     from hermes_tenuo._home import config_path, hermes_cli_available, load_hermes_config
+    second = _second_installation()
+    if second is not None:
+        directory, effect = second
+        message = f"two installations: this package and the plugin directory {directory}"
+        remedy = ("keep one: uninstall hermes-tenuo from the Hermes environment (uvx still runs "
+                  "this command), or remove the directory, then restart Hermes")
+        # The outcome depends on Hermes importing this package before it loads the
+        # directory, which it does when it scans enabled plugins for model providers.
+        if effect == "blocks":
+            check(False, f"{message}; when Hermes loads both, every tool call is blocked", remedy)
+        elif effect == "drops":
+            check(False, f"{message}; when Hermes loads both, the plugin is not loaded and nothing is enforced", remedy)
+        else:
+            note(f"{message}; {remedy}")
     if not hermes_cli_available():
         note(f"hermes_cli not importable here — reading {config_path()} directly")
     try:
@@ -536,15 +595,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             if child_raw is not None and load_warrant(child_raw) is None:
                 problem = "child warrant is set but could not be loaded"
 
+    from hermes_tenuo._config import get_access_block, get_signing_key_raw
     configured = warrant is not None and problem is None
     if problem is not None:
         check(False, f"plugin configured (warrant): {problem}", blocks)
+    elif configured:
+        check(True, "plugin configured (warrant)")
+    elif get_access_block(None) is not None:
+        note("no static warrant — role-based access (below) is the tool-call authority")
     else:
         check(
-            configured,
+            False,
             "plugin configured (warrant)",
-            "set TENUO_WARRANT / warrant: — until then the plugin loads and does "
-            "not enforce (startup WARNING). Run doctor after install.",
+            "set TENUO_WARRANT / warrant: for general tool-call authorization. "
+            "Hands device grants are independent. Run doctor after configuration.",
         )
 
     if warrant is not None:
@@ -633,6 +697,77 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
                 else:
                     check(True, "delegation plan loads")
+
+    # 8b. Access: role-based gateway authorization, if configured.
+    access_block = get_access_block(None)
+    if access_block is not None:
+        from hermes_tenuo.access import (
+            AccessConfigError,
+            access_key_path,
+            build_access_policy,
+            load_access_key,
+            parse_access,
+        )
+        try:
+            cfg = parse_access(access_block)
+        except AccessConfigError as exc:
+            check(False, f"access config: {exc}", blocks)
+        else:
+            check(True, f"access: {len(cfg.roles)} role(s); unmatched senders → {cfg.default_role or 'deny'}")
+            configured = get_signing_key_raw(None)
+            key = None
+            if configured:
+                try:
+                    from tenuo_core import SigningKey
+                    key = SigningKey.from_bytes(_b64_to_bytes(configured))
+                    note("access: signs role warrants with the configured key")
+                except Exception as exc:
+                    check(False, f"access signing key could not be loaded: {exc}", blocks)
+            else:
+                key = load_access_key()
+                if key is not None:
+                    note(f"access: using the provisioned key at {access_key_path()}")
+                else:
+                    note(f"access: a signing key is auto-provisioned at {access_key_path()} on first start")
+            if key is None:
+                from tenuo_core import SigningKey
+                key = SigningKey.generate()  # ephemeral, only to compile-check the roles
+            try:
+                build_access_policy(access_block, control_key=key, holder=key.public_key, signing_key=key)
+                check(True, "access: every role compiles to a warrant")
+                for role in cfg.roles:
+                    note(f"  role {role.name}: {', '.join(sorted(role.capabilities)) or '(no tools)'}")
+                from hermes_tenuo.access import UNATTENDED_SURFACES
+                reach = {}
+                for surface in UNATTENDED_SURFACES:
+                    role = cfg.role_for(platform=surface)
+                    reach.setdefault(role.name if role is not None else "denied", []).append(surface)
+                note("access: turns with no chat sender → " + "; ".join(
+                    f"{', '.join(surfaces)}: {name}" for name, surfaces in reach.items()))
+            except (AccessConfigError, ValueError, TypeError) as exc:
+                check(False, f"access role: {exc}", blocks)
+
+        # The child-warrant and delegation-plan files are loaded at startup whether
+        # or not a static warrant is set, but the warrant block above checks them
+        # only when one is. For an access-only install, check them here too.
+        if warrant is None:
+            plan_path = get_delegation_plan_path(None)
+            if plan_path:
+                from hermes_tenuo.delegation import DelegationPlanError, load_plan
+                try:
+                    load_plan(plan_path)
+                    check(True, "delegation plan loads")
+                except DelegationPlanError as exc:
+                    check(False, f"delegation plan: {exc}", blocks)
+            try:
+                child_raw = get_child_warrant_raw(None)
+            except OSError as exc:
+                check(False, f"child warrant path cannot be read: {exc}", blocks)
+            else:
+                if child_raw is not None and load_warrant(child_raw) is None:
+                    check(False, "child_warrant is set but could not be loaded", blocks)
+                elif child_raw is not None and plan_path:
+                    check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
 
     # 9. on_denial
     on_denial = config_entry.get("on_denial", "block")
@@ -778,6 +913,10 @@ def cmd_hands(args: argparse.Namespace) -> int:
 
     from hermes_tenuo.hands import device
     from hermes_tenuo.hands.sandbox import SandboxUnavailable
+    if args.hands_command == "demo":
+        from hermes_tenuo.hands.onboarding import create_demo
+        print(create_demo())
+        return 0
     if args.hands_command == "log":
         path = device.home() / "log.jsonl"
         lines = path.read_text().splitlines()[-args.last:] if path.is_file() else []
@@ -802,12 +941,31 @@ def cmd_hands(args: argparse.Namespace) -> int:
               "--dir FOLDER | hermes-tenuo hands log")
         return 2
     try:
-        dev = device.Device(args.invite, args.dir, _parse_ttl(args.ttl), name=args.name,
+        duration = _parse_ttl(args.ttl)
+        if duration <= 0:
+            raise ValueError("the time window must be positive")
+        if getattr(args, "preview", False):
+            from hermes_tenuo.hands.privacy import preview
+            for line in preview(args, duration):
+                print(device.printable(line))
+            return 0
+        print("Checking this machine before pairing…")
+        checks = device.check(args.invite, args.dir, read_only=args.read_only,
+                              plain_http=args.plain_http, network=args.network,
+                              allow_unsandboxed=args.no_sandbox)
+        for passed, text in checks:
+            print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {device.printable(text)}")
+        if any(passed is False for passed, _ in checks):
+            print("Nothing was paired. Fix the lines marked ✗, then run the same command again.")
+            return 1
+        dev = device.Device(args.invite, args.dir, duration, name=args.name,
                             allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
                             plain_http=args.plain_http, read_home=args.read_home, read=args.read or (),
                             network=args.network)
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
+        if hasattr(signal, "SIGHUP"):  # the terminal was closed: stop what commands started, as Ctrl-C does
+            signal.signal(signal.SIGHUP, dev.stop)
         return dev.serve()
     except (device.HandsError, SandboxUnavailable, ConnectionError, ValueError) as exc:
         print(f"hermes-tenuo hands: {exc}", file=sys.stderr)
@@ -843,8 +1001,10 @@ def _parse_ttl(ttl: str) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="hermes-tenuo",
-        description="Tenuo authorization plugin for Hermes Agent",
+        description="Signed, expiring tool permissions and local workspaces for Hermes Agent",
     )
+    from hermes_tenuo._version import __version__
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     keygen_p = subparsers.add_parser("keygen", help="Create private/public identity files")
@@ -883,7 +1043,7 @@ def main() -> None:
     subparsers.add_parser("verify", help="Verify signature, expiry, and inspect the current warrant")
 
     # doctor
-    subparsers.add_parser("doctor", help="End-to-end install check: plugin discovery, warrant, enforcement path")
+    subparsers.add_parser("doctor", help="Tool-call authorization check: plugin discovery, warrant, enforcement path")
 
     # audit
     audit_p = subparsers.add_parser("audit", help="Show the local audit log (what the agent called, what was denied)")
@@ -896,11 +1056,13 @@ def main() -> None:
 
     hands_p = subparsers.add_parser("hands", help="Let your Hermes server use a folder on this machine")
     hands_sub = hands_p.add_subparsers(dest="hands_command")
+    hands_sub.add_parser("demo", help="Create a disposable practice project; pairs nothing")
     up_p = hands_sub.add_parser("up", help="Share one folder with the server for a set time")
     up_p.add_argument("invite", nargs="?", metavar="INVITE",
                       help="The hands://... line from `/hands invite` (only needed the first time)")
     up_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder the server may work in (default: here)")
     up_p.add_argument("--for", dest="ttl", default="4h", metavar="DURATION", help="How long, e.g. 30m, 4h (default: 4h)")
+    up_p.add_argument("--preview", action="store_true", help="Show local sharing policy without connecting or pairing")
     up_p.add_argument("--name", metavar="NAME", help="What to call this machine (default: its hostname)")
     up_p.add_argument("--no-sandbox", action="store_true",
                       help="Run commands with your full access when this machine has no sandbox")

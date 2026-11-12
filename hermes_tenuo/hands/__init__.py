@@ -27,6 +27,13 @@ def settings(ctx: Any) -> dict:
 
 def register(ctx: Any) -> bool:
     """Start Hands in this Hermes process if it is configured. True when it is on."""
+    from hermes_tenuo.hands import chat
+    ctx.register_hook("pre_llm_call", chat.before_turn)
+    ctx.register_command("hands", chat.command, description="Connect a folder on your own machine",
+                         args_hint="setup [read|edit|online] | invite | verify | on [name] | off | status | revoke <name>")
+    prompt = getattr(ctx, "register_system_prompt_section", None)
+    if prompt is not None:
+        prompt("hands", chat.CONTEXT)
     config = settings(ctx)
     listen = str(config.get("listen") or "").strip()
     if not listen:
@@ -43,8 +50,6 @@ def register(ctx: Any) -> bool:
     hub.joined = chat.joined
     from hermes_tenuo.hands.backend import HandsProvider
     register_provider(HandsProvider())
-    ctx.register_command("hands", chat.command, description="Run this conversation's commands on your own machine",
-                         args_hint="invite | on [name] | off | status | revoke <name>")
     register_middleware = getattr(ctx, "register_middleware", None)
     if register_middleware is not None:
         register_middleware("tool_execution", chat.around_tool)

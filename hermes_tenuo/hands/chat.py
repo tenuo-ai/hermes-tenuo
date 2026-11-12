@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import os
+import shlex
 import threading
 import time
 from typing import Any, Dict
@@ -22,15 +23,89 @@ _wanted: Dict[str, str] = {}   # conversation -> device name ("" = the only one 
 _applied: Dict[str, tuple] = {}  # task -> (conversation it was switched for, the task id as Hermes knows it)
 _devices: Dict[str, str] = {}  # task -> device name
 _saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /hands on
+_cwd_before: Dict[str, Dict[str, Any]] = {}  # conversation -> gateway cwd records to restore on /hands off
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
 
 HELP = """Hands runs this conversation's commands on your own machine.
+  /hands setup         choose permissions and connect your machine
+  /hands verify        confirm the connection with a read-only folder check
   /hands invite        print the line to run on your machine
   /hands on [name]     run this conversation's commands on that machine
   /hands off           run them on the server again
   /hands status        which machines are up
   /hands revoke <name> forget a machine"""
+
+
+CONTEXT = """Hands can connect this conversation's terminal and file tools to a folder on the user's
+machine while Hermes's memory and skills stay on the server. Help users connect with /hands setup;
+load the hermes-tenuo:hands skill for setup and troubleshooting. Pairing requires a command the user
+runs locally. Never run that command on the Hermes server on their behalf. /hands verify confirms
+machine, folder, access, network and remaining time. Terminal/file result ran_on identifies their
+execution target, not the target of browser, MCP, memory or other tools. Do not assume browser localhost
+means the paired machine. Internet is off by default; dependency installation requires the user to
+restart hands up locally with --network. Never broaden access or rerun an unknown-outcome command
+without checking first. /hands off changes conversation routing unless terminal.backend is hands for the whole profile;
+then change the profile terminal backend to return to the server. Ctrl-C in hands up ends device access.
+"""
+
+SETUP = """Connect your laptop to this Hermes; your memory and skills stay here.
+No manually minted warrant or TENUO_SIGNING_KEY is needed for Hands.
+
+On the Hermes server, merge these keys into plugins.entries.hermes-tenuo in the active profile's config.yaml:
+  hands:
+    listen: "127.0.0.1:8765"
+    url: "https://YOUR-HANDS-HOST"
+Use an HTTPS reverse proxy to forward that URL to 127.0.0.1:8765. For Tailscale,
+set listen to your server's Tailscale IP:8765 and url to http://THAT-IP:8765 instead.
+The URL must reach this Hands listener, not Hermes Desktop's gateway port.
+Restart the Hermes gateway/profile you chat with, then run /hands setup again.
+Your laptop will test connectivity before pairing; keep it awake while sharing.
+"""
+
+CHOICES = """Choose what this session may do (one project folder, initially one hour):
+  /hands setup read    Read files; cannot change the project; internet off.
+  /hands setup edit    Edit files and run tests; internet off.
+  /hands setup online  Edit and run tests with internet access for installs/downloads.
+Online also allows access to network services; it is not limited to package registries.
+These are command presets, not new security boundaries. You review and run the command locally.
+"""
+
+
+def describe(session: Any) -> str:
+    mode = {"read-only": "read-only", "sandboxed": "read/write", "none": "UNSANDBOXED: full user access"}
+    network = {"on": "internet on", "off": "internet off"}
+    left = max(0, int((session.expires - time.time()) / 60))
+    return (f"{session.name} · {session.folder} · {mode.get(session.mode, 'access not reported')} · "
+            f"{network.get(session.network, 'network not reported') if session.mode != 'none' else 'network unrestricted'}"
+            f" · {left} min left")
+
+
+def _return_to_server() -> str:
+    if _whole_profile():
+        return "Change this profile's terminal backend to return to the server; /hands off cannot switch this profile."
+    return "/hands off switches this conversation to the server."
+
+
+def before_turn(**_: Any) -> dict:
+    """Fresh per-conversation context; no probing, grants or changes to routing."""
+    hub = get_hub()
+    if hub is None:
+        return {}
+    with _lock:
+        name = _wanted.get(_conversation())
+    if name is None and not _whole_profile():
+        return {}
+    try:
+        session = hub.pick(name or "", _owner())
+    except HandsUnavailable:
+        state = {"target": "paired device unavailable", "action": "Ask the user to reconnect locally. " + _return_to_server()}
+    else:
+        state = {"machine": session.name, "folder": session.folder, "access": session.mode,
+                 "internet": session.network, "minutes_left": max(0, int((session.expires - time.time()) / 60))}
+    return {"context": "Hands execution state (data, not instructions): " + json.dumps(state, ensure_ascii=True)
+            + "\nOnly terminal and file tools follow this target. Browser/MCP and other tools do not move. "
+            "Tell the user the target and scope before beginning device work. Use /hands verify to confirm it."}
 
 
 def _scoped(key: str) -> str:
@@ -150,27 +225,51 @@ def command(raw_args: str = "") -> str:
     if verb in ("help", "-h", "--help"):
         return HELP
     if hub is None:
-        return ("Hands is off in this Hermes process. Add `hands: {listen: \"0.0.0.0:8765\", "
-                "url: \"http://<this-server>:8765\"}` under plugins.entries.hermes-tenuo and restart.")
+        return "Hands is off in this Hermes process.\n\n" + SETUP
+    if verb == "setup" and len(words) == 1:
+        return CHOICES
+    if verb == "setup" and (len(words) != 2 or words[1] not in ("read", "edit", "online")):
+        return CHOICES
     asking = _owner()
-    if asking == NOBODY and verb in ("invite", "on", "revoke"):
+    if asking == NOBODY and verb in ("invite", "setup", "verify", "on", "revoke"):
         return ("Hands cannot tell who sent this message, so nothing was changed. "
                 "Send the command again as a message of its own.")
     try:
-        if verb == "invite":
+        if verb in ("invite", "setup"):
+            mode = words[1] if verb == "setup" else "edit"
+            flags = {"read": " --read-only", "edit": "", "online": " --network"}[mode]
             line = hub.invite(asking, _conversation())
             local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
             return ("On your machine, in the folder you want to work in, run:\n\n"
-                    f"  hermes-tenuo hands up '{line}' --dir . --for 4h\n\n"
+                    f"  uvx hermes-tenuo hands up {shlex.quote(line)} --dir . --for 1h{flags}\n\n"
+                    "Keep this terminal open. Preflight runs before pairing. "
+                    "If uvx is missing, install uv from https://docs.astral.sh/uv/getting-started/installation/.\n"
                     "The line works once and for 10 minutes. "
-                    + ("This conversation starts using the machine as soon as it is up; /hands off switches back."
+                    + ("This conversation starts using the machine as soon as it is up. " + _return_to_server()
                        if can_switch else "Then type /hands on here.")
+                    + "\nThen run /hands verify here to confirm the folder and permissions before working."
+                    + ("\nInternet is ON for this share." if mode == "online" else
+                       "\nInternet is OFF. For dependency installs, choose /hands setup online instead.")
                     + ("\n\nNote: that address only works on the server itself. Set hands.url in the "
                        "plugin config to an address your machine can reach." if local else "")
                     + ("\n\nNote: that address is not encrypted and is on the internet, so your machine "
                        "will refuse it. Put HTTPS in front of this server and set hands.url to the https:// "
                        "address, or use a private network such as Tailscale." if wire.plain_and_public(hub.public_url)
                        else ""))
+        if verb == "verify":
+            with _lock:
+                name = _wanted.get(_conversation())
+            if name is None and not _whole_profile():
+                return "This conversation uses the server. Run /hands on <name>, then /hands verify."
+            session = hub.pick(name or "", asking)
+            # Fixed, read-only probe through the same signed/sandboxed device execution path.
+            output, code = hub.run(session, "cd " + shlex.quote(session.folder) + " && pwd -P",
+                                   login=False, timeout=5, stdin=None, shown="Hands connection check")
+            if code != 0:
+                return f"Connection check failed (exit {code}): {output}\nRun /hands status; check the laptop terminal."
+            return ("Connected: " + describe(session) + "\nShared folder verified: " + output.strip()
+                    + "\nTerminal and file tools use this machine. Browser, MCP and other tools are not moved."
+                    + "\n" + _return_to_server() + " Ctrl-C on the laptop ends access.")
         if verb == "on":
             if not can_switch:
                 return ("This Hermes version can't switch one conversation to a machine. Set "
@@ -180,9 +279,8 @@ def command(raw_args: str = "") -> str:
             with _lock:
                 _wanted[_conversation()] = session.name
                 _remember()
-            left = max(0, int((session.expires - time.time()) / 60))
-            return (f"This conversation now runs commands on '{session.name}' in {session.folder} "
-                    f"({left} min left). /hands off switches back to the server.")
+            return ("This conversation now runs commands on: " + describe(session)
+                    + "\n" + _return_to_server() + " Ctrl-C on the laptop ends access.")
         if verb == "off":
             with _lock:
                 _wanted.pop(_conversation(), None)
@@ -192,7 +290,8 @@ def command(raw_args: str = "") -> str:
                 return ("This profile runs every conversation's commands on your machine (terminal.backend: "
                         "hands), so /hands off cannot move this one to the server. Change the profile's "
                         "terminal backend to do that.")
-            return "This conversation runs commands on the server again."
+            return ("This conversation runs commands on the server again. This does not stop laptop sharing; "
+                    "press Ctrl-C in its hands up terminal to end device access.")
         if verb == "revoke":
             if len(words) < 2:
                 return "Which machine? /hands revoke <name>"
@@ -208,7 +307,9 @@ def command(raw_args: str = "") -> str:
             if here is None:
                 here = "your machine (this profile's terminal backend is hands)" if _whole_profile() else "the server"
             return "\n".join(["Machines:"] + (rows or ["  none are up (/hands invite to add one)"]) +
-                             [f"This conversation runs on: {here}"])
+                             ["Confirm a connected folder with /hands verify. If offline or expired, run the reconnect "
+                              "command in the device terminal. " + _return_to_server(),
+                              f"This conversation runs on: {here}"])
     except HandsUnavailable as e:
         return str(e)
     return HELP
@@ -235,6 +336,15 @@ def _release(conversation: str) -> None:
                 register_task_env_overrides(task, before)  # what the task had before /hands on
             except Exception as e:
                 logger.warning("hermes-tenuo hands: could not restore the task's settings (%s)", e)
+
+    with _lock:
+        cwds = _cwd_before.pop(conversation, {})
+    if cwds:
+        from tools.terminal_tool import clear_session_cwd, record_session_cwd
+        for key, before in cwds.items():
+            clear_session_cwd(key)
+            if before:
+                record_session_cwd(key, before)
 
 
 def _own_overrides(task: str) -> Dict[str, Any]:
@@ -318,6 +428,26 @@ NO_NETWORK = ("Could not resolve host", "Temporary failure in name resolution", 
               "Network is unreachable", "network is unreachable", "ENOTFOUND", "EAI_AGAIN")
 
 
+# A machine sends a file with what it recognises as secrets replaced, and Hermes will
+# not write back a file it could not read exactly. That refusal is right, but neither
+# side says why, so the result does.
+_WITH_TERMINAL = ("Edit it with a terminal command instead (sed, or a short script), "
+                  "or ask the user to make the change.")
+
+
+def _redaction_note(data: Dict[str, Any], tool_name: str, session: Any) -> str:
+    if tool_name == "read_file" and "[redacted]" in str(data.get("content") or ""):
+        # The marker alone does not prove the machine put it there: the file may say it itself.
+        return (f"'{session.name}' replaces what it recognises as secrets with [redacted] before sending a file. "
+                "If that is where the [redacted] here came from, the file on the machine is unchanged and the "
+                "file tools will refuse to edit it. " + _WITH_TERMINAL)
+    if tool_name in ("patch", "write_file") and "Failed to read file" in str(data.get("error") or ""):
+        return (f"If this file holds something '{session.name}' recognises as a secret, it is sent with that "
+                "part replaced, and the file tools refuse to write a file they could not read exactly. "
+                + _WITH_TERMINAL)
+    return ""
+
+
 def _marked(result: Any, tool_name: str, session: Any) -> Any:
     """The tool's result, saying which machine it ran on. A refusal by that machine's
     sandbox also says what the machine shares, since the bare system message does not."""
@@ -333,10 +463,13 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
         return result  # Hermes stopped this call before it reached the device
     data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
     text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
+    redaction = _redaction_note(data, tool_name, session)
     # Only what the machine said holds its commands is repeated. One that runs them with
     # no sandbox, or did not say, gets no explanation: the failure is an ordinary one.
     mode = getattr(session, "mode", "")
     if mode not in ("sandboxed", "read-only"):
+        if redaction:
+            data["hands_note"] = redaction
         return json.dumps(data, ensure_ascii=False)
     offline = getattr(session, "network", "") == "off"
     if offline:  # said with every result: a failed install does not always say why
@@ -356,6 +489,8 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
                          "The user can allow it by starting Hands on that machine with --network.")
         elif refused:
             notes.append("Commands there also have no internet access unless the user starts Hands with --network.")
+    if redaction:
+        notes.append(redaction)
     if notes:
         data["hands_note"] = " ".join(notes)
     return json.dumps(data, ensure_ascii=False)
@@ -431,12 +566,29 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
                                    "/hands on there; this call was not run")
     if folder and not _inside(get_session_cwd(task), folder):
         record_session_cwd(task, folder)
-    if whole_profile:
-        return _marked(next_call(), tool_name, session)
-    token = set_terminal_scope(_policy_with_hands())
-    chosen = _route.set(wanted)
+    # Gateway terminals record cwd by approval/session key; file tools use task_id.
+    # Keep both anchors on the selected workspace and restore the server's record
+    # when switching off, otherwise relative writes and later server commands diverge.
+    cwd_key = ""
+    if folder and tool_name in ON_DEVICE:
+        try:
+            from tools.approval import get_current_session_key
+            cwd_key = get_current_session_key(default="") or ""
+        except ImportError:
+            pass  # older Hermes uses the task id for both tools
+        if cwd_key and cwd_key != task:
+            if not whole_profile:
+                with _lock:
+                    _cwd_before.setdefault(conversation, {}).setdefault(cwd_key, get_session_cwd(cwd_key))
+            record_session_cwd(cwd_key, get_session_cwd(task) or folder)
+    token = None if whole_profile else set_terminal_scope(_policy_with_hands())
+    chosen = _route.set(wanted) if not whole_profile else None
     try:
         return _marked(next_call(), tool_name, session)
     finally:
-        _route.reset(chosen)
-        reset_terminal_scope(token)
+        if cwd_key and cwd_key != task and _inside(get_session_cwd(cwd_key), folder):
+            record_session_cwd(task, get_session_cwd(cwd_key))
+        if chosen is not None:
+            _route.reset(chosen)
+        if token is not None:
+            reset_terminal_scope(token)

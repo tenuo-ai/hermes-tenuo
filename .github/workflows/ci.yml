@@ -27,5 +27,12 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Check out previous Hands protocol implementation
+        uses: actions/checkout@v7
+        with:
+          ref: 96becacc21da39566799ea723c788984f54bbb9c
+          path: .hands-compat-baseline
       - name: Run tests
+        env:
+          HANDS_COMPAT_SOURCE: ${{ github.workspace }}/.hands-compat-baseline
         run: python -m pytest tests/ -q --tb=short

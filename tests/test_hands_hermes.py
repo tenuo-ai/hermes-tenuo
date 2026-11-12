@@ -42,6 +42,22 @@ SCRIPT = textwrap.dedent('''
     wire.POLL_SECONDS = 2  # a stopped device leaves its open request quickly
     from hermes_tenuo.hands.hub import get_hub
 
+    os.environ["XDG_CONFIG_HOME"] = str(base / "personal-config")
+    config = base / "personal-config" / "hermes-tenuo"
+    config.mkdir(parents=True)
+    private = device_dir / "private.txt"
+    private.write_text("PRIVATE_HERMES_FILE")
+    diagnostic = device_dir / "diagnostic.txt"
+    diagnostic.write_text("diagnostic token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    from hermes_tenuo.hands import device as device_module
+    sent_outputs = []
+    original_post = device_module._post
+    def capture(url, body, **kwargs):
+        if url.endswith("/result"):
+            sent_outputs.append(body["output"])
+        return original_post(url, body, **kwargs)
+    device_module._post = capture
+    (config / "never-share").write_text(str(private))
     out = {}
     def tool(key, name, args, task="chat-1"):
         raw = handle_function_call(name, args, task_id=task, session_id="s1", tool_call_id=key)
@@ -65,6 +81,16 @@ SCRIPT = textwrap.dedent('''
             time.sleep(0.05)
         return device, thread
 
+    if sys.argv[2] == "gateway":
+        import inspect
+        from gateway.session_context import set_session_vars
+        params = dict(platform="telegram", source="telegram", chat_id="123", chat_type="dm",
+                      user_id="alice", session_key="first-session-gateway", session_id="s1")
+        if "actor_id" in inspect.signature(set_session_vars).parameters:
+            params["actor_id"] = "alice"
+        set_session_vars(**params)
+        assert chat._owner() == "telegram:alice"
+
     if whole_profile:
         # The profile's backend is `hands`, and Hermes was started in a server folder.
         os.environ["TERMINAL_ENV"], os.environ["TERMINAL_CWD"] = "hands", str(server_dir)
@@ -72,10 +98,14 @@ SCRIPT = textwrap.dedent('''
     else:
         tool("before", "terminal", {"command": "pwd"})
         out["on_without_device"] = chat.command("on")
-        invite = chat.command("invite").split("'")[1]
+        invite = chat.command("setup edit").split("'")[1]
     device, serving = up(device_dir, invite=invite)
     if not whole_profile:
         out["on"] = chat.command("on")
+    out["verified"] = chat.command("verify")
+    from hermes_cli.plugins import invoke_hook
+    out["execution_context"] = next(item for item in invoke_hook("pre_llm_call")
+                                    if isinstance(item, dict) and item.get("context", "").startswith("Hands"))
     # A relative write before any command has run must still land on the device.
     tool("first", "write_file", {"path": "first.txt", "content": "first\\n"})
     tool("pwd", "terminal", {"command": "pwd"})
@@ -112,6 +142,10 @@ SCRIPT = textwrap.dedent('''
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
+    tool("private_read", "read_file", {"path": str(private)})
+    tool("private_shell", "terminal", {"command": "cat " + str(private)})
+    tool("redacted_file", "read_file", {"path": str(diagnostic)})
+    tool("redacted", "terminal", {"command": "printf 'ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"})
     tool("bg_poll_named", "process_manage", {"action": "poll", "session_id": out["bg"]["session"]})
     tool("bg_stop", "terminal", {"command": f"kill {out['bg']['pid']} && echo stopped"})
     # The device goes down and comes back: the same conversation carries on.
@@ -180,6 +214,10 @@ SCRIPT = textwrap.dedent('''
         tool("after", "terminal", {"command": "pwd"})
         out["status"] = chat.command("status")
     device.stop()
+    import base64
+    token = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    encoded = base64.b64encode(("diagnostic token " + token).encode()).decode()
+    assert not any(token in result or encoded in result for result in sent_outputs), "secret crossed the device boundary"
     print("RESULT " + json.dumps(out))
 ''')
 
@@ -212,7 +250,13 @@ def _run(tmp_path, mode):
 
 
 def _on_the_device(out, project, server_dir):
+    assert "PRIVATE_HERMES_FILE" not in out["private_read"]["text"]
+    assert "PRIVATE_HERMES_FILE" not in out["private_shell"]["text"]
+    assert out["redacted_file"]["text"] == "1|diagnostic token [redacted]", out["redacted_file"]
+    assert "ghp_" not in out["redacted"]["text"] and "[redacted]" in out["redacted"]["text"]
     there = os.path.realpath(project)
+    assert "Shared folder verified: " + there in out["verified"], out["verified"]
+    assert "laptop" in out["execution_context"]["context"]
     assert (project / "first.txt").read_text() == "first\n", out["first"]
     assert out["pwd"]["text"].strip() == there
     assert out["cd"]["text"].strip() == os.path.join(there, "src")
@@ -303,3 +347,10 @@ def test_adapter_preserves_confirmed_outcome_after_outer_timeout(monkeypatch, re
         assert "check before running it again" in result["output"]
     else:
         assert result["full_output_path"] == "/tmp/retained-output"
+
+
+def test_first_session_with_real_gateway_identity(tmp_path):
+    out, project, server_dir = _run(tmp_path, "gateway")
+    _on_the_device(out, project, server_dir)
+    assert out["after"]["text"].strip() == os.path.realpath(server_dir), out["after"]
+    assert out["fresh_after"]["text"].strip() == os.path.realpath(server_dir), out["fresh_after"]

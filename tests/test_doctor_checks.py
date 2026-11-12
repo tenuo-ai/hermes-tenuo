@@ -141,7 +141,7 @@ def test_status_says_blocked_when_only_the_key_is_missing(install, capsys, monke
 
 def test_status_says_not_enforcing_when_no_warrant(install, capsys):
     install(warrant=None)
-    assert "enforces nothing" in _status(capsys)
+    assert "general tool-call authorization is off" in _status(capsys)
     install(warrant=None, require_warrant="true")
     assert "require_warrant is on — every tool call is blocked" in _status(capsys)
 
@@ -171,7 +171,7 @@ def test_status_reports_the_kanban_task_warrant(install, capsys, monkeypatch, gl
     out = _status(capsys)
     assert "not staged  (kanban task card-1:" in out
     assert "No warrant is staged for kanban task card-1 — every tool call is blocked" in out
-    assert "enforces nothing" not in out and "Ready for enforcement" not in out
+    assert "general tool-call authorization is off" not in out and "Ready for enforcement" not in out
 
     path = task_warrant_path("card-1")
     path.parent.mkdir(parents=True)
@@ -180,3 +180,58 @@ def test_status_reports_the_kanban_task_warrant(install, capsys, monkeypatch, gl
     assert "Warrant        set  (kanban task card-1, file)" in out
     assert "Ready for enforcement" in out
     assert "staged-warrant-text" not in out
+
+
+def _directory_install(home, shim_text):
+    directory = home / "plugins" / "hermes-tenuo"
+    (directory / "hermes_tenuo").mkdir(parents=True)
+    (directory / "hermes_tenuo" / "__init__.py").write_text("")
+    (directory / "__init__.py").write_text(shim_text)
+    return directory
+
+
+_THIS_SHIM = (__import__("pathlib").Path(__file__).resolve().parents[1] / "__init__.py").read_text()
+# The loader that refused a second installation by raising, so Hermes dropped the plugin.
+_RAISING_SHIM = """
+def _load_package():
+    raise ImportError("hermes-tenuo installation conflict: x is already loaded")
+_pkg = _load_package()
+register = _pkg.register
+"""
+# The 0.3 loader: use whichever package is already importable.
+_REUSING_SHIM = """
+import importlib
+_pkg = importlib.import_module("hermes_tenuo")
+register = _pkg.register
+"""
+
+
+@pytest.mark.parametrize("shim, effect, said, fails", [
+    (_THIS_SHIM, "blocks", "when Hermes loads both, every tool call is blocked", True),
+    (_RAISING_SHIM, "drops", "when Hermes loads both, the plugin is not loaded and nothing is enforced", True),
+    (_REUSING_SHIM, "reuses", "—  two installations", False),
+])
+def test_doctor_reports_a_second_installation_by_what_its_loader_does(
+        tmp_path, monkeypatch, capsys, shim, effect, said, fails):
+    from hermes_tenuo import cli
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
+    directory = _directory_install(tmp_path, shim)
+    assert cli._second_installation() == (directory, effect)
+    code = cli.cmd_doctor(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert said in out and str(directory) in out
+    assert ("✗  two installations" in out) is fails
+    if fails:
+        assert code == 1
+
+
+def test_doctor_ignores_the_plugin_directory_outside_the_hermes_environment(tmp_path, monkeypatch):
+    from hermes_tenuo import cli
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _directory_install(tmp_path, _THIS_SHIM)
+    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: False)
+    assert cli._second_installation() is None
+    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "elsewhere"))
+    assert cli._second_installation() is None
