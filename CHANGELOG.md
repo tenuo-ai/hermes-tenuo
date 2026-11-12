@@ -14,6 +14,18 @@
 - Use the supported repository install command in user guides; Hermes `--ref`
   accepts a full commit SHA rather than a release tag.
 
+### Access
+
+- Add role-based gateway access: an `access:` block of roles (`match` + `allow`)
+  compiles to one warrant per role and the guard resolves each messaging turn to
+  its sender's role. Authority follows the message's sender, so a shared chat is
+  authorised per message; a sender no role grants is blocked. A constrained tool
+  keeps its other arguments unless `strict: true`; `terminal` takes a `binaries`
+  allowlist. The signing key is auto-provisioned under `$HERMES_HOME/tenuo` so no
+  key need be configured; `doctor` validates the block. API-server, webhook and
+  scheduled turns match roles by platform; local (CLI/desktop) turns are not
+  governed. A `delegate_task` child gets a grant narrowed from its parent's role.
+
 ### Hands
 
 - Reuse Tenuo’s Python `path-jail` for workspace selection and signed command
@@ -30,6 +42,10 @@
   reference or a file path as is, so ordinary settings and source are not redacted.
 - Keep serving when the server's answer is not in the expected form: it is retried like a
   lost connection instead of ending the device.
+- On macOS, commands can no longer open other terminal devices, read user preferences, or
+  read other programs' temporary files.
+- The laptop reports git settings a command added or changed that make git run programs.
+- A machine name is one printable line; closing the terminal stops Hands as Ctrl-C does.
 - Exercise both client/server directions against a pinned previous Hands version in CI.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file

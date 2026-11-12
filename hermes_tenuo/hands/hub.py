@@ -323,6 +323,9 @@ class Hub:
             raise Refused("this pairing request doesn't match what was signed")
         if tmp and (not tmp.startswith("/") or len(tmp) > 512 or any(c in tmp for c in "\n\r\0'\"\\$`")):
             raise Refused("this device's temp folder has a path Hands can't use")
+        # The name is repeated in the chat and to the agent: one printable line.
+        if not name.strip() or not name.isprintable():
+            raise Refused("this device's name has characters Hands can't use")
         if not wire.same_key(grant.issuer, device_key) or not wire.same_key(grant.authorized_holder, self.key.public_key):
             raise Refused("the grant is not from this device to this server")
         if grant.is_expired() or wire.TOOL not in grant.tools:

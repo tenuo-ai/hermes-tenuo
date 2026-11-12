@@ -26,9 +26,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from hermes_tenuo.hands import sandbox, wire
+from hermes_tenuo.hands import gitwatch, sandbox, wire
 from hermes_tenuo.hands.paths import workspace
 from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
 
@@ -585,9 +585,12 @@ class Device:
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
                      writable=not read_only, home_visible=read_home, tools=self.shown,
                      network=network, excluded=self.excluded)  # fail before pairing
-        self.say = say
+        self._say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
+        # The name is shown in the chat and to the agent, on one line.
+        if not self.name.strip() or len(self.name) > 64 or not self.name.isprintable():
+            raise HandsError("the machine name must be 1 to 64 printable characters on one line: pass --name")
         saved = home() / "server.json"
         if invite:
             parsed = wire.Invite.parse(invite)
@@ -618,6 +621,11 @@ class Device:
         self._groups: Dict[int, float] = {}                    # process group of each command -> when it began
         self._runner: Optional[subprocess.Popen] = None
         self._log = home() / "log.jsonl"
+        # Git settings in the folder that run programs: what was there at the start, and
+        # what commands have added or changed since (see gitwatch).
+        self._git_seen = gitwatch.settings(self.folder, also=(self.tmp,))
+        self._git_changes: List[str] = []
+        self._git_reminded = False
 
     # -- talking to the server ------------------------------------------------
 
@@ -1135,7 +1143,47 @@ class Device:
             output += ("\nhands: stopped because Hands was stopped on the device\n" if self._stop else
                        "\nhands: stopped at the server's request\n")
         self._record(shown, code, "stopped" if code == 130 else "")
+        self._git_note()
         self._deliver(job_id, output, code)
+
+    def _git_note(self) -> None:
+        """Tell the person when a command changed what git will run in this folder.
+
+        Advice only: nothing here may keep a result from being sent or cleanup from running.
+        """
+        try:
+            # Also in a read-only session: commands can still write their temp folder.
+            now = gitwatch.settings(self.folder, also=(self.tmp,))
+            new, self._git_seen = gitwatch.changed(self._git_seen, now), now
+            if not new:
+                return
+            # A name can carry a secret (a credential URL as a subsection, a hook's file name).
+            new = [self.redactor.clean(name) for name in new]
+            self._git_changes += [name for name in new if name not in self._git_changes]
+            names = ", ".join(printable(name)[:60] for name in new[:6]) + (" and more" if len(new) > 6 else "")
+            self.say(f"  Note: that command changed git settings that run programs: {names}.")
+            self.say("  Git runs them for whoever uses git in this folder next, outside Hands. "
+                     "Check .git/config and .git/hooks before you do.")
+            with open(self._log, "a") as f:  # the same shape as a command's record, for `hands log`
+                f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder,
+                                    "command": ", ".join(new[:20])[:500], "exit": None,
+                                    "note": "git settings changed"}) + "\n")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _git_reminder(self) -> None:
+        """Said once commands and what they left running have stopped, however Hands ends."""
+        if self._git_reminded:
+            return
+        self._git_reminded = True
+        self._git_note()  # a process left running may have written after its command returned
+        try:
+            if self._git_changes:
+                names = ", ".join(printable(name)[:60] for name in self._git_changes[:10])
+                self.say(f"Before you use git in {self.folder}: commands changed settings that make git run "
+                         f"programs ({names}). Check .git/config and .git/hooks.")
+        except Exception:  # noqa: BLE001
+            return
 
     def _record(self, shown: str, code: Optional[int], note: str) -> None:
         line = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "folder": self.folder, "command": self.redactor.clean(shown)[:500],
@@ -1204,7 +1252,34 @@ class Device:
             args.append("--plain-http")
         return shlex.join(args)
 
+    @property
+    def say(self) -> Callable[[str], None]:
+        """Print for the person at the machine. Their terminal may be gone (it was closed,
+        or its output is a broken pipe); that must never interrupt a command or cleanup."""
+        def tolerant(line: str) -> None:
+            try:
+                self._say(line)
+            except (OSError, ValueError):
+                pass
+        return tolerant
+
+    @say.setter
+    def say(self, value: Callable[[str], None]) -> None:
+        self._say = value
+
     def serve(self) -> int:
+        try:
+            return self._serve()
+        finally:
+            # However serving ends, nothing a command started is left running, and the
+            # person hears about git settings commands changed (once).
+            try:
+                self._stop_runner()
+            except Exception:  # noqa: BLE001
+                pass
+            self._git_reminder()
+
+    def _serve(self) -> int:
         self.pair()
         until = time.strftime("%H:%M", time.localtime(self.expires))
         self.say(f"Hands is up: {self.url} can run commands in {self.folder} until {until}.")
@@ -1254,6 +1329,7 @@ class Device:
                         continue
                 self._stop_runner()
                 self.say(f"The server ended this session: {ended}")
+                self._git_reminder()
                 self.say("If revoked, request a new /hands setup invite. Otherwise reconnect locally with: "
                          + self.reconnect_command())
                 return 1
@@ -1280,5 +1356,6 @@ class Device:
         self.bye()
         self.say("Hands is down: the time window ended." if not self._stop else "Hands is down.")
         self.say("Commands and background processes have been stopped. This does not undo file changes.")
+        self._git_reminder()
         self.say("To share again for a fresh time window, run locally: " + self.reconnect_command())
         return 0
