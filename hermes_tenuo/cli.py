@@ -1089,6 +1089,9 @@ def main() -> None:
     hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
         "--last", type=int, default=20, metavar="N")
 
+    from hermes_tenuo import a2a_cli
+    a2a_cli.add_parser(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "keygen":
@@ -1105,6 +1108,8 @@ def main() -> None:
         sys.exit(cmd_audit(args))
     elif args.command == "hands":
         sys.exit(cmd_hands(args))
+    elif args.command == "a2a":
+        sys.exit(a2a_cli.run(args))
     elif args.command == "demo":
         from hermes_tenuo.demo import main as cmd_demo
         sys.exit(cmd_demo())

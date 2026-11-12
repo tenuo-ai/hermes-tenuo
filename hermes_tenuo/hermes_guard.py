@@ -1158,6 +1158,9 @@ class HermesGuard:
         grant = ingress.grant_for(*turn)
         if grant is None:
             return "tenuo: this A2A task carries no verified grant; tool call blocked"
+        revoked = ingress.is_revoked(grant)
+        if revoked is not None:
+            return f"tenuo: {revoked}; tool call blocked"
         if not session_id:
             return "tenuo: an A2A tool call without a session cannot be matched to its grant"
         with self._session_lock:

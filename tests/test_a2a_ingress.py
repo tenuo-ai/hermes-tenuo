@@ -346,3 +346,88 @@ def test_misconfigured_ingress_drops_every_a2a_message(monkeypatch):
     (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
     assert dispatch(_event("anything"))["action"] == "skip"
     assert dispatch(_event("hello", platform="telegram")) is None
+
+
+# --- D1: revocation and state that survives a restart ------------------------------
+
+
+def _srl(keys, ids, version=1, signer=None):
+    from tenuo import SignedRevocationList
+
+    builder = SignedRevocationList.builder()
+    for warrant_id in ids:
+        builder = builder.revoke(str(warrant_id))
+    return builder.version(version).build(signer or keys.root)
+
+
+def _write_srl(path, srl):
+    import base64 as b64
+
+    path.write_text(b64.b64encode(srl.to_bytes()).decode())
+
+
+def _with_srl(keys, tmp_path):
+    path = tmp_path / "srl.b64"
+    return path, _ingress(keys, revocation_list=path)
+
+
+def test_revoking_a_grant_stops_its_task_mid_run(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = _grant(keys, w_a)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard, turn = _guard(keys, ingress), ("agent-a", "ctx-1")
+    args = {"entity_id": "light.guest_room"}
+    assert _call(guard, ingress, turn, "light_set", args, "s1") is None
+    _write_srl(path, _srl(keys, [grant.id], version=2))
+    blocked = _call(guard, ingress, turn, "light_set", args, "s1")
+    assert blocked["action"] == "block" and "revoked" in blocked["message"]
+
+
+def test_revoking_the_senders_warrant_revokes_everything_it_delegated(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, [w_a.id]))
+    result = ingress.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "not trusted" in result["reason"]
+
+
+@pytest.mark.parametrize("bad", ["forged", "garbage"])
+def test_an_unusable_revocation_list_refuses_every_delegation(keys, w_a, tmp_path, bad):
+    path, ingress = _with_srl(keys, tmp_path)
+    if bad == "forged":
+        _write_srl(path, _srl(keys, [], signer=keys.mallory))
+    else:
+        path.write_text("not a revocation list")
+    result = ingress.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "revocation list cannot be used" in result["reason"]
+
+
+def test_an_older_revocation_list_cannot_undo_a_revocation(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    grant = _grant(keys, w_a)
+    _write_srl(path, _srl(keys, [], version=1))
+    _admit_grant(keys, w_a, ingress, grant)
+    _write_srl(path, _srl(keys, [grant.id], version=5))
+    assert ingress.is_revoked(ingress.grant_for("agent-a", "ctx-1"))
+    _write_srl(path, _srl(keys, [], version=2))  # rolled back
+    assert ingress.is_revoked(ingress.grant_for("agent-a", "ctx-1"))
+
+
+def test_replay_and_context_ownership_survive_a_restart(keys, w_a, tmp_path):
+    envelope = _envelope(keys, w_a)
+    first = _ingress(keys, state_dir=tmp_path)
+    assert first.pre_gateway_dispatch(_event(_event_text(envelope)))["action"] == "rewrite"
+    restarted = _ingress(keys, state_dir=tmp_path)
+    assert restarted.grant_for("agent-a", "ctx-1") is None  # the in-flight grant is not kept
+    replay = restarted.pre_gateway_dispatch(_event(_event_text(envelope)))
+    assert replay["action"] == "skip" and "already carried" in replay["reason"]
+    # The same request into a fresh context is still refused: its nonce was spent.
+    nonces = NonceStore(path=tmp_path / "a2a_nonces.json")
+    with pytest.raises(IngressRefused, match="already used"):
+        _verify(keys, envelope, nonces=nonces)
+    assert oct((tmp_path / "a2a_nonces.json").stat().st_mode & 0o777) == "0o600"
+
+
+def _admit_grant(keys, w_a, ingress, grant, ctx="ctx-1"):
+    envelope = _envelope(keys, w_a, grant=grant, ctx=ctx)
+    assert ingress.pre_gateway_dispatch(_event(_event_text(envelope), ctx=ctx))["action"] == "rewrite"
