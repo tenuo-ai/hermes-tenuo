@@ -140,11 +140,35 @@ class VerifiedGrant:
     tools: Tuple[str, ...]
 
 
-class NonceStore:
-    """Nonces seen within the acceptance window. A nonce is refused while it could still be fresh."""
+class _JsonState:
+    """A small JSON file written atomically (0600). Unreadable state fails closed: the caller
+    refuses rather than forgetting what it had accepted."""
 
-    def __init__(self) -> None:
-        self._seen: Dict[str, float] = {}
+    def __init__(self, path: Optional[Any]) -> None:
+        self.path = path
+
+    def load(self) -> Dict[str, float]:
+        if self.path is None or not self.path.exists():
+            return {}
+        data = json.loads(self.path.read_text())
+        return {str(k): float(v) for k, v in dict(data).items()}
+
+    def save(self, data: Dict[str, float]) -> None:
+        if self.path is None:
+            return
+        from hermes_tenuo.issuance import write_private_file
+
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_private_file(self.path, json.dumps(data, sort_keys=True), overwrite=True)
+
+
+class NonceStore:
+    """Nonces seen within the acceptance window. A nonce is refused while it could still be fresh,
+    also across a restart when ``path`` is set."""
+
+    def __init__(self, path: Optional[Any] = None) -> None:
+        self._file = _JsonState(path)
+        self._seen: Dict[str, float] = self._file.load()
         self._lock = threading.Lock()
 
     def claim(self, nonce: str, now: float) -> bool:
@@ -154,12 +178,14 @@ class NonceStore:
             if nonce in self._seen:
                 return False
             self._seen[nonce] = now + MAX_REQUEST_AGE + MAX_CLOCK_SKEW
+            self._file.save(self._seen)
             return True
 
 
 def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str,
                     peers: Dict[str, str], own_key: Any, trusted_roots: List[Any],
-                    nonces: NonceStore, now: Optional[float] = None) -> VerifiedGrant:
+                    nonces: NonceStore, now: Optional[float] = None,
+                    revocations: Optional[Any] = None) -> VerifiedGrant:
     """Check one envelope completely, or raise IngressRefused saying why.
 
     ``peer`` is the identity the A2A transport authenticated (never read from the body);
@@ -208,6 +234,8 @@ def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str
     # Root trust, linkage, depth, expiry and monotonic narrowing for the whole chain.
     try:
         authorizer = Authorizer(trusted_roots=list(trusted_roots))
+        if revocations is not None:
+            authorizer.set_revocation_list(revocations)
         authorizer.verify_chain(chain)
     except Exception as exc:
         raise IngressRefused(f"the grant chain is not trusted ({type(exc).__name__})") from exc
@@ -244,14 +272,35 @@ def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str
 # ---------------------------------------------------------------------------
 
 
+CONTEXT_MEMORY = 30 * 86400  # how long a used context stays owned by its peer
+
+
 @dataclass
 class GrantRegistry:
     """Grants by (peer, context). A context belongs to the first peer that used it, and holds one
-    delegated task: a later task opens a new context, so a turn's grant never changes under it."""
+    delegated task: a later task opens a new context, so a turn's grant never changes under it.
+    With ``path`` set, context ownership survives a restart (grants do not: an in-flight task then
+    runs no tools)."""
 
+    path: Optional[Any] = None
     _grants: Dict[Tuple[str, str], VerifiedGrant] = field(default_factory=dict)
     _owners: Dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self) -> None:
+        self._file = _JsonState(self.path)
+        self._used: Dict[str, float] = {}
+        now = time.time()
+        for key, used in self._file.load().items():
+            peer, _, context_id = key.partition("\x00")
+            if used + CONTEXT_MEMORY > now:
+                self._owners[context_id] = peer
+                self._used[context_id] = used
+
+    def _save(self) -> None:
+        now = time.time()
+        rows = {f"{peer}\x00{ctx}": self._used.get(ctx, now) for ctx, peer in self._owners.items()}
+        self._file.save(rows)
 
     def check_context(self, peer: str, context_id: str) -> None:
         with self._lock:
@@ -267,7 +316,9 @@ class GrantRegistry:
             if owner is not None:
                 raise IngressRefused("this A2A context already carried a delegated task; open a new context")
             self._owners[grant.context_id] = grant.peer
+            self._used[grant.context_id] = time.time()
             self._grants[(grant.peer, grant.context_id)] = grant
+            self._save()
 
     def get(self, peer: str, context_id: str) -> Optional[VerifiedGrant]:
         with self._lock:
@@ -297,13 +348,62 @@ class A2AIngress:
     """Receiver-side protected ingress: the dispatch hook, and the grant lookup for tool calls."""
 
     def __init__(self, *, own_key: Any, peers: Dict[str, str], trusted_roots: List[Any],
-                 audit: Optional[Any] = None) -> None:
+                 audit: Optional[Any] = None, state_dir: Optional[Any] = None,
+                 revocation_list: Optional[Any] = None) -> None:
         self.own_key = own_key
         self.peers = dict(peers)
         self.trusted_roots = list(trusted_roots)
-        self.registry = GrantRegistry()
-        self.nonces = NonceStore()
+        self.registry = GrantRegistry(path=state_dir / "a2a_contexts.json" if state_dir else None)
+        self.nonces = NonceStore(path=state_dir / "a2a_nonces.json" if state_dir else None)
         self._audit = audit
+        self._srl_path = revocation_list
+        self._srl_stamp: Optional[Tuple[float, int]] = None
+        self._srl: Optional[Any] = None
+        self._srl_error: Optional[str] = None
+        self._srl_lock = threading.Lock()
+
+    # -- revocation -----------------------------------------------------------
+
+    def revocations(self) -> Optional[Any]:
+        """The current signed revocation list, re-read when its file changes. Raises
+        IngressRefused when a configured list is missing or not signed by a trusted root."""
+        if self._srl_path is None:
+            return None
+        from tenuo import Authorizer, SignedRevocationList
+
+        with self._srl_lock:
+            try:
+                stat = self._srl_path.stat()
+                stamp = (stat.st_mtime, stat.st_size)
+                if stamp != self._srl_stamp:
+                    raw = self._srl_path.read_bytes().strip()
+                    try:
+                        raw = base64.b64decode(raw, validate=True)
+                    except Exception:
+                        pass
+                    srl = SignedRevocationList.from_bytes(raw)
+                    Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
+                    if self._srl is not None and srl.version < self._srl.version:
+                        raise ValueError("an older revocation list cannot replace a newer one")
+                    self._srl, self._srl_stamp, self._srl_error = srl, stamp, None
+            except Exception as exc:
+                self._srl_error = f"the revocation list cannot be used ({exc})"
+            if self._srl_error:
+                raise IngressRefused(self._srl_error)
+            return self._srl
+
+    def is_revoked(self, grant: VerifiedGrant) -> Optional[str]:
+        """Why the grant may no longer be used, or None. Checked at every tool call."""
+        try:
+            srl = self.revocations()
+        except IngressRefused as refused:
+            return str(refused)
+        if srl is None:
+            return None
+        for warrant in [*grant.chain, grant.warrant]:
+            if srl.is_revoked(str(warrant.id)):
+                return "this delegation was revoked"
+        return None
 
     # -- ingress ------------------------------------------------------------
 
@@ -329,7 +429,8 @@ class A2AIngress:
         self.registry.check_context(peer, context_id)
         grant = verify_envelope(envelope, peer=peer, task_text=task, context_id=context_id,
                                 peers=self.peers, own_key=self.own_key,
-                                trusted_roots=self.trusted_roots, nonces=self.nonces, now=now)
+                                trusted_roots=self.trusted_roots, nonces=self.nonces, now=now,
+                                revocations=self.revocations())
         self.registry.bind(grant)
         return grant, task
 
@@ -435,7 +536,12 @@ def load_ingress(ctx: Any) -> Optional[A2AIngress]:
         PublicKey.from_bytes(base64.b64decode(str(key)))  # raises on a bad key
     trusted = [PublicKey.from_bytes(base64.b64decode(str(r))) for r in roots]
     own_key = load_or_create_a2a_key()
-    return A2AIngress(own_key=own_key, peers={str(k): str(v) for k, v in peers.items()}, trusted_roots=trusted)
+    from pathlib import Path
+
+    srl = block.get("revocation_list")
+    return A2AIngress(own_key=own_key, peers={str(k): str(v) for k, v in peers.items()},
+                      trusted_roots=trusted, state_dir=a2a_key_path().parent,
+                      revocation_list=Path(str(srl)).expanduser() if srl else None)
 
 
 __all__ = [
