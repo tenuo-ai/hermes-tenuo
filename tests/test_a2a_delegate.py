@@ -267,3 +267,31 @@ def test_the_tool_is_offered_when_peers_and_enforcement_are_configured(monkeypat
     monkeypatch.setenv("TENUO_TRUSTED_ROOT", public_key_b64(k.root))
     ctx = _register(monkeypatch, entry)
     assert ctx.tools["tenuo_delegate"].check() is True
+
+
+# --- meeting the MCP track: a delegated turn proves its grant to a Tenuo MCP verifier ---
+
+
+def test_a_delegated_turn_presents_its_grant_to_an_mcp_verifier(k, w_a, home):
+    """operator → A → B, then B calls a wrapped MCP tool: the verifier the MCP wrapper uses checks
+    the whole chain and B's proof, and refuses anything outside the grant."""
+    from tenuo import Authorizer
+    from tenuo.mcp import MCPVerifier
+
+    delegate(config=_config(k), chain=[w_a], key=k.a, peer="home", task="Porch light on.",
+             tools=LIGHT, post=home.post)
+    home.ingress.current_turn = lambda: home.turn
+    verifier = MCPVerifier(authorizer=Authorizer(trusted_roots=[k.root.public_key]))
+    ok = {"domain": "light", "service": "turn_on", "entity_id": "light.porch"}
+    meta = home.guard.call_meta("sess-b", "ha_call_service", ok)
+    allowed = verifier.verify("ha_call_service", ok, meta=meta)
+    assert allowed.allowed, allowed
+    assert [w.id for w in allowed.presented_chain][:1] == [w_a.id]
+    office = {**ok, "entity_id": "light.office"}
+    assert not verifier.verify("ha_call_service", office, meta=home.guard.call_meta("sess-b", "ha_call_service", office)).allowed
+    assert not verifier.verify("ha_call_service", office, meta=meta).allowed  # a proof is bound to its arguments
+    # A's own session presents A's warrant, not B's grant.
+    a_guard = HermesGuard(warrant=w_a, signing_key=k.a, trusted_roots=[k.root.public_key])
+    a_meta = a_guard.call_meta("s-a", "ha_get_state", {"entity_id": "light.porch"})
+    assert verifier.verify("ha_get_state", {"entity_id": "light.porch"}, meta=a_meta).allowed
+    assert HermesGuard().call_meta("s", "x", {}) is None

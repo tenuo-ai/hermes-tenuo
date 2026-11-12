@@ -200,6 +200,10 @@ class PluginGuard:
         """This session's chain and key for ``tenuo_delegate`` (hermes_tenuo.a2a_delegate)."""
         return self._guard.delegation_authority(session_id)
 
+    def call_meta(self, session_id: str, tool_name: str, args: dict):
+        """MCP ``_meta`` with this session's proof for one call (see HermesGuard.call_meta)."""
+        return self._guard.call_meta(session_id, tool_name, args)
+
     def attach_ingress(self, ingress: Any) -> None:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress

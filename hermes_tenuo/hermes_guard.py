@@ -1182,6 +1182,21 @@ class HermesGuard:
             return [], None
         return self._chain_for(session_id) + [warrant], key
 
+    def call_meta(self, session_id: str, tool_name: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """MCP ``_meta`` carrying this session's proof for one call: its warrant chain, signed with its
+        own key over the tool and arguments (``tenuo.mcp`` format, as ``MCPVerifier`` checks it). On a
+        delegated A2A turn that is the chain ending in the grant this agent holds, so a Tenuo-verifying
+        MCP server checks the delegated authority itself. None when the session holds no warrant."""
+        chain, key = self.delegation_authority(session_id)
+        if not chain or key is None:
+            return None
+        import time as _time
+
+        from tenuo.mcp.client import argument_json
+        from tenuo_core import sign_meta
+
+        return {"tenuo": sign_meta(chain, key, tool_name, argument_json(args), int(_time.time()))}
+
     def _denial_before_enforcement(self, warrant: Any, signing_key: Optional[Any]) -> Optional[str]:
         """Why a call is blocked before the warrant is checked, or None if it is not.
 
