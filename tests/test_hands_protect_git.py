@@ -494,3 +494,29 @@ def test_included_settings_do_not_get_the_shared_object_exemption(folder):
     os.link(config, folder / "alias")
     problems, _ = gitwatch.loose(str(folder), paths=(str(config),))
     assert any("has a second name" in p for p in problems)
+
+
+
+def test_external_included_settings_hard_link_is_rejected(folder, tmp_path):
+    outside = tmp_path / "external.cfg"
+    outside.write_text("[user]\nname = t\n")
+    os.link(outside, folder / "alias")
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[include]\npath = {outside}\n")
+    assert any("cannot be checked" in p for p in _sources(folder, tmp_path)[1])
+
+
+@pytest.mark.parametrize("layout", ["directory-link", "hook-hard-link"])
+def test_shared_worktree_external_default_hooks_are_checked(folder, tmp_path, layout):
+    import shutil
+    worktree = tmp_path / "worktree"
+    git(folder, "worktree", "add", "-q", str(worktree), "-b", "worktree")
+    hooks = folder / ".git" / "hooks"
+    if layout == "directory-link":
+        shutil.rmtree(hooks)
+        (worktree / "local-hooks").mkdir()
+        hooks.symlink_to(worktree / "local-hooks", target_is_directory=True)
+    else:
+        (hooks / "pre-commit").write_text("#!/bin/sh\n")
+        os.link(hooks / "pre-commit", worktree / "alias")
+    assert any("hook" in p for p in _sources(worktree, tmp_path)[1])

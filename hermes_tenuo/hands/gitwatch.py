@@ -167,8 +167,11 @@ def _read_outside(path: str) -> Optional[str]:
     except (FileNotFoundError, NotADirectoryError):
         return None
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             raise OSError("not a regular file")
+        if info.st_nlink > 1:
+            raise OSError("outside settings may have a writable hard-link alias")
         return _text(fd)
     finally:
         os.close(fd)
@@ -224,6 +227,22 @@ def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str
     if not shared or _locate(roots, shared, 0, "") is not None:
         problems.append(".git leads to settings in a folder that cannot be locked")
         return []
+    hooks = os.path.join(shared, "hooks")
+    try:
+        if _through_a_root(roots, hooks):
+            problems.append("the external repository's default hooks traverse a writable folder")
+        else:
+            # Individual hook symlinks may reference project scripts (documented),
+            # but a regular hook must not have an unprotected writable hard-link alias.
+            for hook in _HOOK_NAMES:
+                try:
+                    info = os.lstat(os.path.join(hooks, hook))
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    problems.append(f"external hook {hook} has a second name (a hard link)")
+    except OSError:
+        problems.append("the external repository's default hooks cannot be inspected")
     return [os.path.join(shared, "config"), os.path.join(gitdir, "config.worktree")]
 
 
