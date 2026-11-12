@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Hands
+
+- `hands up --protect-git`: the look through the folder before locking also covers a
+  settings file or hooks folder whose path passes through a link inside the shared folder.
+
 ## 0.4.0 - 2026-11-12
 
 ### Upgrading from 0.3
