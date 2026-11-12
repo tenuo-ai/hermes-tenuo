@@ -23,6 +23,7 @@ provides_hooks:
   - on_session_end
   - subagent_start
   - pre_llm_call
+  - pre_gateway_dispatch
 requires_env:
   - name: TENUO_WARRANT
     description: "Base64-encoded warrant or path to a .warrant file. Required to activate enforcement (or set plugins.entries.hermes-tenuo.warrant)."

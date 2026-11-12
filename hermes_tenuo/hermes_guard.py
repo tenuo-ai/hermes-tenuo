@@ -313,12 +313,19 @@ class HermesGuard:
         require_session_warrant: Optional[bool] = None,
         delegation_plan: Optional[Any] = None,
         access_policy: Optional[Any] = None,
+        ingress: Optional[Any] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
         # Role-based access (hermes_tenuo.access): a gateway turn resolves to its
         # sender's role warrant per call. None means single-warrant mode.
         self._access_policy = access_policy
+        # Protected A2A ingress (hermes_tenuo.a2a_ingress): an inbound A2A turn runs only on the
+        # grant its sender delegated to this agent, verified at ingress. None: A2A turns are not
+        # treated specially.
+        self._ingress = ingress
+        # session id → trusted roots of the A2A grant bound to it
+        self._ingress_roots: Dict[str, List[Any]] = {}
         self._child_warrant = child_warrant
         self._trusted_roots = trusted_roots
         self._trusted_roots_lock = threading.Lock()
@@ -1080,6 +1087,9 @@ class HermesGuard:
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
+        refusal = self._bind_ingress_grant(session_id)
+        if refusal is not None:
+            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
         if self._access_policy is not None:
             from hermes_tenuo.access import current_sender, subagent_attribution_lookup
@@ -1131,6 +1141,32 @@ class HermesGuard:
 
         result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
+
+    def _bind_ingress_grant(self, session_id: str) -> Optional[str]:
+        """For an inbound A2A turn, bind its verified grant to the session; a refusal reason when
+        it has none. Other turns are untouched (None).
+
+        The grant is W_B, held by this agent: enforcement signs proof of possession with this
+        agent's own A2A key and verifies the full chain from the grant's trusted roots. No
+        static, role or child warrant can stand in for a missing grant."""
+        ingress = self._ingress
+        if ingress is None:
+            return None
+        turn = ingress.current_turn()
+        if turn is None:
+            return None
+        grant = ingress.grant_for(*turn)
+        if grant is None:
+            return "tenuo: this A2A task carries no verified grant; tool call blocked"
+        if not session_id:
+            return "tenuo: an A2A tool call without a session cannot be matched to its grant"
+        with self._session_lock:
+            entry = self._session_warrants.get(session_id)
+            bound = entry is not None and entry[0] is grant.warrant
+            if not bound:
+                self._bind_session(session_id, grant.warrant, ingress.own_key, list(grant.chain))
+            self._ingress_roots[session_id] = list(ingress.trusted_roots)
+        return None
 
     def _denial_before_enforcement(self, warrant: Any, signing_key: Optional[Any]) -> Optional[str]:
         """Why a call is blocked before the warrant is checked, or None if it is not.
@@ -1194,8 +1230,14 @@ class HermesGuard:
             # For chain verification: use configured trusted_roots.
             # If not configured, extract the root from the parent warrant's issuer.
             chain = self._chain_for(session_id)
-            with self._trusted_roots_lock:
-                trusted = resolve_trusted_roots(self._trusted_roots)
+            with self._session_lock:
+                ingress_roots = self._ingress_roots.get(session_id)
+            if ingress_roots is not None:
+                # An A2A grant is trusted only through the roots configured for A2A ingress.
+                trusted = list(ingress_roots)
+            else:
+                with self._trusted_roots_lock:
+                    trusted = resolve_trusted_roots(self._trusted_roots)
             # No fallback anchor: not the signing key, and not the issuer of a
             # warrant in the chain being verified. Deriving trust from the
             # credential under test accepts any chain an attacker signs. Without
@@ -1260,7 +1302,11 @@ class HermesGuard:
             # Hermes may fire post_tool_call even for a blocked call (0.21+ does),
             # so the post record must carry this decision, not "post-dispatch".
             self._remember_decision(tool_call_id, False, reason, (tool_name, args, session_id, task_id))
-            if self._on_denial == "log" and not grant_rejected and not _is_delegation_spawn(tool_name, args):
+            with self._session_lock:
+                delegated_in = session_id in self._ingress_roots
+            # A delegated A2A grant is always enforced: log-only mode never lets it through.
+            if (self._on_denial == "log" and not grant_rejected and not delegated_in
+                    and not _is_delegation_spawn(tool_name, args)):
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 return None, False
             return {"action": "block", "message": reason}, False
