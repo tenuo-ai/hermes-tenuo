@@ -113,7 +113,7 @@ class TestDirectoryRoute:
     def test_configured_enforces(self, tmp_path):
         r = _run("directory", True, tmp_path)
         assert r["plugin"] and r["plugin"]["source"] == "user" and r["plugin"]["error"] is None, r["plugin"]
-        assert r["plugin"]["hooks"] == 6 and r["skill"]
+        assert r["plugin"]["hooks"] == 7 and r["skill"]
         assert r["hands_skill"] and "Hands is off" in r["hands_setup"]
         assert r["deny"] and r["deny"][0]["action"] == "block"
         assert r["allow"] == []
@@ -122,7 +122,7 @@ class TestDirectoryRoute:
 
     def test_unconfigured_is_a_loud_noop(self, tmp_path):
         r = _run("directory", False, tmp_path)
-        assert r["plugin"]["hooks"] == 6 and r["plugin"]["error"] is None
+        assert r["plugin"]["hooks"] == 7 and r["plugin"]["error"] is None
         assert r["deny"] == [] and r["allow"] == []
         assert "general tool-call authorization is off" in r["stderr"]
 
@@ -132,7 +132,7 @@ class TestEntrypointRoute:
     def test_configured_enforces(self, tmp_path):
         r = _run("entrypoint", True, tmp_path)
         assert r["plugin"] and r["plugin"]["source"] == "entrypoint" and r["plugin"]["error"] is None, r["plugin"]
-        assert r["plugin"]["hooks"] == 6 and r["skill"]
+        assert r["plugin"]["hooks"] == 7 and r["skill"]
         assert r["hands_skill"] and "Hands is off" in r["hands_setup"]
         assert r["deny"] and r["deny"][0]["action"] == "block"
         assert r["allow"] == []
@@ -140,5 +140,5 @@ class TestEntrypointRoute:
 
     def test_unconfigured_is_a_loud_noop(self, tmp_path):
         r = _run("entrypoint", False, tmp_path)
-        assert r["plugin"]["hooks"] == 6 and r["deny"] == [] and r["allow"] == []
+        assert r["plugin"]["hooks"] == 7 and r["deny"] == [] and r["allow"] == []
         assert "general tool-call authorization is off" in r["stderr"]
