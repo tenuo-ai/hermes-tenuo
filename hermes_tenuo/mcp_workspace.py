@@ -94,6 +94,20 @@ def _fingerprint(spec):
     return hashlib.sha256(json.dumps(spec, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def _resolved_server(spec, cwd):
+    """Resolve once before pinning or connecting; keep expanded secrets out of workspace files."""
+    resolved = dict(spec)
+    if "command" in spec:
+        resolved["command"] = os.path.expanduser(_expand(spec["command"]))
+        resolved["args"] = [_expand(arg) for arg in spec.get("args", [])]
+        resolved["env"] = {key: _expand(value) for key, value in spec.get("env", {}).items()}
+        resolved["cwd"] = str(Path(cwd) / os.path.expanduser(_expand(spec.get("cwd", ""))))
+    else:
+        resolved["url"] = _expand(spec["url"])
+        resolved["headers"] = {key: _expand(value) for key, value in spec.get("headers", {}).items()}
+    return resolved
+
+
 def _encode_key(key):
     return base64.b64encode(key).decode()
 
@@ -113,6 +127,8 @@ def create_workspace(source: Path, destination: Path, names: list[str], trust_ro
     if set(names) - servers.keys():
         raise ValueError(f"Unknown server(s): {', '.join(sorted(set(names) - servers.keys()))}")
     selected = {name: _fingerprint(_validate_server(name, servers[name])) for name in names}
+    cwd = str(Path.cwd())
+    resolved = {name: _fingerprint(_resolved_server(servers[name], cwd)) for name in names}
     if trust_root:
         from hermes_tenuo.issuance import read_public_key
 
@@ -127,7 +143,7 @@ def create_workspace(source: Path, destination: Path, names: list[str], trust_ro
             write_private_file(destination / "issuer.key", _encode_key(issuer.secret_key_bytes()))
         write_private_file(destination / "trusted-root.pub", _encode_key(public_key.to_bytes()))
         write_private_file(destination / "workspace.json", json.dumps({
-            "source": str(source), "servers": selected, "cwd": str(Path.cwd()),
+            "source": str(source), "servers": selected, "cwd": cwd, "resolved_servers": resolved,
         }, indent=2))
     except BaseException:
         for name in ("issuer.key", "trusted-root.pub", "workspace.json"):
@@ -145,9 +161,9 @@ def load_servers(workspace: Path):
     for name, fingerprint in config["servers"].items():
         if name not in servers or _fingerprint(servers[name]) != fingerprint:
             raise ValueError(f"Server {name!r} changed in the source config. Wrap it into a new workspace.")
-        spec = dict(_validate_server(name, servers[name]))
-        if "command" in spec:
-            spec["cwd"] = str(Path(config["cwd"]) / os.path.expanduser(_expand(spec.get("cwd", ""))))
+        spec = _resolved_server(_validate_server(name, servers[name]), config["cwd"])
+        if _fingerprint(spec) != config.get("resolved_servers", {}).get(name):
+            raise ValueError(f"Resolved settings for {name!r} changed or were not pinned. Wrap it into a new workspace.")
         selected[name] = spec
     return selected
 
@@ -189,22 +205,22 @@ async def _connect_upstream(spec):
     timeouts = {"timeout": spec.get("timeout", 60), "connect_timeout": spec.get("connect_timeout", 60)}
     if "command" in spec:
         params = StdioServerParameters(
-            command=os.path.expanduser(_expand(spec["command"])),
-            args=[_expand(arg) for arg in spec.get("args", [])],
-            env={name: _expand(value) for name, value in spec.get("env", {}).items()},
+            command=spec["command"],
+            args=spec["args"],
+            env=spec["env"],
             cwd=spec["cwd"],
         )
         async with connect(stdio_client(params), **timeouts) as session:
             yield session
     else:
-        url = _expand(spec["url"])
+        url = spec["url"]
         parsed = urlsplit(url)
         if parsed.username or parsed.password or not (
             parsed.scheme == "https" and parsed.hostname
             or parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         ):
             raise ValueError("MCP URLs require HTTPS or loopback HTTP, with credentials in headers")
-        headers = {name: _expand(value) for name, value in spec.get("headers", {}).items()}
+        headers = spec["headers"]
         http_timeout = httpx2.Timeout(timeouts["timeout"], connect=timeouts["connect_timeout"])
         async with httpx2.AsyncClient(headers=headers, timeout=http_timeout) as client:
             async with connect(streamable_http_client(url, http_client=client), **timeouts) as session:

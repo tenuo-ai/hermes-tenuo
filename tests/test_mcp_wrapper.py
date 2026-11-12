@@ -182,5 +182,36 @@ mcp_servers:
         load_servers(workspace)
 
 
+@pytest.mark.parametrize("spec, variable", [
+    ({"url": "${MCP_URL}"}, "MCP_URL"),
+    ({"command": "${MCP_COMMAND}"}, "MCP_COMMAND"),
+    ({"command": "echo", "args": ["${MCP_ARGS}"]}, "MCP_ARGS"),
+    ({"command": "echo", "cwd": "${MCP_CWD}"}, "MCP_CWD"),
+    ({"command": "echo", "env": {"TARGET": "${MCP_TARGET}"}}, "MCP_TARGET"),
+    ({"url": "https://example.com/mcp", "headers": {"Authorization": "${MCP_TOKEN}"}}, "MCP_TOKEN"),
+])
+def test_expanded_connection_settings_are_pinned_without_copying_secrets(tmp_path, monkeypatch, spec, variable):
+    monkeypatch.setenv(variable, "original-sensitive-value")
+    source, workspace = tmp_path / "servers.json", tmp_path / "workspace"
+    source.write_text(json.dumps({"mcpServers": {"service": spec}}))
+    create_workspace(source, workspace, [], None)
+    assert load_servers(workspace)
+    assert "original-sensitive-value" not in (workspace / "workspace.json").read_text()
+    monkeypatch.setenv(variable, "different-sensitive-value")
+    with pytest.raises(ValueError, match="Resolved settings"):
+        load_servers(workspace)
+
+
+def test_existing_unpinned_workspace_is_rejected(tmp_path):
+    source, workspace = tmp_path / "servers.json", tmp_path / "workspace"
+    source.write_text(json.dumps({"mcpServers": {"service": {"command": "echo"}}}))
+    create_workspace(source, workspace, [], None)
+    config = json.loads((workspace / "workspace.json").read_text())
+    del config["resolved_servers"]
+    (workspace / "workspace.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="not pinned"):
+        load_servers(workspace)
+
+
 if __name__ == "__main__":
     asyncio.run(_stdio_backend(Path(sys.argv[1])))

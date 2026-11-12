@@ -25,7 +25,10 @@ the form `server__tool`, so two servers can both expose a tool called `search`.
 
 The wrapper accepts stdio `command`, `args`, `cwd`, and `env`, or
 Streamable HTTP `url` and optional `headers`. It resolves `${VAR}` references
-from the wrapper's launch environment. Run `wrap` from the directory your
+from the environment at `wrap` time and verifies the resolved settings at launch.
+Set those variables before running `wrap`. Only fingerprints are saved, not their
+expanded values. Changes to referenced variables, including credential rotation,
+require a new workspace. Run `wrap` from the directory your
 original stdio commands expect. Hermes `tools.include` and `tools.exclude`
 lists and `connect_timeout` and `timeout` settings are preserved. If a selected
 connection setting changes, create a new workspace so existing warrants
