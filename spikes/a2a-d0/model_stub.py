@@ -1,4 +1,4 @@
-"""OpenAI-compatible scripted model for the D0 spike. A task line "CALL <tool> <json>" becomes that
+"""OpenAI-compatible scripted model for the A2A delegation lab. A task line "CALL <tool> <json>" becomes that
 tool call, in order; then it answers with the tool results. Every request is logged."""
 
 import json

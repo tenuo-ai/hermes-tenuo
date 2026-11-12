@@ -1,4 +1,4 @@
-"""Protected A2A ingress (D0): A delegates a bounded grant that B holds and enforces itself."""
+"""Protected A2A ingress: A delegates a bounded grant that B holds and enforces itself."""
 
 from __future__ import annotations
 

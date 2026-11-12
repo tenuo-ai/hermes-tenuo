@@ -1,4 +1,4 @@
-"""Synthetic devices for the D0 spike. Each call that runs appends one line to d0_effects.jsonl."""
+"""Synthetic devices for the A2A delegation lab. Each call that runs appends one line to d0_effects.jsonl."""
 
 import json
 import os

@@ -100,7 +100,7 @@ path =…, reset=true  — Tool 'execute_code' is not authorized
 2026-09-12 20:28:28  ALLOW  read_file  path=/tmp/hermes-tenuo-walkthrough/data/notes.md
 2026-09-12 20:28:32  DENY   terminal  command=date >> /tmp/hermes-tenuo-walkthrough/log.txt && tail -n 5 …, timeout=120  — Tool 'terminal' is not authorized
 
-3 calls, 2 denied  (/Users/aimable/.hermes/profiles/tenuo-walkthrough/tenuo/audit.jsonl)
+3 calls, 2 denied  (~/.hermes/profiles/tenuo-walkthrough/tenuo/audit.jsonl)
 ```
 
 `audit --denied` lists only the two denials. Reusing the profile appends

@@ -1,4 +1,4 @@
-"""Live D0 matrix against Hermes B. Each scenario uses a fresh A2A context."""
+"""Live matrix against Hermes B. Each scenario uses a fresh A2A context."""
 import json
 import subprocess
 import threading
