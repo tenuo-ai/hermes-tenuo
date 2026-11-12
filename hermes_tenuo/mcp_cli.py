@@ -209,7 +209,8 @@ def run(args):
             return 0
         if args.mcp_command == "config":
             load_servers(workspace)
-            print(json.dumps({"mcpServers": {"tenuo": {"command": sys.executable, "args": launch_args(workspace)}}},
+            # Not "tenuo": in Hermes that name is hermes-tenuo's own toolset, which would hide these tools.
+            print(json.dumps({"mcpServers": {"tenuo_mcp": {"command": sys.executable, "args": launch_args(workspace)}}},
                              indent=2))
             return 0
         if args.mcp_command == "serve":

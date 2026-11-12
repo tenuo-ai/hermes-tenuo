@@ -487,3 +487,14 @@ def test_ingress_decisions_go_to_the_shared_audit_log(monkeypatch, keys, w_a, tm
     dispatch(_event("no delegation here"))
     row = json.loads(log.read_text().splitlines()[-1])
     assert row["tool"] == "a2a_ingress" and row["decision"] == "DENY" and row["peer"] == "agent-a"
+
+
+def test_a_restarted_receiver_still_refuses_an_older_revocation_list(keys, w_a, tmp_path):
+    path = tmp_path / "srl.b64"
+    _write_srl(path, _srl(keys, [w_a.id], version=4))
+    first = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    assert first.revocations().version == 4
+    _write_srl(path, _srl(keys, [], version=2))  # rolled back while the receiver was down
+    restarted = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    result = restarted.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "older than version 4" in result["reason"]

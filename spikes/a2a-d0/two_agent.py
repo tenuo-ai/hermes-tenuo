@@ -36,6 +36,7 @@ w = (Warrant.mint_builder().holder(a.public_key)
      .capability('light_get', {'entity_id': Wildcard()})
      .capability('light_set', {'entity_id': Wildcard(), 'state': Wildcard()})
      .capability('tenuo_delegate', {'peer': Wildcard(), 'task': Wildcard(), 'tools': Wildcard(), 'ttl_seconds': Wildcard()})
+     .capability('first__write', {'value': Wildcard()})
      .ttl(86400).mint(root))
 s = lambda k: base64.b64encode(k.secret_key_bytes()).decode()
 print(json.dumps({'root': public_key_b64(root), 'a_pub': public_key_b64(a), 'a_key': s(a),
@@ -61,6 +62,21 @@ print(json.dumps({'root': public_key_b64(root), 'a_pub': public_key_b64(a), 'a_k
     ingress["trusted_roots"] = [d["root"]]
     (B_HOME / "config.yaml").write_text(yaml.safe_dump(b_cfg, sort_keys=False))
     (LAB / "peer_tokens").write_text(f"agent-a:{token}")
+    # B reaches a test MCP server through the Tenuo wrapper, which trusts the same operator root.
+    (LAB / "root.pub").write_text(d["root"])
+    (LAB / "mcp.json").write_text(json.dumps({"mcpServers": {"first": {
+        "command": PY, "args": ["/lab/mcp_backend.py", "/lab/mcp_effects.txt"]}}}))
+    subprocess.run(["rm", "-rf", str(B_HOME / "wrapped")], check=True)
+    subprocess.run(["docker", "run", "--rm", "--init", "--user", "1000:1000", "-v", f"{LAB}:/lab", "-v", f"{LAB}/src:/d0src:ro",
+                    "-v", f"{B_HOME}:/home/hermes/.hermes", "-w", "/lab", "-e", "PYTHONPATH=/d0src", "--entrypoint", PY, IMG,
+                    "-m", "hermes_tenuo.cli", "mcp", "wrap", "/lab/mcp.json", "/home/hermes/.hermes/wrapped",
+                    "--trust-root", "/lab/root.pub"], check=True)
+    b_cfg["mcp_servers"] = {"wrapped": {"command": PY, "args": ["-m", "hermes_tenuo.cli", "mcp", "serve",
+                                                              "/home/hermes/.hermes/wrapped"],
+                                      "env": {"PYTHONPATH": "/d0src"}}}
+    b_cfg["plugins"]["entries"]["hermes-tenuo"]["mcp_proofs"] = {"servers": ["wrapped"]}
+    b_cfg.setdefault("platform_toolsets", {}).setdefault("a2a", []).append("wrapped")
+    (B_HOME / "config.yaml").write_text(yaml.safe_dump(b_cfg, sort_keys=False))
     print("A key", d["a_pub"][:12], "B key", d["b_pub"][:12], "root", d["root"][:12])
 
 
@@ -105,12 +121,22 @@ def run():
          delegate(b_call("light_get", {"entity_id": "light.guest_room"}),
                   {"light_get": {"entity_id": {"equals": "light.guest_room"}}}, peer="office"), [], "no paired peer"),
     ]
+    wrapped = {"first__write": {"value": {"equals": "verified"}}}
+    cases += [
+        ("A delegates 'write verified'; B writes it through the Tenuo-wrapped MCP server",
+         delegate(b_call("mcp__wrapped__first__write", {"value": "verified"}), wrapped), ["mcp:verified"],
+         "TASK_STATE_COMPLETED"),
+        ("Same grant; B's task tries to write another value",
+         delegate(b_call("mcp__wrapped__first__write", {"value": "changed"}), wrapped), [], "TASK_STATE_COMPLETED"),
+    ]
+    mcp_effects = LAB / "mcp_effects.txt"
     passed = 0
     for name, prompt, expected, marker in cases:
+        m0 = len(lines(mcp_effects))
         e0, a0 = len(lines(effects)), len(lines(a_audit))
         out = ask_a(prompt)
         did = [f"{json.loads(r)['tool']}:{json.loads(r)['args'].get('entity_id') or json.loads(r)['args'].get('door')}"
-               for r in lines(effects)[e0:]]
+               for r in lines(effects)[e0:]] + [f"mcp:{v}" for v in lines(mcp_effects)[m0:]]
         a_dec = [f"{json.loads(r)['tool']}:{json.loads(r)['decision']}" for r in lines(a_audit)[a0:]]
         ok = sorted(did) == sorted(expected) and marker in out
         passed += ok

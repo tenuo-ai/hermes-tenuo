@@ -97,6 +97,13 @@ Every argument a rule names must be present on each call; list optional argument
 to limit them, and use `"*"` to let the peer pass the rest. The result says what the peer replied and
 the grant it used. A failed send is not retried, because the task may have run.
 
+## Delegated tasks that use MCP servers
+
+When the receiving agent reaches a service through a Tenuo-wrapped MCP server
+([MCP wrapper](mcp-wrapper.md)), its calls carry the delegated chain and the wrapper verifies it again,
+independently of the agent. Grant the wrapper's tool names (`files__write_file`) in `tenuo_delegate`
+and set `mcp_proofs.servers` on the receiving agent.
+
 ## Revoke
 
 Revoke a grant or a sender's whole warrant (everything delegated from it) with the operator root key:

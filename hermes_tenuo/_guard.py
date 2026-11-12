@@ -204,6 +204,10 @@ class PluginGuard:
         """MCP ``_meta`` with this session's proof for one call (see HermesGuard.call_meta)."""
         return self._guard.call_meta(session_id, tool_name, args)
 
+    def attach_mcp_prefixes(self, prefixes: list) -> None:
+        """Authorize wrapped MCP tools under the wrapper's names (hermes_tenuo.mcp_proofs)."""
+        self._guard._mcp_prefixes = list(prefixes)
+
     def attach_ingress(self, ingress: Any) -> None:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress

@@ -326,6 +326,9 @@ class HermesGuard:
         self._ingress = ingress
         # session id → trusted roots of the A2A grant bound to it
         self._ingress_roots: Dict[str, List[Any]] = {}
+        # Hermes tool-name prefixes of Tenuo-wrapped MCP servers (hermes_tenuo.mcp_proofs): their
+        # calls are authorized under the wrapper's tool name, the name grants and the wrapper use.
+        self._mcp_prefixes: List[str] = []
         self._child_warrant = child_warrant
         self._trusted_roots = trusted_roots
         self._trusted_roots_lock = threading.Lock()
@@ -1084,6 +1087,7 @@ class HermesGuard:
         Returns {"action": "block", "message": "..."} to block the call,
         or None to allow it.
         """
+        args = self._without_mcp_carrier(tool_name, args)
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
@@ -1185,6 +1189,18 @@ class HermesGuard:
                 self._bind_session(session_id, grant.warrant, ingress.own_key, list(grant.chain))
             self._ingress_roots[session_id] = list(ingress.trusted_roots)
         return None
+
+    def _without_mcp_carrier(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """For a call to a Tenuo-wrapped MCP server, the arguments without the proof carrier
+        (``_tenuo``) that hermes_tenuo.mcp_proofs adds after the hooks run: it is not a tool argument,
+        and the wrapper verifies it. Only that middleware writes it; a model's own value is dropped."""
+        if not self._mcp_prefixes or not isinstance(args, dict) or "_tenuo" not in args:
+            return args
+        from hermes_tenuo.mcp_proofs import CARRIER, wrapper_tool_name
+
+        if wrapper_tool_name(tool_name, self._mcp_prefixes) is None:
+            return args
+        return {k: v for k, v in args.items() if k != CARRIER}
 
     def delegation_authority(self, session_id: str) -> Tuple[List[Any], Optional[Any]]:
         """This session's own authority for delegating onward: (chain root-first ending with its
@@ -1289,12 +1305,15 @@ class HermesGuard:
             # Preserve exact matches across the entire chain. If an ancestor
             # had an exact capability that the leaf dropped, falling back to a
             # broader alias would bypass the ancestor's restriction.
-            authorization_tool = tool_name
-            alternate = tool_name.removeprefix("tool:") if tool_name.startswith("tool:") else f"tool:{tool_name}"
-            exact_ancestors = [item for item in chain if tool_name in (item.tools or [])]
-            if tool_name not in (warrant.tools or []) and alternate in (warrant.tools or []):
+            from hermes_tenuo.mcp_proofs import wrapper_tool_name
+
+            name = wrapper_tool_name(tool_name, self._mcp_prefixes) or tool_name
+            authorization_tool = name
+            alternate = name.removeprefix("tool:") if name.startswith("tool:") else f"tool:{name}"
+            exact_ancestors = [item for item in chain if name in (item.tools or [])]
+            if name not in (warrant.tools or []) and alternate in (warrant.tools or []):
                 if not exact_ancestors or all(
-                    _alias_is_no_broader(item, tool_name, alternate)
+                    _alias_is_no_broader(item, name, alternate)
                     for item in exact_ancestors
                 ):
                     authorization_tool = alternate
@@ -1460,6 +1479,7 @@ class HermesGuard:
         error_type: str = "",
     ) -> None:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
+        args = self._without_mcp_carrier(tool_name, args)
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
         session_id, unattributed = self._attribute_session(session_id, task_id)

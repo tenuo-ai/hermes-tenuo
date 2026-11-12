@@ -370,6 +370,9 @@ class A2AIngress:
         self._srl: Optional[Any] = None
         self._srl_error: Optional[str] = None
         self._srl_lock = threading.Lock()
+        # Highest revocation list version accepted, kept across restarts: a restarted receiver must
+        # not accept an older list that un-revokes grants.
+        self._srl_floor = _JsonState(state_dir / "a2a_revocation_version.json" if state_dir else None)
 
     # -- revocation -----------------------------------------------------------
 
@@ -387,8 +390,13 @@ class A2AIngress:
                 if stamp != self._srl_stamp:
                     srl = SignedRevocationList.from_bytes(srl_bytes(self._srl_path.read_bytes()))
                     Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
-                    if self._srl is not None and srl.version < self._srl.version:
-                        raise ValueError("an older revocation list cannot replace a newer one")
+                    floor = int(self._srl_floor.load().get("version", 0))
+                    if self._srl is not None:
+                        floor = max(floor, int(self._srl.version))
+                    if srl.version < floor:
+                        raise ValueError(f"version {srl.version} is older than version {floor} already accepted")
+                    if srl.version > floor:
+                        self._srl_floor.save({"version": float(srl.version)})
                     self._srl, self._srl_stamp, self._srl_error = srl, stamp, None
             except Exception as exc:
                 self._srl_error = f"the revocation list cannot be used ({exc})"

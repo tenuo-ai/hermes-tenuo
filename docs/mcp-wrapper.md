@@ -107,6 +107,27 @@ and proof-of-possession metadata with each call. Standard MCP discovery still
 works without authority. A regular MCP client without Tenuo metadata will be
 denied when it calls a tool.
 
+## Call wrapped tools from Hermes
+
+Add the wrapper to the agent's `mcp_servers` under the name `mcp config` prints (`tenuo_mcp`), and
+let `hermes-tenuo` sign those calls:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      mcp_proofs:
+        servers: [tenuo_mcp]
+```
+
+For each call to a wrapped tool, `hermes-tenuo` adds the session's warrant chain and a proof signed with
+its key, so the agent needs an enforcing warrant that names the wrapper's tools (`files__write_file`).
+The local guard authorizes the call under that same name. On a task delegated from another Hermes
+([A2A delegation](a2a-delegation.md)), the proof carries the delegated chain, and the wrapper verifies
+it to the operator root: create the workspace with `--trust-root` set to that root. Keep wrapped server
+and tool names to letters, digits and underscores; Hermes rewrites other characters in tool names, and
+a proof signed over a rewritten name is refused.
+
 The wrapper covers direct tool calls. Resources, prompts, interactive
 continuations, legacy SSE, and OAuth setup are outside this workflow. The
 enforcement boundary is the local wrapper. Keep the original MCP connection

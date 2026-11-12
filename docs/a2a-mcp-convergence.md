@@ -32,17 +32,33 @@ with `MCPVerifier`, the class the wrapper uses: the operator → A → B chain v
 grant, or a proof replayed with other arguments, is refused. The SDK's `_tenuo` argument carrier also
 verifies and is stripped from the forwarded arguments.
 
-## What is left, and who
+## Done in #82
 
-1. **Attach the proof to Hermes's MCP calls** (MCP track). Hermes's public `tool_execution` middleware
-   can pass modified arguments to `next_call`, so a middleware can add `_tenuo` from `call_meta` to
-   calls for wrapped MCP tools. Open question: the proof is signed over the tool name the wrapper sees,
-   but Hermes registers MCP tools under collision-resolved local names and keeps the mapping in private
-   modules. Either the wrapper accepts the Hermes-side name, or Hermes exposes "server and original
-   tool name for a registered MCP tool" publicly. Prefer the public API.
-2. **Rule vocabulary in the wrapper's preview** (MCP track): accept the same rule JSON as
-   `tenuo_delegate`, so one grant description works for both.
-3. **One revoke command** (either): `hermes-tenuo a2a revoke` writes the wrapper's format; fold it and
-   the wrapper's revocation into a single `hermes-tenuo revoke`.
-4. **End-to-end lab** (A2A track, after 1): A delegates to B; B's delegated task calls a wrapped
-   Filesystem MCP; the wrapper allows only the delegated path. Reuses `spikes/a2a-d0`.
+- **Proofs on Hermes's own MCP calls** (`hermes_tenuo/mcp_proofs.py`): a `tool_execution` middleware
+  adds the SDK's `_tenuo` carrier, signed with the session's own chain and key over the wrapper's tool
+  name, for servers listed in `mcp_proofs.servers`. Any `_tenuo` the model supplied is dropped first.
+  The local guard authorizes those calls under the wrapper's name and ignores the carrier (Hermes runs
+  registry enforcement after execution middleware). Hermes names the tools `mcp__<server>__<tool>`, so
+  the wrapper name is the remainder.
+- **Live, two Hermes gateways and the wrapper** (`spikes/a2a-d0/two_agent.py`, 6/6): A delegates
+  "write `verified`"; B's agent calls the wrapped tool; the wrapper process verifies operator → A → B and
+  forwards; its audit records A's warrant as the parent; the backend records `verified`. B's attempt to
+  write another value is refused by B's guard.
+- `mcp config` names the server `tenuo_mcp`: the name `tenuo` collides with hermes-tenuo's own toolset in
+  Hermes and hid the wrapped tools in testing.
+
+## Findings for the MCP track
+
+1. **Names Hermes rewrites.** Wrapper aliases may contain `-` or `.` (from server names), and Hermes
+   shortens tool names over 64 characters. A proof is then signed over a name the wrapper does not
+   expose, and the call is refused. Either restrict aliases to `[A-Za-z0-9_]` and warn on long names at
+   `wrap`, or expose the Hermes name too.
+2. **Revocation rollback across processes.** Tenuo's `Authorizer` refuses an older list within one
+   process, but a new `mcp serve` process (one per client connection) accepts any validly signed
+   `revocations.srl` on disk, including an older one that un-revokes grants. Persist the highest version
+   accepted in the workspace and refuse lower ones, as the A2A receiver now does. Requires write access
+   to the workspace, so this is integrity hardening, not a remote bypass.
+3. **Rule vocabulary.** `mcp check` builds `Exact`/`CEL` constraints from example arguments; accepting the
+   `tenuo_delegate` rule JSON would let one grant description serve both.
+4. **One revoke command.** Fold `hermes-tenuo a2a revoke` and the wrapper's revocation file into a
+   single `hermes-tenuo revoke`.
