@@ -11,6 +11,7 @@ laptop while its memory and skills stay on the server.
 |---|---|
 | Run a task with clear limits on tools, files and duration | [Try Tenuo warrants](#try-tenuo-warrants) |
 | Work in a local project from your existing remote chat | [Try Hands](#try-hands) |
+| Wrap MCP servers you already use and trace scoped calls | [Verify delegated MCP calls](docs/mcp-wrapper.md) |
 
 Use either feature on its own, or both together.
 
