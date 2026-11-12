@@ -66,3 +66,18 @@ def test_demo_main_prints_transcript(capsys):
     assert CRON_DENY_PASSWD in out
     assert CHILD_DENY_WRITE in out
     assert VIEWER_DENY_REPORTS in out
+
+
+def test_the_one_second_warrant_is_minted_early_in_a_second(monkeypatch):
+    """The transcript must not depend on when in a second the demo happens to start."""
+    import hermes_tenuo.demo as demo
+
+    slept = []
+    for now, waits in ((1000.05, False), (1000.30, False), (1000.31, True), (1000.97, True)):
+        slept.clear()
+        monkeypatch.setattr(demo.time, "time", lambda now=now: now)
+        monkeypatch.setattr(demo.time, "sleep", slept.append)
+        demo._start_of_a_second()
+        assert bool(slept) is waits, now
+        if waits:
+            assert 0 < slept[0] <= 0.72 and (now + slept[0]) % 1 < 0.05
