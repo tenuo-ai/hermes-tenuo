@@ -406,6 +406,58 @@ def test_execute_reports_what_the_device_answered_not_hermes_timeout(monkeypatch
     assert "Command timed out" not in result["output"] and "hermes_timed_out" not in result, result
 
 
+class _SlowToDeliver(str):
+    """An answer that is known at once but whose text takes a while to reach Hermes."""
+
+    def encode(self, *args, **kwargs):
+        import time
+        time.sleep(4)
+        return super().encode(*args, **kwargs)
+
+
+@pytest.mark.parametrize("text, code", [
+    ("done, with output\n", 0),
+    ("hands: no result came back: check before running it again\n", 125),
+])
+def test_an_answer_known_before_its_text_arrives_keeps_its_text(monkeypatch, tmp_path, text, code):
+    # Hermes's inner wait and its outer deadline both end before the text is delivered.
+    env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(text), code)))
+    result = env.execute("echo hi", timeout=1)
+    assert result["returncode"] == code and result["output"] == text, result
+    assert "hermes_timed_out" not in result and "Command timed out" not in result["output"]
+
+
+def test_partly_collected_output_is_replaced_by_the_whole_answer(monkeypatch):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    from tools.environments.base_output import _BoundedOutputCollector
+    whole = "line one\nline two\nline three\n"
+    collected = _BoundedOutputCollector(50_000)
+    collected.append("line one\n")                       # all Hermes had when its deadline passed
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": "line one\n\n[Command timed out after 3s]", "returncode": 124, "hermes_timed_out": True})
+    proc = SimpleNamespace(_hands_reply={"result": (whole, 0)})
+    env = object.__new__(HandsEnvironment)
+    result = env._wait_for_process(proc, timeout=3, output=collected, bounded_capture=False)
+    assert result == {"output": whole, "returncode": 0}
+    # Fully collected output is kept as Hermes captured it, with what it knows about it.
+    collected.append("line two\nline three\n")
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": whole + "\n[Command timed out after 3s]", "returncode": 124, "hermes_timed_out": True,
+        "full_output_path": "/tmp/retained-output"})
+    result = env._wait_for_process(proc, timeout=3, output=collected, bounded_capture=True)
+    assert result == {"output": whole, "returncode": 0, "full_output_path": "/tmp/retained-output"}
+
+
+def test_a_large_answer_rebuilt_after_the_deadline_is_capped_like_any_output(monkeypatch, tmp_path):
+    big = "x" * 400_000 + "\nEND\n"
+    env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(big), 0)))
+    result = env.execute("echo hi", timeout=1, bounded_capture=True)
+    assert result["returncode"] == 0 and result["output"].endswith("END\n"), result["output"][-80:]
+    assert len(result["output"]) < len(big) and result.get("output_total_chars") == len(big), {
+        k: v for k, v in result.items() if k != "output"}
+
+
 def test_a_timeout_the_device_confirms_stays_a_timeout(monkeypatch, tmp_path):
     env = _environment(monkeypatch, tmp_path, _after(1.2, ("hands: stopped after 1 seconds\n", 124)))
     result = env.execute("sleep 9", timeout=1)
