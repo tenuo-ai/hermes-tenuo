@@ -53,21 +53,47 @@ def folder(tmp_path, monkeypatch):
     return project
 
 
+_serving: list = []  # every device a test started, until end_devices() has ended it
+
+
 class Running:
     """A device serving in a background thread."""
 
-    def __init__(self, device: Device):
-        self.device, self.lines = device, []
+    def __init__(self, device: Device, hub: "Hub | None" = None):
+        self.device, self.lines, self.hub = device, [], hub
         device.say = self.lines.append
         self.thread = threading.Thread(target=device.serve, daemon=True)
         self.thread.start()
+        _serving.append(self)
 
     def stop(self):
         self.device.stop()
 
+    def release(self):
+        """Stop the device and answer the request it has open. A device waiting for a
+        command hears of a stop only when the server answers, up to a whole poll later."""
+        self.device.stop()
+        if self.hub is not None:
+            with self.hub._lock:
+                session = self.hub._sessions.pop(self.device.me, None)
+            if session is not None:
+                session.jobs.put(None)
+
+
+def end_devices(wait: float = 10.0) -> list:
+    """End every device the test left serving, and wait for their threads, so none makes
+    a request while a later test runs. Returns the ones still alive after *wait*."""
+    started, _serving[:] = list(_serving), []
+    for running in started:
+        running.release()
+    deadline = time.time() + wait
+    for running in started:
+        running.thread.join(max(0.0, deadline - time.time()))
+    return [running for running in started if running.thread.is_alive()]
+
 
 def up(hub: Hub, folder, ttl=600, name="laptop", invite=True, **kwargs) -> Running:
-    running = Running(Device(hub.invite() if invite else None, str(folder), ttl, name=name, **kwargs))
+    running = Running(Device(hub.invite() if invite else None, str(folder), ttl, name=name, **kwargs), hub)
     deadline = time.time() + 10
     while time.time() < deadline and not any(s.online and s.name == name for s in hub.sessions()):
         time.sleep(0.05)
