@@ -346,3 +346,47 @@ def test_misconfigured_ingress_drops_every_a2a_message(monkeypatch):
     (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
     assert dispatch(_event("anything"))["action"] == "skip"
     assert dispatch(_event("hello", platform="telegram")) is None
+
+
+
+def test_ingress_preserves_narrowed_child_grants_and_retirement(keys, w_a):
+    ingress = _ingress(keys)
+    _admit(keys, w_a, ingress, "ctx-1", "light.guest_room")
+    guard = _guard(keys, ingress)
+    grant = ingress.grant_for("agent-a", "ctx-1")
+    child_key = SigningKey.generate()
+    child = grant_to(keys.b, [w_a, grant.warrant], child_key.public_key, {"light_get": {}}, 60)
+    guard.set_session_warrant("child", child, child_key, parent_warrant=[w_a, grant.warrant])
+    turn = ("agent-a", "ctx-1")
+    assert _call(guard, ingress, turn, "light_get", {}, "child") is None
+    assert _call(guard, ingress, turn, "light_set", {"entity_id": "light.guest_room"}, "child")["action"] == "block"
+    assert guard._session_warrants["child"] == (child, child_key)
+    guard.clear_session_warrant("child")
+    assert _call(guard, ingress, turn, "light_get", {}, "child")["action"] == "block"
+
+
+def test_ingress_does_not_replace_another_context_grant(keys, w_a):
+    ingress = _ingress(keys)
+    _admit(keys, w_a, ingress, "ctx-1", "light.guest_room")
+    _admit(keys, w_a, ingress, "ctx-2", "light.office")
+    guard = _guard(keys, ingress)
+    assert _call(guard, ingress, ("agent-a", "ctx-1"), "light_get", {}, "s") is None
+    assert _call(guard, ingress, ("agent-a", "ctx-2"), "light_get", {}, "s")["action"] == "block"
+
+
+def test_unbound_a2a_child_cannot_inherit_the_ingress_grant(keys, w_a, monkeypatch):
+    ingress = _ingress(keys)
+    _admit(keys, w_a, ingress, "ctx-1", "light.guest_room")
+    ingress.current_turn = lambda: ("agent-a", "ctx-1")
+    monkeypatch.setattr("hermes_tenuo.access.subagent_attribution_lookup",
+                        lambda: lambda task: {"parent_session_id": "parent"})
+    result = _guard(keys, ingress).pre_tool_call("light_get", {}, session_id="child", task_id="child-task")
+    assert result["action"] == "block" and "no bound delegation" in result["message"]
+
+
+@pytest.mark.parametrize("block", [True, "true", [], {"enabled": "false"}, {"enabled": 1}])
+def test_malformed_ingress_config_fails_closed(monkeypatch, block):
+    ctx = _register(monkeypatch, {"a2a_ingress": block})
+    (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
+    assert dispatch(_event("anything"))["action"] == "skip"
+    assert dispatch(_event("hello", platform="telegram")) is None

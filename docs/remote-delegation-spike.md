@@ -28,6 +28,12 @@ constraints that D1 must carry or upstream must remove. Live: **12/12** checks a
 gateway. Unit: **32** tests in `tests/test_a2a_ingress.py`. Full `hermes-tenuo` suite: 818 passed,
 13 skipped (Hermes-source tests), 0 failed.
 
+Review follow-up: ingress now preserves narrower descendant grants and retired-session
+markers, refuses unrelated context bindings and unbound attributed children, and rejects
+malformed enabled configuration. The focused authorization/delegation suites pass 98 tests
+(3 skipped); real Hermes 0.23.1 plugin-loading, dispatch, access and A2A hook tests pass
+64 tests (2 skipped). This does not replace the live gateway evidence below.
+
 ## Design
 
 ```

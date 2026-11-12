@@ -418,7 +418,14 @@ def load_ingress(ctx: Any) -> Optional[A2AIngress]:
     from tenuo import PublicKey
 
     block = _get_plugin_entry(ctx).get("a2a_ingress")
-    if not isinstance(block, dict) or not block.get("enabled"):
+    if block is None or block is False:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError("a2a_ingress must be an object with a boolean enabled field")
+    enabled = block.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("a2a_ingress.enabled must be a boolean")
+    if not enabled:
         return None
     peers = block.get("peers") or {}
     roots = block.get("trusted_roots") or []

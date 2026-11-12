@@ -1087,7 +1087,7 @@ class HermesGuard:
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if unattributed is not None:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
-        refusal = self._bind_ingress_grant(session_id)
+        refusal = self._bind_ingress_grant(session_id, task_id)
         if refusal is not None:
             return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
@@ -1142,7 +1142,7 @@ class HermesGuard:
         result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id)
         return result
 
-    def _bind_ingress_grant(self, session_id: str) -> Optional[str]:
+    def _bind_ingress_grant(self, session_id: str, task_id: str = "") -> Optional[str]:
         """For an inbound A2A turn, bind its verified grant to the session; a refusal reason when
         it has none. Other turns are untouched (None).
 
@@ -1162,8 +1162,23 @@ class HermesGuard:
             return "tenuo: an A2A tool call without a session cannot be matched to its grant"
         with self._session_lock:
             entry = self._session_warrants.get(session_id)
-            bound = entry is not None and entry[0] is grant.warrant
-            if not bound:
+            if entry is not None:
+                reason = _marker_reason(entry[0])
+                if reason is not None:
+                    return reason
+                # A child must keep its own key and narrower grant. Only the ingress
+                # grant itself or a verified descendant belongs to this A2A turn.
+                chain = self._session_warrant_chains.get(session_id, [])
+                if entry[0] is not grant.warrant and not any(
+                        str(w.id) == str(grant.warrant.id) for w in chain):
+                    return "tenuo: this session's warrant does not descend from the A2A grant"
+            else:
+                if self._overflowed:
+                    return "tenuo: cannot bind an A2A grant after denied-session overflow"
+                from hermes_tenuo.access import subagent_attribution_lookup
+                lookup = subagent_attribution_lookup()
+                if task_id and lookup is not None and lookup(task_id) is not None:
+                    return "tenuo: A2A subagent has no bound delegation warrant"
                 self._bind_session(session_id, grant.warrant, ingress.own_key, list(grant.chain))
             self._ingress_roots[session_id] = list(ingress.trusted_roots)
         return None
