@@ -336,7 +336,14 @@ and the other file tools act there. `/hands off` returns it to the server and
 `/hands on` switches it back. Other conversations, bots and scheduled jobs are
 not affected. On a chat platform that says who is writing, the machine is
 yours: other people cannot see it, use it or forget it, and a message from
-someone else in a shared chat does not run on it.
+someone else in a shared chat does not run on it. That message's terminal and
+file calls are refused; they do not run on the server instead. While a shared
+conversation uses your machine, only you can switch it with `/hands on` or
+`/hands off`, until the machine's time is over or you revoke it.
+
+In a chat other people can read (a group, a channel, a thread), `/hands setup`
+and `/hands invite` do not print the pairing line. Send them to the bot in a
+direct message, run the line, then type `/hands on <name>` in the shared chat.
 
 | Command | Where | What it does |
 |---|---|---|

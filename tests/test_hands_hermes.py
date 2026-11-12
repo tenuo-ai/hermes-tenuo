@@ -159,6 +159,15 @@ SCRIPT = textwrap.dedent('''
     session.owner = "telegram:alice"
     chat._owner = lambda: "telegram:bob"
     tool("stranger", "terminal", {"command": "echo x > stranger.txt"})
+    tool("stranger_write", "write_file", {"path": "stranger3.txt", "content": "x"})
+    out["stranger_on_server"] = sorted(str(p) for p in server_dir.rglob("stranger*"))
+    # Hermes's own chain, as an agent turn runs it: a refused call must not reach the tool.
+    # (A profile on `hands` passes the call on, and its backend refuses it.)
+    from hermes_cli.middleware import run_tool_execution_middleware
+    reached = []
+    out["stranger_chain"] = str(run_tool_execution_middleware(
+        "terminal", {"command": "true"}, lambda args: reached.append(args) or "ran", task_id="chat-1"))
+    out["stranger_reached_the_tool"] = bool(reached) and not whole_profile
     # A tool that only runs on the server is not theirs to lose.
     out["stranger_server_tool"] = chat.around_tool(tool_name="web_search", args={}, next_call=lambda: "on the server",
                                                    task_id="chat-1")
@@ -275,7 +284,14 @@ def _on_the_device(out, project, server_dir):
         assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
     for key in ("bg_poll", "bg_poll_named"):  # the process tool reports on an earlier process: not marked
         assert out[key]["ran_on"] is None, (key, out[key])
-    assert not (project / "stranger.txt").exists() and not (project / "stranger2.txt").exists()
+    assert not list(project.rglob("stranger*"))
+    # Refused where the call starts: it does not run on the server instead.
+    assert out["stranger_on_server"] == []
+    assert not out["stranger_reached_the_tool"], out["stranger_chain"]
+    for key in ("stranger", "stranger_write"):  # a profile on `hands` has no machine of theirs to name
+        said = out[key]["text"]
+        assert "belongs to the person who paired it" in said or "no device is up" in said, out[key]
+        assert out[key]["ran_on"] is None, out[key]
     assert "belongs to the person who paired it" in out["stranger_backend"], out["stranger_backend"]
     assert out["stranger_server_tool"] == "on the server"
     assert out["owner"]["text"].strip() == "mine", out["owner"]
