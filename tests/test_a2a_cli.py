@@ -43,14 +43,14 @@ def test_key_creates_a_private_key_once_and_prints_the_public_half(tmp_path, mon
 
 
 def test_revoke_signs_and_extends_a_list_the_receiver_accepts(tmp_path, monkeypatch, capsys):
-    srl = tmp_path / "srl.b64"
+    srl = tmp_path / "revocations.srl"
     root = _configure(tmp_path, monkeypatch, srl_path=srl)
     key_file = tmp_path / "root.key"
     key_file.write_text(base64.b64encode(root.secret_key_bytes()).decode())
     args = SimpleNamespace(ids=["tnu_wrt_a"], root_key=str(key_file), list=str(srl))
     assert a2a_cli.cmd_revoke(args) == 0
     assert a2a_cli.cmd_revoke(SimpleNamespace(**{**vars(args), "ids": ["tnu_wrt_b"]})) == 0
-    loaded = SignedRevocationList.from_bytes(base64.b64decode(srl.read_text()))
+    loaded = SignedRevocationList.from_bytes(srl.read_bytes())  # raw bytes, shared with the MCP wrapper
     assert loaded.version == 2 and set(loaded.revoked_ids) == {"tnu_wrt_a", "tnu_wrt_b"}
     capsys.readouterr()
     assert a2a_cli.cmd_check(None) == 0
@@ -70,3 +70,11 @@ def test_check_reports_an_unusable_ingress_block(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_HOME", str(home))
     assert a2a_cli.cmd_check(None) == 1
     assert "every inbound A2A message would be dropped" in capsys.readouterr().err
+
+
+def test_revocation_list_bytes_are_read_raw_or_as_base64():
+    from hermes_tenuo.a2a_ingress import srl_bytes
+
+    raw = bytes(range(256)) + b"  \n"  # binary that ends in whitespace bytes stays intact
+    assert srl_bytes(raw) == raw
+    assert srl_bytes(base64.b64encode(b"abc") + b"\n") == b"abc"

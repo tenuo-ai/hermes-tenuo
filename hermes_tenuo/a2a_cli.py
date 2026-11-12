@@ -76,14 +76,14 @@ def cmd_revoke(args: Any) -> int:
     """Add ids to a revocation list signed by the operator root. Receivers pick up the new file."""
     from tenuo import SignedRevocationList, SigningKey
 
-    from hermes_tenuo.issuance import write_private_file
-
     root = SigningKey.from_bytes(base64.b64decode(Path(args.root_key).read_text().strip()))
     target = Path(args.list)
     ids = set(args.ids)
     version = 1
     if target.exists():
-        current = SignedRevocationList.from_bytes(base64.b64decode(target.read_text().strip()))
+        from hermes_tenuo.a2a_ingress import srl_bytes
+
+        current = SignedRevocationList.from_bytes(srl_bytes(target.read_bytes()))
         ids |= set(current.revoked_ids)
         version = current.version + 1
     builder = SignedRevocationList.builder()
@@ -91,10 +91,27 @@ def cmd_revoke(args: Any) -> int:
         builder = builder.revoke(warrant_id)
     srl = builder.version(version).build(root)
     target.parent.mkdir(parents=True, exist_ok=True)
-    write_private_file(target, base64.b64encode(srl.to_bytes()).decode(), overwrite=True)
+    _write_bytes(target, srl.to_bytes())
     print(f"Revocation list version {version}: {len(ids)} revoked. Copy {target} to each receiving agent's "
           "a2a_ingress.revocation_list path; it is re-read on change.")
     return 0
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    """Raw bytes (the format the MCP wrapper reads as revocations.srl), atomically and 0600."""
+    import os
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
 
 
 def add_parser(subparsers: Any) -> None:

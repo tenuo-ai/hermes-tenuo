@@ -45,6 +45,15 @@ MAX_REQUEST_AGE = 300  # seconds a request stays acceptable; replay is refused w
 MAX_ENVELOPE_CHARS = 64_000
 
 
+def srl_bytes(data: bytes) -> bytes:
+    """A revocation list file's bytes: raw (as the MCP wrapper writes revocations.srl) or base64 text."""
+    try:
+        text = data.decode("ascii").strip()
+        return base64.b64decode(text, validate=True) if text else data
+    except Exception:
+        return data
+
+
 class IngressRefused(Exception):
     """A delegated task was not accepted. The message never reaches the agent."""
 
@@ -376,12 +385,7 @@ class A2AIngress:
                 stat = self._srl_path.stat()
                 stamp = (stat.st_mtime, stat.st_size)
                 if stamp != self._srl_stamp:
-                    raw = self._srl_path.read_bytes().strip()
-                    try:
-                        raw = base64.b64decode(raw, validate=True)
-                    except Exception:
-                        pass
-                    srl = SignedRevocationList.from_bytes(raw)
+                    srl = SignedRevocationList.from_bytes(srl_bytes(self._srl_path.read_bytes()))
                     Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
                     if self._srl is not None and srl.version < self._srl.version:
                         raise ValueError("an older revocation list cannot replace a newer one")
@@ -469,8 +473,14 @@ class A2AIngress:
         logger.info("hermes-tenuo: A2A ingress %s peer=%s context=%s %s", outcome, peer, context_id, detail)
         if self._audit is not None:
             try:
-                self._audit({"event": "a2a_ingress", "outcome": outcome, "peer": peer,
-                             "context": context_id, "detail": detail, "ts": time.time()})
+                from datetime import datetime, timezone
+
+                # Same shape as tool decisions and the MCP wrapper's records, in the same log.
+                self._audit({"timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                             "tool": "a2a_ingress", "decision": "ALLOW" if outcome == "admitted" else "DENY",
+                             "reason": detail if outcome != "admitted" else "", "peer": peer,
+                             "context": context_id, "granted_tools": detail if outcome == "admitted" else "",
+                             "event": "a2a_ingress", "outcome": outcome, "detail": detail, "ts": time.time()})
             except Exception:
                 logger.debug("hermes-tenuo: A2A audit write failed", exc_info=True)
 
@@ -537,10 +547,21 @@ def load_ingress(ctx: Any) -> Optional[A2AIngress]:
     trusted = [PublicKey.from_bytes(base64.b64decode(str(r))) for r in roots]
     own_key = load_or_create_a2a_key()
     from pathlib import Path
+    from types import SimpleNamespace
+
+    from hermes_tenuo._config import get_audit_log_path
+
+    audit = None
+    audit_path = get_audit_log_path(ctx)
+    if audit_path is not None:
+        from hermes_tenuo.audit import LocalAuditLog
+
+        log = LocalAuditLog(audit_path)
+        audit = lambda row: log(SimpleNamespace(**row))  # noqa: E731
 
     srl = block.get("revocation_list")
     return A2AIngress(own_key=own_key, peers={str(k): str(v) for k, v in peers.items()},
-                      trusted_roots=trusted, state_dir=a2a_key_path().parent,
+                      trusted_roots=trusted, state_dir=a2a_key_path().parent, audit=audit,
                       revocation_list=Path(str(srl)).expanduser() if srl else None)
 
 

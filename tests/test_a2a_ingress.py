@@ -473,3 +473,17 @@ def test_replay_and_context_ownership_survive_a_restart(keys, w_a, tmp_path):
 def _admit_grant(keys, w_a, ingress, grant, ctx="ctx-1"):
     envelope = _envelope(keys, w_a, grant=grant, ctx=ctx)
     assert ingress.pre_gateway_dispatch(_event(_event_text(envelope), ctx=ctx))["action"] == "rewrite"
+
+
+def test_ingress_decisions_go_to_the_shared_audit_log(monkeypatch, keys, w_a, tmp_path):
+    import hermes_tenuo
+    log = tmp_path / "audit.jsonl"
+    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: {
+        "audit_log": str(log), "a2a_ingress": {"enabled": True, "peers": {"agent-a": public_key_b64(keys.a)},
+                                                "trusted_roots": [public_key_b64(keys.root)]}})
+    ctx = _Ctx()
+    hermes_tenuo.register(ctx)
+    (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
+    dispatch(_event("no delegation here"))
+    row = json.loads(log.read_text().splitlines()[-1])
+    assert row["tool"] == "a2a_ingress" and row["decision"] == "DENY" and row["peer"] == "agent-a"

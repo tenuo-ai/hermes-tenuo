@@ -44,7 +44,7 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
            enabled: true
            peers: {agent-a: "<A's public key>"}      # the name from A2A_PEER_TOKENS
            trusted_roots: ["<operator root public key>"]
-           revocation_list: ~/.hermes/tenuo/a2a-revoked.b64   # optional
+           revocation_list: ~/.hermes/tenuo/revocations.srl   # optional
    ```
 
 4. Run `hermes-tenuo a2a check`, then restart the gateway.
@@ -102,10 +102,12 @@ the grant it used. A failed send is not retried, because the task may have run.
 Revoke a grant or a sender's whole warrant (everything delegated from it) with the operator root key:
 
 ```sh
-hermes-tenuo a2a revoke <warrant-or-grant-id> --root-key root.key --list a2a-revoked.b64
+hermes-tenuo a2a revoke <warrant-or-grant-id> --root-key root.key --list revocations.srl
 ```
 
-Copy the file to each receiver's `revocation_list` path; it is re-read on change. A configured list
+Copy the file to each receiver's `revocation_list` path; it is re-read on change. The format is the
+one the MCP wrapper reads as `revocations.srl`, so one list can serve agents and wrapped MCP servers
+that trust the same root. A configured list
 that is missing, not signed by a trusted root, or older than the last one refuses every delegation.
 
 ## Limits
