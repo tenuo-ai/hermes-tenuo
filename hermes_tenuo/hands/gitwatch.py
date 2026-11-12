@@ -589,7 +589,11 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
                     if read is None:
-                        target = _locate(roots, full, 0, "") if full and _walkable(value) else None
+                        if full and not _walkable(full):
+                            # Not looked at, so say so: a change to it would not be seen.
+                            found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"
+                            continue
+                        target = _locate(roots, full, 0, "") if full else None
                         if target is not None and target[1] != ".":
                             queue.append(target)
                         continue
@@ -605,12 +609,15 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                         queue.append((None, _spelled(value, here)))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
+                    full = _full(value, roots[0][0])
                     if read is None:
-                        target = _locate(roots, value, 0, "") if _walkable(value) else None
+                        if full and not _walkable(full):
+                            found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"
+                            continue
+                        target = _locate(roots, value, 0, "")
                         if target is not None and target not in hook_folders:
                             hook_folders.append(target)   # "." is the folder itself
                         continue
-                    full = _full(value, roots[0][0])
                     ends = _followed(roots, value, roots[0][0]) if full else ""
                     target = _locate(roots, ends, 0, "") if ends else None
                     if ends is None:

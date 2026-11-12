@@ -430,7 +430,23 @@ def test_a_settings_path_is_followed_only_so_deep(folder, tmp_path):
     paths, problems, _notes = _sources(folder, tmp_path)
     assert paths == [str(folder / deep / "near.cfg")] and len(problems) == 2, (paths, problems)
     assert all(text.endswith("(cannot be checked)") for text in problems), problems
-    assert {"include.path", "core.hookspath"} <= set(gitwatch.settings(str(folder)))
+    # Without the lock, what is not looked at is named too, so a change to it is not thought seen.
+    seen = gitwatch.settings(str(folder))
+    assert {"include.path", "core.hookspath"} <= set(seen)
+    assert sum(name.endswith("(cannot be checked)") for name in seen) == 2, sorted(seen)
+
+
+def test_a_path_with_many_idle_steps_is_still_watched(folder):
+    """`./` many times over leads to the same file: what it holds is followed as before."""
+    (folder / "extra.cfg").write_text("")
+    (folder / "hooks").mkdir()
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n\tpath = ../" + "./" * 300 + "extra.cfg\n[core]\n\thooksPath = " + "./" * 300 + "hooks\n")
+    before = gitwatch.settings(str(folder))
+    assert not any(name.endswith("(cannot be checked)") for name in before), sorted(before)
+    (folder / "extra.cfg").write_text("[core]\n\tfsmonitor = ./run.sh\n")
+    (folder / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    assert len(gitwatch.changed(before, gitwatch.settings(str(folder)))) == 2
 
 
 @pytest.mark.parametrize("deep", ["", "/".join(["d"] * 70)])
