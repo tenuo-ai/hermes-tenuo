@@ -372,7 +372,8 @@ access is denied; on Linux files appear empty and directories are empty,
 read-only mounts. Names may remain visible. Rules are fixed for a session;
 stop and restart Hands after changing them. Protect the original path and any
 existing copies or hard-link aliases separately. These rules control paths,
-not all copies of the same information. Do not move excluded data from another
+not all copies of the same information. A file that was committed stays readable
+through the repository's history. Do not move excluded data from another
 local process during a session.
 
 Hands redacts recognized credentials from tool results on the device before
@@ -391,6 +392,14 @@ formats can escape detection. Use exclusions for data that must not be shared.
 Redaction does not restrict network traffic from commands started with
 `--network`. Results still go to remote Hermes and may go to its model provider.
 Older Hands clients do not gain these protections merely by upgrading the server.
+
+Commands may change the shared folder, including its repository's own settings.
+Git runs some of those as programs (hooks, `core.fsmonitor`, a pager, an alias),
+for whoever uses git in the folder next and outside Hands. The laptop prints a
+note when a command adds or changes one, and again when Hands stops; check
+`.git/config` and `.git/hooks` before using git there yourself. Repositories in
+subfolders are not watched. On macOS, commands cannot open other terminal
+windows, read your preferences, or read other programs' temporary files.
 
 What your machine enforces, whatever the server asks:
 

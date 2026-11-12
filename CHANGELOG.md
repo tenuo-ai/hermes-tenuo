@@ -37,6 +37,10 @@
   reference or a file path as is, so ordinary settings and source are not redacted.
 - Keep serving when the server's answer is not in the expected form: it is retried like a
   lost connection instead of ending the device.
+- On macOS, commands can no longer open other terminal devices, read user preferences, or
+  read other programs' temporary files.
+- The laptop reports git settings a command added or changed that make git run programs.
+- A machine name is one printable line; closing the terminal stops Hands as Ctrl-C does.
 - Exercise both client/server directions against a pinned previous Hands version in CI.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file

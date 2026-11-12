@@ -964,6 +964,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
                             network=args.network)
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
+        if hasattr(signal, "SIGHUP"):  # the terminal was closed: stop what commands started, as Ctrl-C does
+            signal.signal(signal.SIGHUP, dev.stop)
         return dev.serve()
     except (device.HandsError, SandboxUnavailable, ConnectionError, ValueError) as exc:
         print(f"hermes-tenuo hands: {exc}", file=sys.stderr)
