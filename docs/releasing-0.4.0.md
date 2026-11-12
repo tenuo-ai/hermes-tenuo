@@ -76,6 +76,29 @@ commands. This substitution belongs in release testing, not user onboarding.
 Results and remaining gates are recorded in the preparation PR. Publication and
 catalog repinning remain separate actions even if every automated check passes.
 
+### Candidate code validation — 2026-11-11
+
+Run against the default branch at `248f7be`, the code this release tags, with
+tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
+
+- Unit and integration tests: 727 passed on macOS (Python 3.12) and 722 on
+  Ubuntu 24.04 with bubblewrap; the Hermes-enabled tests passed under the
+  installed Hermes.
+- Role-based access through a real Hermes agent loop with a scripted model and
+  real tool execution: per-sender roles, parallel calls, inline and background
+  children, `execute_code`, shared sessions, API-server and webhook turns, and a
+  scheduled run through Hermes's cron scheduler. Six malformed `access:` blocks
+  each blocked every call.
+- A 0.3-style static-warrant configuration behaved as it does on 0.3.1.
+- With hermes-tenuo installed both by pip (0.3.1, then 0.4.0) and as a
+  directory plugin, every tool call was blocked with the message naming both.
+- Hands on macOS: first session, daily work, lifecycle, privacy exclusions,
+  multi-person use, and the sandbox boundary checks.
+- Wheel and source archive built; a clean install reported 0.4.0, and `doctor`
+  and `status` were correct for a static warrant and for an `access:`-only home.
+
+Not covered here: a live messaging-app conversation, and Windows.
+
 ### Desktop acceptance — 2026-11-11
 
 Passed with Hermes Desktop 0.23.1+1096, Hermes backend 0.23.1, and the
