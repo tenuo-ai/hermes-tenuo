@@ -9,7 +9,7 @@ Supported devices: macOS with sandbox-exec, or Linux with working bubblewrap. Na
 In the Hermes environment/profile serving your chat:
 
 ```sh
-hermes plugins install tenuo-ai/hermes-tenuo --ref v0.4.0
+hermes plugins install tenuo-ai/hermes-tenuo
 hermes plugins enable hermes-tenuo
 ```
 
