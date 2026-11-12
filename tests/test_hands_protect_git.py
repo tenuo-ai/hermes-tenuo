@@ -318,13 +318,30 @@ def test_sources_reads_what_an_included_file_outside_the_folder_pulls_in(folder,
     with open(folder / ".git" / "config", "a") as f:
         f.write(f"[include]\n\tpath = {tmp_path / 'outside.cfg'}\n")
     assert _sources(folder, tmp_path) == ([str(folder / ".hooks")], [], [])
-    os.unlink(tmp_path / "outside.cfg")
-    (folder / "inside.cfg").write_text("")
-    (tmp_path / "outside.cfg").symlink_to(folder / "link")           # reached through a link commands can change
-    (folder / "link").symlink_to(tmp_path / "elsewhere.cfg")
-    (tmp_path / "elsewhere.cfg").write_text("")
+    os.link(tmp_path / "outside.cfg", folder / "alias")              # a second name commands can write
     _paths, problems, _notes = _sources(folder, tmp_path)
     assert any("outside.cfg (cannot be checked)" in text for text in problems), problems
+
+
+@pytest.mark.parametrize("arrange", [
+    # the file itself is a link in the folder that leads out again
+    lambda f, o: ((o / "outside.cfg").symlink_to(f / "link"), (f / "link").symlink_to(o / "real.cfg")),
+    # a folder on the way is
+    lambda f, o: ((o / "safe").mkdir(), (o / "safe" / "outside.cfg").write_text(""), (f / "bridge").symlink_to(o / "safe"),
+                  (o / "alias").symlink_to(f / "bridge"), (o / "outside.cfg").symlink_to("alias/outside.cfg")),
+    # it leads into the folder through a link there
+    lambda f, o: ((o / "outside.cfg").symlink_to(f / "link"), (f / "link").symlink_to("inside.cfg"),
+                  (f / "inside.cfg").write_text("")),
+    # it passes through the folder and out again without a link
+    lambda f, o: ((f / "sub").mkdir(), (o / "outside.cfg").symlink_to(f"{f}/sub/../../real.cfg")),
+])
+def test_settings_reached_through_a_link_commands_can_change_are_not_trusted(folder, tmp_path, arrange):
+    (tmp_path / "real.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {tmp_path / 'outside.cfg'}\n")
+    arrange(folder, tmp_path)
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), problems
 
 
 @locks
@@ -379,6 +396,8 @@ def _module(folder, name):
     (lambda f: os.link(f / "nested" / ".git" / "config", f / "alias"), "nested/.git/config has a second name"),
     (lambda f: os.link(f / "deep" / "er" / "nested" / ".git" / "hooks" / "pre-commit.sample", f / "alias"), "has a second name"),
     (lambda f: (f / "nested" / ".git" / "commondir").write_text(".\n"), "nested/.git/commondir"),
+    (lambda f: (_module(f, "lib") / "commondir").write_text("../../../metadata\n"), ".git/modules/lib/commondir sends"),
+    (lambda f: os.chmod(f / "nested", 0), "nested cannot be read"),
     (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").write_text("gitdir: ../meta\n")),
      "nested/.git points to a git folder the lock does not hold"),
     (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").symlink_to("../meta")),
@@ -396,8 +415,23 @@ def test_the_folder_is_looked_through_for_what_the_lock_would_not_hold(folder, a
     (folder / ".git" / "hooks" / "pre-commit").symlink_to("../../check.sh")           # a hook may be a link
     assert gitwatch.loose(str(folder)) == ([], True)
     arrange(folder)
-    problems, complete = gitwatch.loose(str(folder))
+    try:
+        problems, complete = gitwatch.loose(str(folder))
+    finally:
+        os.chmod(folder / "nested", 0o755) if os.path.lexists(folder / "nested") else None
+    if "cannot be read" in problem and os.geteuid() == 0:
+        pytest.skip("root reads every folder")
     assert complete and any(problem in text for text in problems), problems
+
+
+def test_a_file_the_settings_include_is_checked_whatever_it_is_called(folder):
+    """Object files may have other names; a settings file that is named like one may not."""
+    (folder / "objects" / "pack").mkdir(parents=True)
+    included = folder / "objects" / "pack" / "settings.idx"
+    included.write_text("")
+    assert gitwatch.loose(str(folder), (), [str(included)]) == ([], True)
+    os.link(included, folder / "alias")
+    assert gitwatch.loose(str(folder), (), [str(included)]) == (["objects/pack/settings.idx has a second name (a hard link)"], True)
 
 
 def test_a_folder_too_large_to_look_through_is_not_called_clean(folder, monkeypatch):

@@ -207,6 +207,32 @@ def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
     return False
 
 
+def _loose_link(roots: List[Tuple[str, int, str]], path: str) -> bool:
+    """Whether *path*, taken one component at a time, follows a link that is in a folder
+    commands can write. Where it ends does not matter: a path that ends in such a folder
+    is locked there, but only if no link on the way can send it somewhere else."""
+    reach = [os.path.realpath(root) for root, _fd, _label in roots]
+    parts, here, hops = path.split(os.sep), os.sep, 0
+    while parts:
+        part = parts.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            here = os.path.dirname(here)
+            continue
+        step = os.path.join(here, part)
+        if os.path.islink(step):
+            hops += 1
+            if hops > 40 or any(step.startswith(r + os.sep) for r in reach):
+                return True
+            parts = os.readlink(step).split(os.sep) + parts
+            if not parts[0]:
+                here = os.sep
+            continue
+        here = step
+    return False
+
+
 def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str]:
     """The settings files git reads for a folder whose `.git` is a pointer to a git
     folder commands cannot write: a linked worktree, or a submodule's checkout."""
@@ -495,14 +521,19 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
                     target = _locate(roots, full, 0, "") if full else None
-                    if target is not None and target[1] != ".":
+                    if read is not None and full and _loose_link(roots, full):
+                        found[f"{full} ({_UNCHECKED})"] = "unchecked"   # on the way: a link commands can change
+                    elif target is not None and target[1] != ".":
                         queue.append(target)
                     elif target is None and full and read is not None:
                         queue.append((None, full))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     target = _locate(roots, value, 0, "")
-                    if target is not None and target not in hook_folders:
+                    spelled = _full(value, roots[0][0])
+                    if read is not None and spelled and _loose_link(roots, spelled):
+                        found[f"{spelled} ({_UNCHECKED})"] = "unchecked"
+                    elif target is not None and target not in hook_folders:
                         hook_folders.append(target)   # "." is the folder itself
                     elif target is None and read is not None:
                         outside = _full(value, roots[0][0])
