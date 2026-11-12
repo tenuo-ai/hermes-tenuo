@@ -479,6 +479,37 @@ def test_a_large_confirmed_timeout_keeps_its_whole_output_recoverable(monkeypatc
     assert os.path.getsize(result["full_output_path"]) >= len(big)      # rebuilt once, spilled once
 
 
+@pytest.mark.parametrize("code", [0, 124])
+def test_an_answer_is_rebuilt_once_when_the_outer_deadline_answers_first(monkeypatch, tmp_path, code):
+    import os
+    import time
+    from hermes_tenuo.hands import backend
+    from hermes_tenuo.hands.backend import BaseEnvironment
+    built = []
+    real_build = backend._from_answer
+
+    def counting(*args, **kwargs):
+        made = real_build(*args, **kwargs)
+        built.append(made)
+        return made
+    monkeypatch.setattr(backend, "_from_answer", counting)
+    real_wait = BaseEnvironment._wait_for_process
+
+    def slow_to_return(self, proc, *args, **kwargs):
+        result = real_wait(self, proc, *args, **kwargs)
+        time.sleep(1.0)              # Hermes's outer deadline answers while this is still out
+        return result
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", slow_to_return)
+    big = "w" * 300_000 + "\nEND\n"
+    env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(big), code)))
+    result = env.execute("long job", timeout=1, bounded_capture=True)
+    assert result["returncode"] == code and result["output"].rstrip().endswith("END"), result["output"][-60:]
+    time.sleep(2.5)                  # the wait Hermes gave up on finishes and settles too
+    assert len(built) == 1, len(built)
+    spills = [name for name in os.listdir(tmp_path / "cache" / "terminal-output") if "-answer-" in name]
+    assert len(spills) == 1 and result["full_output_path"].endswith(spills[0]), spills
+
+
 def test_two_rebuilt_answers_in_one_second_each_keep_their_spill(monkeypatch, tmp_path):
     from hermes_tenuo.hands.backend import _from_answer
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
