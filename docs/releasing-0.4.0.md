@@ -78,11 +78,11 @@ catalog repinning remain separate actions even if every automated check passes.
 
 ### Candidate code validation — 2026-11-11
 
-Run against the default branch at `928b087` with the lost-result change applied,
-the code this release tags, with
+Run against the default branch at `a0b0bfa` with the follow-up to the lost-result
+change applied, the code this release tags, with
 tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
 
-- Unit and integration tests: 732 passed on macOS (Python 3.12) and 727 on
+- Unit and integration tests: 786 passed on macOS (Python 3.12) and 776 on
   Ubuntu 24.04 with bubblewrap; the Hermes-enabled tests passed under the
   installed Hermes.
 - Role-based access through a real Hermes agent loop with a scripted model and
@@ -97,7 +97,11 @@ tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
   multi-person use, and the sandbox boundary checks.
 - Lost and late results through Hermes's real terminal path: an answer just
   after Hermes's deadline, a result the hub gave up on, no answer at all, a
-  laptop killed mid-command, and a timeout the laptop confirmed.
+  laptop killed mid-command, a timeout the laptop confirmed, and a command that
+  exits 124 by itself.
+- A Hands session started with `--protect-git` on macOS: commits, branches,
+  diffs and stashes worked; changing git settings, writing a hook and renaming
+  the repository folder were refused.
 - Wheel and source archive built; a clean install reported 0.4.0, and `doctor`
   and `status` were correct for a static warrant and for an `access:`-only home.
 
