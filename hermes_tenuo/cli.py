@@ -930,7 +930,8 @@ def cmd_hands(args: argparse.Namespace) -> int:
     if args.hands_command == "check":
         ok = True
         for passed, text in device.check(args.invite, args.dir, read_only=args.read_only,
-                                         plain_http=args.plain_http, network=args.network):
+                                         plain_http=args.plain_http, network=args.network,
+                                         protect_git=getattr(args, "protect_git", False)):
             ok = ok and passed is not False
             print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {text}")
         print("\n  Ready: run `hermes-tenuo hands up` with the same arguments." if ok else
@@ -952,7 +953,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
         print("Checking this machine before pairing…")
         checks = device.check(args.invite, args.dir, read_only=args.read_only,
                               plain_http=args.plain_http, network=args.network,
-                              allow_unsandboxed=args.no_sandbox)
+                              allow_unsandboxed=args.no_sandbox, protect_git=getattr(args, "protect_git", False))
         for passed, text in checks:
             print(f"  {'—' if passed is None else '✓' if passed else '✗'}  {device.printable(text)}")
         if any(passed is False for passed, _ in checks):
@@ -961,7 +962,7 @@ def cmd_hands(args: argparse.Namespace) -> int:
         dev = device.Device(args.invite, args.dir, duration, name=args.name,
                             allow_unsandboxed=args.no_sandbox, read_only=args.read_only,
                             plain_http=args.plain_http, read_home=args.read_home, read=args.read or (),
-                            network=args.network)
+                            network=args.network, protect_git=getattr(args, "protect_git", False))
         signal.signal(signal.SIGINT, dev.stop)
         signal.signal(signal.SIGTERM, dev.stop)
         if hasattr(signal, "SIGHUP"):  # the terminal was closed: stop what commands started, as Ctrl-C does
@@ -1076,12 +1077,15 @@ def main() -> None:
                       help="Also let commands read this folder in your home folder (repeatable)")
     up_p.add_argument("--read-home", action="store_true",
                       help="Let commands read your whole home folder, except keys, credentials and browser data")
+    up_p.add_argument("--protect-git", action="store_true",
+                      help="Keep commands from changing git settings and hooks, or making repositories (macOS)")
     check_p = hands_sub.add_parser("check", help="See whether this machine is ready for `hands up`, without pairing")
     check_p.add_argument("invite", nargs="?", metavar="INVITE", help="The hands://... line, to test that its server is reachable")
     check_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder you plan to share (default: here)")
     check_p.add_argument("--read-only", action="store_true", help="Check for --read-only use")
     check_p.add_argument("--network", action="store_true", help="Check for --network use")
     check_p.add_argument("--plain-http", action="store_true", help="Check for --plain-http use")
+    check_p.add_argument("--protect-git", action="store_true", help="Check for --protect-git use")
     hands_sub.add_parser("log", help="Show what the server ran on this machine").add_argument(
         "--last", type=int, default=20, metavar="N")
 

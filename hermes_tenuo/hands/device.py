@@ -380,6 +380,42 @@ def _before_usr_bin(path: str, dirs: list) -> str:
     return os.pathsep.join(parts[:at] + list(dirs) + parts[at:])
 
 
+TMP, TMP_GIT_LOCKED = "tmp", "tmp-protect-git"
+
+
+def _true_path(path: str) -> str:
+    """`path` as the system itself spells it (letter case, links resolved): the form the
+    macOS sandbox compares its rules with."""
+    import fcntl
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    try:
+        return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
+    finally:
+        os.close(fd)
+
+
+def git_lock(folder: str, tmp: str) -> tuple:
+    """What --protect-git locks besides the fixed names the sandbox knows: (paths, notes).
+    Raises HandsError where commands could still change what git runs, so that a lock is
+    never claimed that does not hold."""
+    if not sandbox.locks_git():
+        raise HandsError(sandbox.NO_GIT_LOCK)
+    paths, problems, notes = gitwatch.sources(folder, also=(tmp,))
+    if not problems:
+        linked, complete = gitwatch.other_names(folder, paths)
+        problems = [f"{name} has a second name (a hard link)" for name in linked]
+        if not complete:
+            problems.append("there are too many files under .git/hooks and .git/modules to look at")
+    try:
+        paths = [] if problems else [_true_path(path) for path in paths]
+    except OSError as e:
+        problems.append(f"{e.filename or 'a path named in git settings'} cannot be opened")
+    if problems:
+        raise HandsError("--protect-git cannot lock git in this folder: " + "; ".join(map(printable, problems[:5]))
+                         + ". Change that, or start without --protect-git to have changes reported instead.")
+    return paths, notes
+
+
 def _git_identity() -> tuple:
     """The name and email the person commits with, so work done through Hands is theirs."""
     git = shutil.which("git")
@@ -449,7 +485,7 @@ def _post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
 
 
 def check(invite: Optional[str], folder: str, read_only: bool = False, plain_http: bool = False,
-          network: bool = False, allow_unsandboxed: bool = False) -> list:
+          network: bool = False, allow_unsandboxed: bool = False, protect_git: bool = False) -> list:
     """What `hands up` needs, looked at without pairing or running anything. A list of
     (ok, text): ok is True, False, or None for a line that is only information."""
     found: list = []
@@ -479,6 +515,13 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
         return found
     if network and kind == "bwrap" and not sandbox.scopes_sockets():
         found.append((False, "--network needs enabled Landlock ABI 6 or later; omit --network or upgrade the kernel"))
+    if protect_git:
+        try:
+            paths, _notes = git_lock(real, os.path.join(state, TMP_GIT_LOCKED))
+            found.append((True, "git settings and hooks will be locked (--protect-git)"
+                          + ("".join(f"; also {path}" for path in paths[:8]))))
+        except HandsError as exc:
+            found.append((False, str(exc)))
     url = ""
     saved = home() / "server.json"
     if invite:
@@ -543,7 +586,8 @@ def check(invite: Optional[str], folder: str, read_only: bool = False, plain_htt
 class Device:
     def __init__(self, invite: Optional[str], folder: str, ttl_seconds: int, name: Optional[str] = None,
                  allow_unsandboxed: bool = False, say: Callable[[str], None] = say, read_only: bool = False,
-                 plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False):
+                 plain_http: bool = False, read_home: bool = False, read: Any = (), network: bool = False,
+                 protect_git: bool = False):
         try:
             self._workspace = workspace(folder)
         except ValueError as exc:
@@ -576,15 +620,21 @@ class Device:
         if _within(self.state, self.folder) or _within(self.folder, self.state):
             raise HandsError(f"the shared folder and Hands's own folder ({self.state}) must be separate: "
                              "share another folder, or set TENUO_HANDS_HOME to a folder outside it")
-        self.tmp = os.path.join(self.state, "tmp")
+        # Commands may not change what git runs here (--protect-git). They get a temp folder
+        # that has only ever been used that way, so nothing made earlier is waiting in it.
+        self.protect_git = protect_git
+        if protect_git and not sandbox.locks_git():
+            raise HandsError(sandbox.NO_GIT_LOCK)
+        self.tmp = os.path.join(self.state, TMP_GIT_LOCKED if protect_git else TMP)
         os.makedirs(self.state, mode=0o700, exist_ok=True)
         _own_folder(self.tmp)  # an earlier command may have left a link here
         self._tools = _developer_tools()
         self._identity = _git_identity()
         self._prepare_home(self.tmp)
+        self.git_locked, self._git_links = git_lock(self.folder, self.tmp) if protect_git else (None, [])
         sandbox.wrap(self.folder, self.tmp, ["true"], allow_unsandboxed=allow_unsandboxed,
                      writable=not read_only, home_visible=read_home, tools=self.shown,
-                     network=network, excluded=self.excluded)  # fail before pairing
+                     network=network, excluded=self.excluded, git_locked=self.git_locked)  # fail before pairing
         self._say = say
         self.key = device_key()
         self.name = name or socket.gethostname().split(".")[0]
@@ -926,7 +976,8 @@ class Device:
             argv = sandbox.wrap(folder, tmp, command,
                                 allow_unsandboxed=self.allow_unsandboxed, shared=shared, readable=own,
                                 hidden=[self.state], excluded=self.excluded, writable=not self.read_only,
-                                home_visible=self.read_home, tools=self.shown, network=self.network)
+                                home_visible=self.read_home, tools=self.shown, network=self.network,
+                                git_locked=self.git_locked)
             runner = subprocess.Popen(argv, cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, start_new_session=True, env=self._env(tmp), bufsize=0)
         except (OSError, sandbox.SandboxUnavailable):
@@ -1226,6 +1277,12 @@ class Device:
         if kind == "sandbox-exec":
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
         lines.extend(f"Excluded from commands: {p}" for p in self.excluded)
+        if self.protect_git:
+            lines.append("They cannot change git's settings or hooks, or make a new repository (--protect-git)."
+                         + "".join(f" Also locked: {p}." for p in self.git_locked[:8]))
+            if self._git_links:
+                lines.append("Hooks that are links stay in place, but not what they point to: "
+                             + ", ".join(printable(name.split(" (")[0])[:60] for name in self._git_links[:6]) + ".")
         lines.append("Results go to remote Hermes and may go to its model provider; recognized secrets are redacted locally.")
         return lines
 
@@ -1242,7 +1299,8 @@ class Device:
         args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
                      "--for", f"{self.ttl_seconds}s", "--name", self.name])
         for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
-                              (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox")):
+                              (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox"),
+                              (self.protect_git, "--protect-git")):
             if enabled:
                 args.append(flag)
         for path in self.named:

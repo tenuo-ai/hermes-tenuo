@@ -40,6 +40,9 @@
 - On macOS, commands can no longer open other terminal devices, read user preferences, or
   read other programs' temporary files.
 - The laptop reports git settings a command added or changed that make git run programs.
+- `hands up --protect-git` (macOS) refuses those changes instead: commands cannot change a
+  repository's settings or hooks, move or replace `.git`, or create a repository. The flag is
+  refused on Linux, where bubblewrap cannot hold it; changes are reported there as before.
 - A machine name is one printable line; closing the terminal stops Hands as Ctrl-C does.
 - Exercise both client/server directions against a pinned previous Hands version in CI.
 

@@ -238,9 +238,11 @@ def _hook_mark(fd: int, name: str, budget: List[int]) -> Optional[str]:
         os.close(hook)
 
 
-def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int]) -> None:
+def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int],
+           odd: Optional[List[str]] = None) -> None:
     """Fingerprint the hooks in one folder. Only the names git runs are looked at, so a
-    hooks folder that is the project itself costs no more than any other."""
+    hooks folder that is the project itself costs no more than any other. `odd` collects
+    the hooks that are there but are not plain files."""
     try:
         fd = _open(folder_fd, relative, directory=True)
     except FileNotFoundError:
@@ -265,6 +267,8 @@ def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], bud
                 # notice when it is replaced.
                 found[f"{label}/{name} ({_UNCHECKED})"] = (
                     f"{info.st_mode}:{info.st_size}:{info.st_mtime_ns}:{info.st_ino}")
+                if odd is not None:
+                    odd.append(f"{label}/{name} ({_UNCHECKED})")
     finally:
         os.close(fd)
 
@@ -323,6 +327,11 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
     *also* (the commands' temp folder). A setting that pulls in a file is itself recorded,
     so one that points anywhere else is still seen when it is added or changed.
     """
+    return _scan(folder, also, None)
+
+
+def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> Dict[str, str]:
+    """settings(), and into *read* (when given) where the settings came from."""
     found: Dict[str, str] = {}
     if not hasattr(os, "O_NOFOLLOW"):
         return found
@@ -352,8 +361,12 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
             return _path_label(roots, index, relative)
 
         git_dirs = _git_dirs(roots, kind, found)
+        if read is not None:
+            read.update(kind=kind, git_dirs=list(git_dirs), files=[], missing=[], hooks=[], odd=[])
         # Each of the repository's folders may hold shared and per-worktree settings.
-        queue = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
+        own = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
+        queue = list(own)
+        odd = read["odd"] if read is not None else None
         seen: set = set()
         hook_folders: List[Tuple[int, str]] = []
         while queue:
@@ -369,6 +382,8 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
             except OSError:
                 found[f"{label(index, relative)} ({_UNCHECKED})"] = "unchecked"
                 continue
+            if read is not None and (index, relative) not in own:   # a file the settings include
+                read["files" if text is not None else "missing"].append(os.path.join(roots[index][0], relative))
             if text is None:
                 continue
             for section, sub, key, value in _entries(text):
@@ -389,18 +404,92 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
         for index, gitdir in git_dirs:
             hooks = os.path.join(gitdir, "hooks")
             shown = "hooks" if (index, gitdir) == (0, ".git") else label(index, hooks)
-            _hooks(roots[index][1], hooks, shown, found, budget)
+            _hooks(roots[index][1], hooks, shown, found, budget, odd)
         # Git uses the last hooks path it reads; every one named is looked at, so the
         # order files were read in here cannot hide the one in effect.
         for index, relative in hook_folders[:_HOOK_FOLDERS]:
             where = "hooks in the shared folder" if (index, relative) == (0, ".") else label(index, relative)
-            _hooks(roots[index][1], relative, where, found, budget)
+            _hooks(roots[index][1], relative, where, found, budget, odd)
+        if read is not None:
+            read["hooks"] = [os.path.normpath(os.path.join(roots[index][0], relative)) for index, relative in hook_folders]
         if len(hook_folders) > _HOOK_FOLDERS:
             found[f"more hooks folders ({_UNCHECKED})"] = "unchecked"
         return found
     finally:
         for _root, fd, _label in roots:
             os.close(fd)
+
+
+def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str], List[str]]:
+    """What must not change for git in *folder* to keep running what it runs now.
+
+    Returns (paths, problems, notes). *paths* are the files and hooks folders the
+    repository's settings pull in from places commands can write; its own settings files
+    and hooks folder have fixed names and are not listed. *problems* say why they cannot
+    all be named; with any, the list is not complete. *notes* are hooks that are links or
+    other special files: the name can be held in place, not what it leads to.
+    """
+    read: Dict[str, list] = {}
+    found = _scan(folder, also, read)
+    odd = list(read.get("odd", ()))
+    problems = sorted(name for name in found if name.endswith(f"({_UNCHECKED})") and name not in odd)
+    kind, top = read.get("kind"), os.path.normpath(folder)
+    if kind is not None and not stat.S_ISDIR(kind):
+        problems = [p for p in problems if not p.startswith(".git (")]
+        problems.insert(0, ".git is not a folder (a linked worktree or a submodule checkout)")
+    elif kind is not None and read.get("git_dirs") != [(0, ".git")]:
+        problems.append(".git/commondir sends git to another folder for its settings")
+    problems += [f"{os.path.relpath(path, top)} is named in git settings and does not exist"
+                 for path in read.get("missing", ())]
+    paths: List[str] = []
+    for path in [*read.get("files", ()), *read.get("hooks", ())]:
+        if path in (top, *map(os.path.normpath, also)):
+            problems.append("core.hooksPath names a whole folder commands work in")
+        elif not os.path.lexists(path):
+            problems.append(f"{os.path.relpath(path, top)} is named in git settings and does not exist")
+        elif path not in paths:
+            paths.append(path)
+    return paths, problems, sorted(odd)
+
+
+_CHECKED = 20000   # files looked at for a second name, in one start
+
+
+def other_names(folder: str, paths: Sequence[str] = ()) -> Tuple[List[str], bool]:
+    """Settings files and hooks that have a second name (a hard link), and whether
+    everything could be looked at. A lock that goes by path does not hold for a file that
+    can also be reached by another one. Looks at the repository's own settings and hooks,
+    its submodules' and *paths*; nothing is opened."""
+    git = os.path.join(folder, ".git")
+    found: List[str] = []
+    left = [_CHECKED]
+
+    def look(path: str) -> None:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+            found.append(os.path.relpath(path, folder))
+        if not stat.S_ISDIR(info.st_mode):
+            return
+        for here, dirs, files in os.walk(path):
+            # A submodule's objects are often shared with the repository they were copied from.
+            dirs[:] = [d for d in dirs if d != "objects"]
+            left[0] -= len(files) + 1
+            if left[0] < 0:
+                return
+            for name in files:
+                try:
+                    info = os.lstat(os.path.join(here, name))
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    found.append(os.path.relpath(os.path.join(here, name), folder))
+
+    for path in [*(os.path.join(git, name) for name in ("config", "config.worktree", "hooks", "modules")), *paths]:
+        look(path)
+    return found, left[0] >= 0
 
 
 def changed(before: Dict[str, str], after: Dict[str, str]) -> List[str]:

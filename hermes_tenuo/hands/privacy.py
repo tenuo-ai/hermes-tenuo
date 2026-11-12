@@ -173,6 +173,10 @@ def preview(args, duration: int) -> list[str]:
             else "bubblewrap (not probed)" if sys.platform.startswith("linux") and shutil.which("bwrap") else None)
     if paths and (args.no_sandbox or kind is None):
         raise ValueError("never-share rules require a sandbox; cannot use --no-sandbox")
+    protect_git = getattr(args, "protect_git", False)
+    if protect_git and kind != "sandbox-exec":
+        from .sandbox import NO_GIT_LOCK
+        raise ValueError(NO_GIT_LOCK)
     if args.invite:
         server = wire.Invite.parse(args.invite).url
     else:
@@ -188,6 +192,7 @@ def preview(args, duration: int) -> list[str]:
         f"Read whole home: {'yes' if args.read_home else 'no'}",
         f"Never-share rules: {policy_file()}",
         *[f"Excluded: {p}" for p in paths],
+        *(["Git settings and hooks: locked (--protect-git)"] if protect_git else []),
         ("No sandbox: exclusions and credential protections are unavailable; commands have your full access."
          if unrestricted else "Known credential locations are protected by the sandbox. Excluded names may remain visible."),
         "Recognized secrets in results are redacted locally; detection is best effort.",

@@ -72,9 +72,46 @@ def _ancestors(path: str) -> List[str]:
     return out
 
 
+def _any_case(name: str) -> str:
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else "[.]" if c == "." else c for c in name)
+
+
+def _mac_git_lock(may_change: str, locked: Sequence[str], q) -> List[str]:
+    """Rules that keep commands from changing what git runs (--protect-git).
+
+    Rules go by path, so they hold for a name that does not exist yet and for a folder
+    moved between the places commands can write. Wherever that is: no repository can be
+    made (nothing named `.git`, and no `HEAD` outside one), and in each repository the
+    settings files, the hooks folder, the submodules' folder and the records of other
+    worktrees cannot be changed. `locked` adds the files and folders the shared folder's
+    own settings pull in. Names are matched in any letter case; a name that is not plain
+    ASCII cannot be made directly in a git folder, since the file system may read it as
+    one of these."""
+    git = "/" + _any_case(".git")
+    settings = "|".join(_any_case(name) for name in ("config", "config.worktree", "commondir"))
+    worktree = f"{git}/{_any_case('worktrees')}"
+    odd = "[^/]*[^ -~][^/]*"
+    return [
+        f'(deny file-write* (regex #"/{_any_case("HEAD")}$"))',
+        f'(allow file-write* (require-all (require-any {may_change}) (regex #"{git}/(.*/)?{_any_case("HEAD")}$")))',
+        f'(deny file-write* (regex #"{git}$"))',
+        f'(deny file-write* (regex #"{git}/({settings})$"))',
+        f'(deny file-write* (regex #"{git}/({_any_case("hooks")}|{_any_case("modules")})(/.*)?$"))',
+        f'(deny file-write* (regex #"{worktree}/[^/]+/({settings})$"))',
+        f'(deny file-write-create file-write-unlink (regex #"{worktree}(/[^/]+)?$"))',
+        f'(deny file-write* (regex #"{git}/{odd}$"))',
+        f'(deny file-write* (regex #"{worktree}/[^/]+/{odd}$"))',
+        *[f"(deny file-write* (subpath {q(p)}))" for p in locked],
+        # A folder on the way to one of those cannot be moved aside and made again.
+        *[f"(deny file-write-unlink (literal {q(p)}))"
+          for p in sorted({a for path in locked for a in _ancestors(path)})],
+    ]
+
+
 def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Sequence[str] = (),
                  writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
-                 network: bool = False, excluded: Sequence[str] = ()) -> str:
+                 network: bool = False, excluded: Sequence[str] = (),
+                 git_locked: Optional[Sequence[str]] = None) -> str:
     """Refuse everything, then allow what a build or test run needs. Later rules win."""
     def q(path: str) -> str:
         return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -129,6 +166,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
         ' (literal "/dev/tty") (regex #"^/dev/fd/"))',
+        *(_mac_git_lock(may_change, git_locked, q) if git_locked is not None else []),
         # Terminal devices belong to whoever is typing in them. A command gets pipes, not
         # a terminal, so it has no use for another program's.
         '(deny file-read* file-write* file-ioctl (regex #"^/dev/(tty|pty)[0-9A-Za-z]+$"))',
@@ -277,6 +315,17 @@ def available() -> Optional[str]:
     return _probe[0]
 
 
+NO_GIT_LOCK = ("--protect-git needs the macOS sandbox. Git must be able to make and rename files in a "
+               "repository's .git folder, and bubblewrap can only lock names that already exist there, not "
+               "refuse new ones. Without the flag, Hands reports changed git settings instead.")
+
+
+def locks_git() -> bool:
+    """True where the sandbox can keep commands from changing what git runs: it has to
+    refuse names by pattern, in folders that stay writable. Only sandbox-exec does."""
+    return available() == "sandbox-exec"
+
+
 def _runtime_dir() -> str:
     return os.path.realpath(f"/run/user/{os.getuid()}")
 
@@ -302,7 +351,8 @@ def protected(path: str, hidden: Sequence[str] = ()) -> bool:
 def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool = False,
          shared: bool = False, readable: Sequence[str] = (), hidden: Sequence[str] = (),
          writable: bool = True, home_visible: bool = True, tools: Sequence[str] = (),
-         network: bool = False, excluded: Sequence[str] = ()) -> List[str]:
+         network: bool = False, excluded: Sequence[str] = (),
+         git_locked: Optional[Sequence[str]] = None) -> List[str]:
     """`command` wrapped so it can write only under `folder` and its own temp folder `tmp`.
     `shared` marks the one long-lived sandbox a device runs its commands in. `readable`
     names folders that stay readable even under a hidden path (the Python that runs it);
@@ -310,14 +360,19 @@ def wrap(folder: str, tmp: str, command: List[str], *, allow_unsandboxed: bool =
     `writable` off the command can read `folder` and change only its temp folder. With
     `home_visible` off the home folder cannot be read at all, except `tools`: real folders
     in it that hold toolchains, or that the person chose to show. Without `network` the
-    command has no internet: on Linux a network of its own, on macOS this machine only."""
+    command has no internet: on Linux a network of its own, on macOS this machine only.
+    `git_locked` (a list, possibly empty) keeps the command from changing what git runs:
+    see locks_git()."""
+    if git_locked is not None and not locks_git():
+        raise SandboxUnavailable(NO_GIT_LOCK)
     # A folder to show that is itself protected, or inside something protected, is not
     # shown: putting it back would uncover exactly what is hidden on purpose.
     tools = [path for path in tools if not protected(path, hidden) and not socket_overlap(path)]
     kind = available()
     if kind == "sandbox-exec":
         return ["/usr/bin/sandbox-exec", "-p",
-                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network, excluded), *command]
+                _mac_profile(folder, tmp, readable, hidden, writable, home_visible, tools, network, excluded,
+                             git_locked), *command]
     if kind == "bwrap":
         if network and not scopes_sockets():
             raise SandboxUnavailable("--network needs Landlock ABI 6 or later to isolate host abstract sockets. "
