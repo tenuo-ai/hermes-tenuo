@@ -437,9 +437,10 @@ _WITH_TERMINAL = ("Edit it with a terminal command instead (sed, or a short scri
 
 def _redaction_note(data: Dict[str, Any], tool_name: str, session: Any) -> str:
     if tool_name == "read_file" and "[redacted]" in str(data.get("content") or ""):
-        return (f"'{session.name}' replaced what it recognises as secrets in this file with [redacted] before "
-                "sending it. The file on the machine is unchanged, and the file tools cannot edit it. "
-                + _WITH_TERMINAL)
+        # The marker alone does not prove the machine put it there: the file may say it itself.
+        return (f"'{session.name}' replaces what it recognises as secrets with [redacted] before sending a file. "
+                "If that is where the [redacted] here came from, the file on the machine is unchanged and the "
+                "file tools will refuse to edit it. " + _WITH_TERMINAL)
     if tool_name in ("patch", "write_file") and "Failed to read file" in str(data.get("error") or ""):
         return (f"If this file holds something '{session.name}' recognises as a secret, it is sent with that "
                 "part replaced, and the file tools refuse to write a file they could not read exactly. "

@@ -763,7 +763,8 @@ class _Where:
 def test_a_file_sent_with_secrets_replaced_says_why_it_cannot_be_edited():
     shown = json.dumps({"content": '1|api_key_header = "[redacted]"\n2|x = 1'})
     note = json.loads(chat._marked(shown, "read_file", _Where()))["hands_note"]
-    assert "[redacted]" in note and "file tools cannot edit it" in note and "terminal command" in note
+    assert "[redacted]" in note and "will refuse to edit it" in note and "terminal command" in note
+    assert "If that is where" in note      # a file can contain the marker itself
     assert "hands_note" not in json.loads(chat._marked(json.dumps({"content": "1|x = 1"}), "read_file", _Where()))
     for tool in ("patch", "write_file"):
         failed = json.dumps({"success": False, "error": "Failed to read file: /work/app/auth.py"})
