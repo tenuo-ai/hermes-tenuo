@@ -1,4 +1,4 @@
-"""D0 with a real model on B: plain-language tasks under a guest-room-only grant."""
+"""A real model on B: plain-language tasks under a guest-room-only grant."""
 
 import json
 import subprocess

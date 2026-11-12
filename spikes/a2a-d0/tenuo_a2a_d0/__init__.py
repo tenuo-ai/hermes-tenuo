@@ -1,4 +1,4 @@
-"""D0 spike on a live bot: protected A2A ingress as a standalone plugin.
+"""Protected A2A ingress as a standalone plugin, for testing against an existing Hermes instance.
 
 Leaves the installed hermes_tenuo untouched. Inbound A2A turns run only on the grant verified at
 ingress, enforced with this agent's own key over the full chain; every other turn returns None."""

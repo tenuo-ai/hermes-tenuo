@@ -1,4 +1,4 @@
-"""Protected A2A ingress (D0): A delegates a bounded grant that B holds and enforces itself."""
+"""Protected A2A ingress: A delegates a bounded grant that B holds and enforces itself."""
 
 from __future__ import annotations
 
@@ -392,7 +392,7 @@ def test_malformed_ingress_config_fails_closed(monkeypatch, block):
     (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
     assert dispatch(_event("anything"))["action"] == "skip"
     assert dispatch(_event("hello", platform="telegram")) is None
-# --- D1: revocation and state that survives a restart ------------------------------
+# --- revocation and state that survives a restart ------------------------------
 
 
 def _srl(keys, ids, version=1, signer=None):

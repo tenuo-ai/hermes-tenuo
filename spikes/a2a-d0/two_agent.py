@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import yaml
 
 LAB = Path.home() / "a2a-d0"
 A_HOME, B_HOME = LAB / "a-home", LAB / "b-home"
-IMG = "hermes-share-dogfood:m1-e3ed032"
+IMG = os.environ["IMG"]  # any image with Hermes and tenuo installed
 PY = "/opt/hermes/.venv/bin/python"
 
 

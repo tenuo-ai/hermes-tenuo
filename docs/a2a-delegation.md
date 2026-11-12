@@ -5,7 +5,7 @@ a Tenuo grant that the sender gave it: named tools, limited argument values, a s
 receiver checks the grant before the task reaches its model and again at every tool call, with its own
 key. Its other tools and permissions do not apply to the task.
 
-Preview: the design, evidence and limits are in [the D0 spike report](remote-delegation-spike.md).
+Preview: the design, evidence and limits are in [the design report](a2a-delegation-design.md).
 
 ## How it works
 

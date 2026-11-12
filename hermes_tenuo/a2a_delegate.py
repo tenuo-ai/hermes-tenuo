@@ -17,7 +17,7 @@ Peers come only from the operator's config, never from the model::
       max_ttl_seconds: 900
       reply_timeout_seconds: 300
 
-Rules for each tool argument use the Hermes Guests vocabulary::
+Rules for each tool argument use this vocabulary::
 
     {"equals": v} · {"one_of": [..]} · {"range": [lo, hi]} · {"pattern": "glob*"} ·
     {"regex": "^...$"} · {"any": true}

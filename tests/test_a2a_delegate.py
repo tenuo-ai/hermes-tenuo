@@ -1,4 +1,4 @@
-"""Scoped A2A sender (D2): an agent delegates only what its own session holds."""
+"""Scoped A2A sender: an agent delegates only what its own session holds."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def _token(monkeypatch):
 # --- rules ---------------------------------------------------------------------
 
 
-def test_rules_use_the_guests_vocabulary():
+def test_rules_use_the_shared_vocabulary():
     spec = grant_spec({"t": {"a": {"equals": 1}, "b": {"one_of": [1, 2]}, "c": {"range": [0, 5]},
                              "d": {"pattern": "x*"}, "e": {"regex": "^x$"}, "f": {"any": True},
                              "*": {"any": True}}})
@@ -272,7 +272,7 @@ def test_the_tool_is_offered_when_peers_and_enforcement_are_configured(monkeypat
     assert ctx.tools["tenuo_delegate"].check() is True
 
 
-# --- meeting the MCP track: a delegated turn proves its grant to a Tenuo MCP verifier ---
+# --- MCP verifiers: a delegated turn proves its grant to a Tenuo MCP verifier ---
 
 
 def test_a_delegated_turn_presents_its_grant_to_an_mcp_verifier(k, w_a, home):
