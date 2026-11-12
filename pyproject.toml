@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=2.3,<3", "PyYAML>=6"]
+mcp = ["mcp>=2.3,<3", "PyYAML>=6,<7"]
 cloud = [
     # tenuo-cloud publishes builds for Python 3.9-3.13 only. Hermes locks plugin
     # dependencies for Python 3.14 with every extra included, so an extra that
