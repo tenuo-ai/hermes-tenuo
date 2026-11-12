@@ -1183,6 +1183,17 @@ class HermesGuard:
             self._ingress_roots[session_id] = list(ingress.trusted_roots)
         return None
 
+    def delegation_authority(self, session_id: str) -> Tuple[List[Any], Optional[Any]]:
+        """This session's own authority for delegating onward: (chain root-first ending with its
+        warrant, its signing key), or ([], None) when it holds none. A delegated A2A turn delegates
+        from its verified grant, so a further hop stays within it."""
+        if self._bind_ingress_grant(session_id) is not None:
+            return [], None
+        warrant, key = self._resolve_warrant(session_id)
+        if warrant is None or key is None or _marker_reason(warrant) is not None:
+            return [], None
+        return self._chain_for(session_id) + [warrant], key
+
     def _denial_before_enforcement(self, warrant: Any, signing_key: Optional[Any]) -> Optional[str]:
         """Why a call is blocked before the warrant is checked, or None if it is not.
 

@@ -196,6 +196,10 @@ class PluginGuard:
     def __init__(self, guard: HermesGuard):
         self._guard = guard
 
+    def delegation_authority(self, session_id: str):
+        """This session's chain and key for ``tenuo_delegate`` (hermes_tenuo.a2a_delegate)."""
+        return self._guard.delegation_authority(session_id)
+
     def attach_ingress(self, ingress: Any) -> None:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress
