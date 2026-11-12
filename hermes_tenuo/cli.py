@@ -13,6 +13,7 @@ Each --allow takes a tool name with optional argument constraints:
     --allow web_search                      any arguments
     --allow read_file:path=/data            path must stay under /data
     --allow 'write_file:path=/tmp/out,content=*'  path under /tmp/out, any content
+    --allow 'browser_navigate:url=domain:docs.python.org|*.acme.com'  URL hosts
     --allow 'web_search:query=acme*'        glob pattern
     --allow 'git:action=status|diff|log'    one of several values
     --allow checkout:amount=0..4000         number from 0 to 4000, inclusive
@@ -28,6 +29,12 @@ Quote a spec that contains ``*``, ``?`` or ``|`` so the shell passes it through.
 
 A range only matches numbers. A tool that sends the amount as a string
 (``"40.00"``) is denied, so declare that argument as a number.
+
+``domain:host|*.host`` uses Tenuo's stateless UrlSafe check: http or https,
+host on the list, and no literal private, loopback or cloud-metadata address.
+It is stateless and does not resolve DNS. It checks one URL argument
+(``browser_navigate``'s ``url``); a list such as ``web_extract``'s ``urls``
+does not match and is denied.
 """
 
 from __future__ import annotations
@@ -161,6 +168,16 @@ def _parse_constraint_value(value: str) -> Any:
     """Map one ``arg=value`` string to a tenuo constraint (see module docstring)."""
     from tenuo import Exact, OneOf, Pattern, Range, Subpath, Wildcard
     v = value.strip()
+    if v.startswith("domain:"):
+        from tenuo import UrlSafe
+        from tenuo.exceptions import ValidationError
+
+        domains = [d.strip() for d in v[len("domain:"):].split("|")]
+        try:
+            return UrlSafe(allow_domains=domains)
+        except ValidationError as exc:
+            raise ValueError(str(exc)) from exc
+
     if v == "*":
         return Wildcard()
     m = _RANGE.fullmatch(v)
@@ -1020,6 +1037,7 @@ def main() -> None:
                         help="Allow a tool, optionally constraining its arguments (repeatable). "
                              "Examples: --allow web_search  --allow read_file:path=/data  "
                              "--allow 'git:action=status|diff'. Values: '*' any, 'a|b' choice, "
+                             "'MIN..MAX' range, 'domain:host|*.host' URL hosts, "
                              "glob with '*'/'?', '/path' prefix, otherwise exact match. "
                              "Once a tool has any constraint, a call may send only the arguments "
                              "named here: an unnamed argument is denied, and ARG=* requires the "

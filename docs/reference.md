@@ -155,11 +155,17 @@ contains `*`, `?` or `|`, or the shell will interpret it.
 | `tool` | any arguments | `--allow web_search` |
 | `tool:arg=/path` | argument must be that path or under it (traversal-safe) | `--allow read_file:path=/data` |
 | `tool:arg=glob*` | argument must match the glob | `--allow 'web_search:query=acme*'` |
+| `tool:arg=domain:host\|*.host` | one http(s) URL on those hosts; literal private and metadata addresses denied | `--allow 'browser_navigate:url=domain:docs.python.org'` |
 | `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow 'git:action=status\|diff\|log'` |
 | `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
 | `tool:arg=value` | argument must match exactly | `--allow deploy:env=staging` |
 | `tool:arg=*` | that argument must be present and may be anything | `--allow 'write_file:path=/tmp/out,content=*'` |
 | `tool:a=..,b=..` | several constraints on one tool | `--allow 'deploy:env=staging,region=eu\|us'` |
+
+`domain:` checks one URL, not a list such as `web_extract.urls`. Tenuo core's
+`UrlSafe` validates the hosts and authorizes the URL. It does not resolve DNS; the
+fetcher must validate and pin resolved addresses to prevent DNS rebinding. Quote
+specifications containing `|` or `*` so the shell passes them unchanged.
 
 A range only matches numbers: an amount sent as the string `"40.00"` is
 denied, so declare such arguments as numbers in the tool schema. Give both
