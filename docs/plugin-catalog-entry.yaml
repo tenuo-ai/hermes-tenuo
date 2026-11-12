@@ -36,6 +36,7 @@ capabilities:
     - on_session_end
     - subagent_start
     - pre_llm_call
+    - pre_gateway_dispatch
   provides_middleware: [tool_execution]
   requires_env:
     - TENUO_WARRANT

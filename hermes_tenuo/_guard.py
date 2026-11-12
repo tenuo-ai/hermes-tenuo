@@ -19,6 +19,25 @@ class WarrantLoadError(ValueError):
     """A warrant is configured but cannot be decoded — never degrade to passthrough."""
 
 
+def build_ingress_only_guard(ctx: Any, ingress: Any) -> "PluginGuard":
+    """A guard for an install with no tool-call warrant but protected A2A ingress: inbound A2A
+    turns run only on their verified grant; every other turn passes through as before."""
+    from hermes_tenuo._config import get_audit_log_path
+
+    audit_callback = None
+    audit_path = get_audit_log_path(ctx)
+    if audit_path is not None:
+        from hermes_tenuo.audit import LocalAuditLog
+        audit_callback = LocalAuditLog(audit_path)
+    guard = HermesGuard(
+        audit_callback=audit_callback,
+        # Binding an A2A grant must not make unrelated local sessions warrant-required.
+        require_session_warrant=False,
+        ingress=ingress,
+    )
+    return PluginGuard(guard)
+
+
 def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     """Read config and build the guard. Returns None if not configured.
 
@@ -176,6 +195,10 @@ class PluginGuard:
 
     def __init__(self, guard: HermesGuard):
         self._guard = guard
+
+    def attach_ingress(self, ingress: Any) -> None:
+        """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
+        self._guard._ingress = ingress
 
     @property
     def has_warrant(self) -> bool:
