@@ -9,7 +9,7 @@ Hands routes terminal and file tools to one shared folder on a paired macOS or L
 
 ## Connect
 
-Have the user run `/hands setup` in the Hermes conversation they want to connect. When the listener is not configured, that command explains the active profile's server settings. The Hands address is a separate listener, not the Desktop gateway address. Use an existing HTTPS reverse proxy or private network such as Tailscale; do not recommend public plain HTTP or opening a laptop port.
+Have the user run `/hands setup` in the Hermes conversation they want to connect. In a chat other people can read (a group, channel or thread), setup asks for a direct message instead: the user pairs there, then types `/hands on <name>` in the shared chat. In a shared chat only the person who paired the machine can use it or switch the conversation; other senders' terminal and file calls are refused, not run on the server. When the listener is not configured, that command explains the active profile's server settings. The Hands address is a separate listener, not the Desktop gateway address. Use an existing HTTPS reverse proxy or private network such as Tailscale; do not recommend public plain HTTP or opening a laptop port.
 
 The user chooses `/hands setup read`, `edit`, or `online`. Read prevents project changes; edit permits changes/tests with internet off; online also permits internet and network services. The generated one-hour command is run **on the laptop, in the intended folder**, not through the server's terminal tool. The local command is the user's permission grant. It runs preflight before pairing. Do not broaden it automatically when a task fails.
 

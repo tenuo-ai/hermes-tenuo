@@ -93,7 +93,7 @@ The demo prints a new temporary folder and a `cd` command. Run that command loca
 
 ## 4. Choose permissions and connect
 
-In the originating Hermes chat, run `/hands setup edit`. Copy its generated command into the laptop terminal in the practice folder. It shares this folder for one hour and runs automatic preflight before pairing.
+In the originating Hermes chat, run `/hands setup edit`. On Telegram, Discord, Slack or another chat platform, do this in a direct message with the bot: the pairing line is not printed in a chat other people can read. To use the machine in a group afterwards, type `/hands on <name>` there. Copy its generated command into the laptop terminal in the practice folder. It shares this folder for one hour and runs automatic preflight before pairing.
 
 The other choices are `/hands setup read` (no project writes) and `/hands setup online` (writes plus internet/network access). Offline edit is sufficient for this demo. Online access is not restricted to package downloads.
 
