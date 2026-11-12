@@ -58,10 +58,13 @@ def _settled(result: dict, reply: Optional[tuple], rebuilt: Any = None) -> dict:
         return result
     if reply is None:
         return {"output": _UNKNOWN, "returncode": 125}
+    if rebuilt is not None:
+        fresh = rebuilt()
+        if reply[1] == 124:
+            fresh["hermes_timed_out"] = True
+        return fresh
     if reply[1] == 124:
         return result
-    if rebuilt is not None:
-        return rebuilt()
     result = {k: v for k, v in result.items() if k != "hermes_timed_out"}
     result["returncode"] = reply[1]
     result["output"] = _TIMED_OUT.sub("", str(result.get("output") or ""))
@@ -191,8 +194,11 @@ class HandsEnvironment(BaseEnvironment):
         collected = kwargs.get("output")
         rebuilt = None
         if reply is not None and collected is not None:
-            try:  # a byte-order mark is dropped on the way in, hence the one
-                partial = collected.total_chars < len(str(reply[0])) - 1
+            try:
+                # Hermes decodes stdout with utf-8-sig: only an actual leading BOM
+                # disappears. A one-character answer still needs to be collected.
+                expected = str(reply[0]).removeprefix("\ufeff")
+                partial = collected.total_chars < len(expected)
             except Exception:  # noqa: BLE001
                 partial = False
             if partial:  # the answer is known, its text has not all been collected

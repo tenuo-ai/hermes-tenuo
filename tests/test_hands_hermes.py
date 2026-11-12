@@ -132,7 +132,7 @@ SCRIPT = textwrap.dedent('''
     def lose_result(url, body, timeout):
         if url.endswith("/result"):
             raise ConnectionError("test: result connection dropped")
-        return real_post(url, body, timeout)
+        return real_post(url, body, timeout=timeout)
     try:
         device_module._post = lose_result
         tool("unknown", "terminal", {"command": "echo once >> once.txt", "timeout": 3})
@@ -417,6 +417,7 @@ class _SlowToDeliver(str):
 
 @pytest.mark.parametrize("text, code", [
     ("done, with output\n", 0),
+    ("device timeout diagnostics\n", 124),
     ("hands: no result came back: check before running it again\n", 125),
 ])
 def test_an_answer_known_before_its_text_arrives_keeps_its_text(monkeypatch, tmp_path, text, code):
@@ -424,7 +425,8 @@ def test_an_answer_known_before_its_text_arrives_keeps_its_text(monkeypatch, tmp
     env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(text), code)))
     result = env.execute("echo hi", timeout=1)
     assert result["returncode"] == code and result["output"] == text, result
-    assert "hermes_timed_out" not in result and "Command timed out" not in result["output"]
+    assert bool(result.get("hermes_timed_out")) == (code == 124)
+    assert "Command timed out" not in result["output"]
 
 
 def test_partly_collected_output_is_replaced_by_the_whole_answer(monkeypatch):
@@ -495,3 +497,20 @@ def test_first_session_with_real_gateway_identity(tmp_path):
     _on_the_device(out, project, server_dir)
     assert out["after"]["text"].strip() == os.path.realpath(server_dir), out["after"]
     assert out["fresh_after"]["text"].strip() == os.path.realpath(server_dir), out["fresh_after"]
+
+
+@pytest.mark.parametrize("whole, captured", [("x", ""), ("xy", "x"), ("\ufeffxy", "x")])
+@pytest.mark.parametrize("code", [0, 124, 125])
+def test_one_missing_character_rebuilds_confirmed_reply(monkeypatch, whole, captured, code):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    from tools.environments.base_output import _BoundedOutputCollector
+    collected = _BoundedOutputCollector(50_000)
+    collected.append(captured)
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": captured + "\n[Command timed out after 3s]", "returncode": 124,
+        "hermes_timed_out": True})
+    proc = SimpleNamespace(_hands_reply={"result": (whole, code)})
+    result = object.__new__(HandsEnvironment)._wait_for_process(proc, timeout=3, output=collected)
+    assert result["output"] == whole and result["returncode"] == code
+    assert bool(result.get("hermes_timed_out")) == (code == 124)
