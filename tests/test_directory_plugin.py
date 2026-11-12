@@ -56,7 +56,7 @@ def test_root_init_registers_hooks_and_skill(monkeypatch, tmp_path):
 
 def test_plugin_yaml_declares_tenuo_dependency():
     text = (ROOT / "plugin.yaml").read_text()
-    assert "python_dependencies" in text and "tenuo>=0.3.6,<0.4" in text
+    assert "python_dependencies" in text and "tenuo>=0.3.7,<0.4" in text
 
 
 def _fake_registry(monkeypatch, enforcement: bool, denied: bool):
