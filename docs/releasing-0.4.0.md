@@ -154,10 +154,15 @@ D1–D3 work in #82 is outside this release.
 - The current catalog admission rules require an exact SHA and a reviewed
   upstream pin-update PR; the old two-week-age note has been removed.
 
-Required gates still pending at this preparation commit:
+- The final GCP-to-Mac session passed with the candidate wheel installed in fresh
+  environments on both endpoints, through real Hermes 0.23.1 (`95fc3e66`) on
+  `hands-test-1` in `tenuo-dev`. Pairing, verify, read/write, terminal and file
+  exclusions, on-device redaction, and switching back to server tools passed.
+  The invoice demo went from two failing tests to two passing tests after a code
+  edit; the test file remained unchanged. The device stopped after the session.
+  This used scripted tool dispatch, without transferring model credentials.
 
-- Repeat the two-host GCP-to-Mac Hands smoke with this candidate wheel on both
-  endpoints. GCP reauthentication is currently required.
+Required gates still pending at this preparation commit:
 - Verify final merged-commit CI and artifact jobs, then publish the reviewed tag.
 - Verify a fresh PyPI installation and Hands session before submitting the
   catalog repin. The catalog draft deliberately retains its placeholder until
