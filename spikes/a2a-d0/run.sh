@@ -1,7 +1,7 @@
 #!/bin/sh
-# D0 lab: Hermes B (receiver) + scripted model on an isolated network. Touches nothing else.
+# A2A delegation lab: Hermes B (receiver) + scripted model on an isolated network. Touches nothing else.
 set -e
-IMG=${IMG:-hermes-share-dogfood:m1-e3ed032}  # any image with Hermes and tenuo installed
+: "${IMG:?set IMG to any image with Hermes and tenuo installed}"
 LAB=${LAB:-$HOME/a2a-d0}
 NET=a2a-d0
 PY=/opt/hermes/.venv/bin/python

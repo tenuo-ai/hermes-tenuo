@@ -1,6 +1,6 @@
 """Protected A2A ingress: a remote Hermes delegates a bounded task that this Hermes enforces itself.
 
-D0 feasibility spike (see docs/remote-delegation-spike.md). Nothing here is enabled unless
+Design and evidence: docs/a2a-delegation-design.md. Nothing here is enabled unless
 ``a2a_ingress.enabled`` is set in the plugin config.
 
 The sender A holds a warrant W_A. To delegate, A grants a narrower child W_B whose holder is the
