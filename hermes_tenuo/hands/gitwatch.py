@@ -69,6 +69,7 @@ _HOOK_NAMES = (
 )
 _UNCHECKED = "cannot be checked"
 _LONGEST = 4096       # characters in a path: no system here opens a longer one
+_DEEPEST = 256        # folders in a path that is followed: each costs more the deeper it is
 _PATHS = 64           # paths that settings name (included files, hooks folders) followed in one look
 
 
@@ -215,6 +216,11 @@ def _shown(path: str) -> str:
     return path if len(path) <= 240 else path[:120] + " ... " + path[-80:]
 
 
+def _walkable(path: str) -> bool:
+    """Whether *path* is short and shallow enough to be worth following."""
+    return len(path) <= _LONGEST and path.count(os.sep) <= _DEEPEST
+
+
 def _spelled(value: str, base: str) -> str:
     """A path from a settings file in folder *base*, as git hands it to the system: `..`
     is left for the system to take from where the path really is. Empty if it cannot be told."""
@@ -238,19 +244,22 @@ def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optio
     path = os.path.expanduser(value) if value.startswith("~") else value
     if not path or path.startswith("~"):
         return None
-    if len(path if os.path.isabs(path) else os.path.join(base, path)) > _LONGEST:
-        return None     # nothing can open it, and it is not worth the time to walk
+    if not _walkable(path):
+        return None     # too long for anything to open, or too deep to be worth the time
 
     def writable(folder: str) -> bool:
         # By what the folder is, not how it is spelled: _locate also knows another letter case.
         return _locate(roots, folder, 0, "") is not None
 
     here = os.sep if os.path.isabs(path) else os.path.realpath(base)
-    parts, hops, went_in = collections.deque(path.split(os.sep)), 0, False
+    parts, hops, went_in, steps = collections.deque(path.split(os.sep)), 0, False, 0
     while parts:
         part = parts.popleft()
         if part in ("", "."):
             continue
+        steps += 1
+        if steps > _DEEPEST:        # with what the links on the way added
+            return None
         if part == "..":
             if went_in:
                 return None
@@ -271,7 +280,9 @@ def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optio
             return None
         if stat.S_ISLNK(mode):
             hops += 1
-            if hops > 40 or writable(here):
+            # went_in holds however deep the walk now is; a folder is only recognised
+            # by another spelling within some levels of the top of a writable one.
+            if hops > 40 or went_in or writable(here):
                 return None
             target = os.readlink(step)
             parts.extendleft(reversed(target.split(os.sep)))
@@ -578,7 +589,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
                     if read is None:
-                        target = _locate(roots, full, 0, "") if full and len(full) <= _LONGEST else None
+                        target = _locate(roots, full, 0, "") if full and _walkable(value) else None
                         if target is not None and target[1] != ".":
                             queue.append(target)
                         continue
@@ -595,7 +606,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     if read is None:
-                        target = _locate(roots, value, 0, "") if len(value) <= _LONGEST else None
+                        target = _locate(roots, value, 0, "") if _walkable(value) else None
                         if target is not None and target not in hook_folders:
                             hook_folders.append(target)   # "." is the folder itself
                         continue

@@ -391,7 +391,7 @@ def test_a_settings_path_too_long_to_open_is_not_walked(folder, tmp_path, step, 
 
 
 @pytest.mark.parametrize("lead, outcome", [("/nowhere-{}/", "more paths named in settings (cannot be checked)"),
-                                           ("../missing-{}/", "is named in git settings and does not exist")])
+                                           ("../missing-{}/", "x.cfg (cannot be checked)")])
 def test_many_long_paths_that_lead_nowhere_do_not_hold_up_the_look(folder, tmp_path, lead, outcome):
     with open(folder / ".git" / "config", "a") as f:
         f.write("[include]\n" + "".join("\tpath = " + lead.format(n) + "a/" * 1900 + "x.cfg\n" for n in range(200)))
@@ -413,14 +413,36 @@ def test_a_path_to_nothing_outside_the_folder_is_left_alone(folder, tmp_path):
     assert _sources(folder, tmp_path) == ([], [], [])
 
 
-def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path):
+def test_a_settings_path_is_followed_only_so_deep(folder, tmp_path):
+    """Looking at a file costs more the deeper it is, and commands can make folders very deep."""
+    deep = "/".join(["d"] * 200)
+    if len(str(folder / deep / deep)) + 40 > os.pathconf(str(folder), "PC_PATH_MAX"):
+        deep = "/".join(["d"] * 150)                    # as deep as both fit here
+    (folder / deep).mkdir(parents=True)
+    (folder / deep / "near.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = ../{deep}/near.cfg\n")
+    assert _sources(folder, tmp_path) == ([str(folder / deep / "near.cfg")], [], [])
+    (folder / deep / deep).mkdir(parents=True)
+    (folder / deep / deep / "far.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = ../{deep}/{deep}/far.cfg\n[core]\n\thooksPath = {deep}/{deep}\n")
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert paths == [str(folder / deep / "near.cfg")] and len(problems) == 2, (paths, problems)
+    assert all(text.endswith("(cannot be checked)") for text in problems), problems
+    assert {"include.path", "core.hookspath"} <= set(gitwatch.settings(str(folder)))
+
+
+@pytest.mark.parametrize("deep", ["", "/".join(["d"] * 70)])
+def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path, deep):
     shouted = folder.parent / folder.name.upper()
     if not shouted.exists() or not os.path.samefile(shouted, folder):
         pytest.skip("needs a file system that ignores letter case")
-    (folder / "inside.cfg").write_text("")
-    (folder / "bridge.cfg").symlink_to(folder / "inside.cfg")
+    (folder / deep).mkdir(parents=True, exist_ok=True)       # however far down the link is
+    (folder / deep / "inside.cfg").write_text("")
+    (folder / deep / "bridge.cfg").symlink_to(folder / deep / "inside.cfg")
     with open(folder / ".git" / "config", "a") as f:
-        f.write(f"[include]\n\tpath = {shouted / 'bridge.cfg'}\n")
+        f.write(f"[include]\n\tpath = {shouted / deep / 'bridge.cfg'}\n")
     paths, problems, _notes = _sources(folder, tmp_path)
     assert any("(cannot be checked)" in text for text in problems), (paths, problems)
 
