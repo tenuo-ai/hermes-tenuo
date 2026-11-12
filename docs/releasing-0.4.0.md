@@ -78,10 +78,10 @@ catalog repinning remain separate actions even if every automated check passes.
 
 ### Candidate code validation — 2026-11-11
 
-Run against the default branch at `248f7be`, the code this release tags, with
+Run against the default branch at `d21e998`, the code this release tags, with
 tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
 
-- Unit and integration tests: 727 passed on macOS (Python 3.12) and 722 on
+- Unit and integration tests: 729 passed on macOS (Python 3.12) and 724 on
   Ubuntu 24.04 with bubblewrap; the Hermes-enabled tests passed under the
   installed Hermes.
 - Role-based access through a real Hermes agent loop with a scripted model and
