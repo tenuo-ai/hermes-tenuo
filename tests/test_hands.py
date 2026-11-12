@@ -1358,6 +1358,41 @@ def test_only_its_owner_switches_a_shared_conversation(hub, folder, monkeypatch)
     assert "on the server again" in chat.command("off") and "group" not in chat._wanted
 
 
+def test_two_peoples_switches_do_not_cross(hub, folder, monkeypatch):
+    """One /hands on or /hands off, with its clean-up, is over before the next one looks."""
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    Device(hub.invite("telegram:alice"), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    who = threading.local()
+    monkeypatch.setattr(chat, "_owner", lambda: getattr(who, "name", "telegram:bob"))
+    said, crossed = {}, []
+
+    def alice_switches_on():
+        who.name = "telegram:alice"
+        said["alice"] = chat.command("on laptop")
+
+    def meanwhile(real):
+        def hooked(*args):
+            if getattr(who, "name", "telegram:bob") == "telegram:bob":
+                if "thread" not in said:
+                    said["thread"] = threading.Thread(target=alice_switches_on)
+                    said["thread"].start()
+                said["thread"].join(0.3)
+                crossed.append("alice" in said)   # hers went through while his was under way
+            return real(*args)
+        return hooked
+
+    monkeypatch.setattr(chat, "_remember", meanwhile(chat._remember))        # inside look-and-change
+    monkeypatch.setattr(chat, "_release", meanwhile(lambda conversation: None))   # his clean-up
+    assert "on the server again" in chat.command("off")      # bob: the conversation used the server
+    said["thread"].join(10)
+    assert crossed and not any(crossed), crossed
+    assert "now runs commands on: laptop" in said["alice"] and chat._wanted.get("group") == "laptop"
+    assert "Only they can switch it" in chat.command("off") and chat._wanted.get("group") == "laptop"
+    chat._wanted.pop("group", None)
+
+
 def test_a_machine_that_is_nobodys_can_be_switched_by_anyone(hub, folder, monkeypatch):
     monkeypatch.setattr(chat, "get_hub", lambda: hub)
     monkeypatch.setattr(chat, "can_switch", True)

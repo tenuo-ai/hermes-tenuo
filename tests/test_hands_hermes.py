@@ -175,6 +175,20 @@ SCRIPT = textwrap.dedent('''
     out["stranger_backend"] = str(shell.execute("echo x > stranger2.txt"))
     chat._owner = lambda: "telegram:alice"
     tool("owner", "terminal", {"command": "echo mine"})
+    if not whole_profile:
+        # A task that already has a sandbox of its own on the server: its commands are not
+        # moved to the machine, and tools that only ever run on the server are not held up.
+        import tools.terminal_tool as terminal_tool
+        slot = terminal_tool._qualify_task_key("boxed")
+        terminal_tool._active_environments[slot] = object()
+        try:
+            for name in ("terminal", "web_search"):
+                went = []
+                said = str(run_tool_execution_middleware(
+                    name, {}, lambda args: went.append(args) or "ran", task_id="boxed"))
+                out["boxed_" + name] = [bool(went), said]
+        finally:
+            terminal_tool._active_environments.pop(slot, None)
     if whole_profile:
         # Each sender has exactly one usable default even with both machines online.
         second, second_thread = up(base / "device-project-2", name="bobs-machine",
@@ -288,6 +302,9 @@ def _on_the_device(out, project, server_dir):
     # Refused where the call starts: it does not run on the server instead.
     assert out["stranger_on_server"] == []
     assert not out["stranger_reached_the_tool"], out["stranger_chain"]
+    if "boxed_terminal" in out:
+        assert out["boxed_terminal"][0] is False and "own sandbox" in out["boxed_terminal"][1], out["boxed_terminal"]
+        assert out["boxed_web_search"] == [True, "ran"], out["boxed_web_search"]
     for key in ("stranger", "stranger_write"):  # a profile on `hands` has no machine of theirs to name
         said = out[key]["text"]
         assert "belongs to the person who paired it" in said or "no device is up" in said, out[key]
