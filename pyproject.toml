@@ -26,17 +26,17 @@ classifiers = [
 dependencies = [
     "path-jail>=0.3,<0.4",
     "python-dotenv>=1,<2",
-    "tenuo>=0.3.6,<0.4",
+    "tenuo>=0.3.7,<0.4",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=2.3,<3", "PyYAML>=6"]
+mcp = ["mcp>=2.3,<3", "PyYAML>=6,<7"]
 cloud = [
     # tenuo-cloud publishes builds for Python 3.9-3.13 only. Hermes locks plugin
     # dependencies for Python 3.14 with every extra included, so an extra that
     # cannot install there fails the whole plugin install. Drop the marker once
     # tenuo-cloud ships a 3.14 build.
-    "tenuo[cloud]>=0.3.6,<0.4; python_version < '3.14'",
+    "tenuo[cloud]>=0.3.7,<0.4; python_version < '3.14'",
 ]
 dev = [
     "pytest>=7.0",

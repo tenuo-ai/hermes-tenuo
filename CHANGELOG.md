@@ -4,16 +4,20 @@
 
 ### Hands
 
-- `hands up --protect-git` (macOS): commands cannot change a repository's settings or
-  hooks, move or replace `.git`, or create one, instead of having such changes reported.
-  Works for a repository, a linked worktree or a submodule checkout. Hands does not start
-  with the flag if the folder holds something the lock would not hold. The flag is refused
-  on Linux, where bubblewrap cannot hold it; changes are reported there as before.
+- `hands up --protect-git`: the look through the folder before locking also covers a
+  settings file or hooks folder whose path passes through a link inside the shared folder,
+  or goes into a folder there and back up with `..`. A path that only goes up from its
+  settings file (`../extra.cfg`) is followed as before.
+- Git settings that name more than 64 files or hooks folders, or a path longer than 4096
+  characters or deeper than 256 folders, are reported as ones that cannot be checked
+  instead of being followed.
 
-## 0.4.0 - 2026-11-11
+## 0.4.0 - 2026-11-12
 
 ### Upgrading from 0.3
 
+- Upgrade Tenuo to 0.3.7. This release requires its stricter delegation checks
+  for wildcard tools, issuer bounds and clearance.
 - Keep one installation. With hermes-tenuo installed both by pip in the Hermes
   environment and as a directory plugin, 0.4.0 blocks every tool call until one
   is removed. `hermes-tenuo doctor` says which two it found.
@@ -45,7 +49,32 @@
   scheduled turns match roles by platform; local (CLI/desktop) turns are not
   governed. A `delegate_task` child gets a grant narrowed from its parent's role.
 
+### MCP wrapping
+
+- Wrap existing stdio and Streamable HTTP MCP servers with receiver-side warrant,
+  proof-of-possession, replay and signed-revocation checks; discover qualified tools,
+  preview scoped calls and inspect a correlated local audit.
+- Keep source configuration and credentials in place. Pin resolved connection settings
+  so referenced environment variables cannot silently retarget an existing workspace.
+  Install the optional `mcp` extra; ordinary clients need Tenuo metadata to call tools.
+
+### Experimental A2A ingress
+
+- Include an opt-in feasibility spike for receiver-held grants over Hermes A2A.
+  Preserve narrowed child authority and reject malformed enabled configuration.
+  This is not a production remote-delegation workflow: one task per context, in-memory
+  state, hook-order constraints and no revocation list. See the spike documentation.
+
 ### Hands
+
+- `hands up --protect-git` (macOS): commands cannot change a repository's settings or
+  hooks, move or replace `.git`, or create one, instead of having such changes reported.
+  Works for a repository, a linked worktree or a submodule checkout. Hands does not start
+  with the flag if the folder holds something the lock would not hold. The flag is refused
+  on Linux, where bubblewrap cannot hold it; changes are reported there as before.
+
+- Preserve ordinary exit 124 and rebuild late replies only once across Hermes deadlines,
+  with complete output recoverable in its own spill file.
 
 - Add Hands: a conversation with a remote Hermes can run its terminal and file
   tools in one folder on your own machine, for a set time. `/hands invite`,

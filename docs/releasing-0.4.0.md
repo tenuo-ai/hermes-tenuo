@@ -66,7 +66,7 @@ commands. This substitution belongs in release testing, not user onboarding.
    agents, authorization, warrants, hands, sandbox, remote-workspace.
 5. Replace the all-zero SHA in `plugin-catalog-entry.yaml` with the release commit
    and validate against current upstream catalog requirements. Submit upstream
-   only after its review/age requirements and all first-session checks pass.
+   only after its current review requirements and all first-session checks pass.
 6. After the catalog update lands, switch default install examples back to the
    catalog command and verify it with the published client. Do not assume a
    source release alone updates the reviewed catalog pin.
@@ -78,11 +78,11 @@ catalog repinning remain separate actions even if every automated check passes.
 
 ### Candidate code validation — 2026-11-11
 
-Run against the default branch at `928b087` with the lost-result change applied,
-the code this release tags, with
+Run against the default branch at `a0b0bfa` with the follow-up to the lost-result
+change applied, an earlier candidate baseline, with
 tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
 
-- Unit and integration tests: 732 passed on macOS (Python 3.12) and 727 on
+- Unit and integration tests: 786 passed on macOS (Python 3.12) and 776 on
   Ubuntu 24.04 with bubblewrap; the Hermes-enabled tests passed under the
   installed Hermes.
 - Role-based access through a real Hermes agent loop with a scripted model and
@@ -97,7 +97,11 @@ tenuo 0.3.6 and Hermes 0.23.1 (checkout `95fc3e6`).
   multi-person use, and the sandbox boundary checks.
 - Lost and late results through Hermes's real terminal path: an answer just
   after Hermes's deadline, a result the hub gave up on, no answer at all, a
-  laptop killed mid-command, and a timeout the laptop confirmed.
+  laptop killed mid-command, a timeout the laptop confirmed, and a command that
+  exits 124 by itself.
+- A Hands session started with `--protect-git` on macOS: commits, branches,
+  diffs and stashes worked; changing git settings, writing a hook and renaming
+  the repository folder were refused.
 - Wheel and source archive built; a clean install reported 0.4.0, and `doctor`
   and `status` were correct for a static warrant and for an `access:`-only home.
 
@@ -128,3 +132,39 @@ This Desktop check used a loopback backend. The earlier GCP-to-Mac integration
 run separately validated the two-host execution path. No messaging-app UI test
 is claimed. CI, artifact checks and final PyPI smoke checks are recorded with the
 release PR and publication run.
+
+
+### Final candidate preparation — 2026-11-12
+
+The candidate includes the Hands timeout follow-up (#79), Git protection (#78),
+opt-in A2A feasibility work (#80), and MCP wrapping (#81). A2A remains experimental;
+D1–D3 work in #82 is outside this release.
+
+- Real Hermes 0.23.1 (`95fc3e668f`), with its complete runtime dependencies:
+  36 Hands dispatch and timeout/output regressions passed on the merged candidate
+  code (`55dd9f5`). Copilot has no remaining issues on #79.
+- Built a source archive and then a wheel; artifact contents, version agreement,
+  bundled skills and Twine checks passed.
+- Installed the wheel with its MCP extra in a fresh environment outside the
+  checkout. Version, CLI discovery and MCP gateway imports passed.
+- The installed wheel passed local pairing, file read/write, secret redaction,
+  sandbox write exclusions, macOS Git protection and disconnect checks.
+- Both release workflows now test the MCP extra from the installed wheel. The
+  publishing workflow also runs the MCP regression suite.
+- The current catalog admission rules require an exact SHA and a reviewed
+  upstream pin-update PR; the old two-week-age note has been removed.
+
+- The final GCP-to-Mac session passed with the candidate wheel installed in fresh
+  environments on both endpoints, through real Hermes 0.23.1 (`95fc3e66`) on
+  `hands-test-1` in `tenuo-dev`. Pairing, verify, read/write, terminal and file
+  exclusions, on-device redaction, and switching back to server tools passed.
+  The invoice demo went from two failing tests to two passing tests after a code
+  edit; the test file remained unchanged. The device stopped after the session.
+  This used scripted tool dispatch, without transferring model credentials.
+
+Required gates still pending at this preparation commit:
+- Verify final merged-commit CI and artifact jobs with the Tenuo 0.3.7 security
+  floor, then publish the reviewed tag.
+- Verify a fresh PyPI installation and Hands session before submitting the
+  catalog repin. The catalog draft deliberately retains its placeholder until
+  the final release commit is known.

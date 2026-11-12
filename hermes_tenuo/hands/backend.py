@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import contextvars
 import re
+import secrets
 import threading
 from typing import Any, Dict, Optional
 
@@ -37,10 +38,31 @@ def _from_answer(reply: tuple, bounded_capture: bool, proc: Any = None) -> dict:
     try:
         from tools.environments.base_output import _finalize_wait_result, _new_output_collector
         collector = _new_output_collector(proc, bool(bounded_capture))
+        # Hermes names a spill file by the second and the process, and a collector that
+        # finds its file taken keeps nothing. This one gets a name of its own, so the
+        # whole answer stays recoverable beside whatever Hermes collected first.
+        spill = getattr(collector, "_spill_path", None)
+        if spill is not None:
+            collector._spill_path = spill.with_name(f"{spill.stem}-answer-{secrets.token_hex(4)}{spill.suffix}")
         collector.append(text)
         return _finalize_wait_result(collector, collector.render(), code)
     except Exception:  # noqa: BLE001 - a Hermes without these helpers
         return {"output": text, "returncode": code}
+
+
+def _once(call: Optional[Dict[str, Any]], build: Any) -> dict:
+    """The result built from the device's answer, made at most once for a call.
+
+    Hermes's two deadlines can both come to rebuild it: the outer one answers first,
+    and the wait it gave up on finishes a moment later. Both get the same result, so
+    one answer never leaves two spill files.
+    """
+    if call is None:
+        return build()
+    with call["lock"]:
+        if "rebuilt" not in call:
+            call["rebuilt"] = build()
+        return call["rebuilt"]
 
 
 def _settled(result: dict, reply: Optional[tuple], rebuilt: Any = None) -> dict:
@@ -54,7 +76,9 @@ def _settled(result: dict, reply: Optional[tuple], rebuilt: Any = None) -> dict:
     The answer can be known before Hermes has collected its text. *rebuilt* then makes
     the result from the answer itself; without it the collected output is kept.
     """
-    if result.get("returncode") != 124:
+    # Only a result Hermes itself timed out is in question. A command that exits 124 on
+    # its own, before any deadline, is an ordinary result and is left exactly as it is.
+    if result.get("returncode") != 124 or not result.get("hermes_timed_out"):
         return result
     if reply is None:
         return {"output": _UNKNOWN, "returncode": 125}
@@ -125,7 +149,7 @@ class HandsEnvironment(BaseEnvironment):
         # device; anything outside the granted folder starts in the folder.
         if not self._inside(cwd):
             cwd = self.cwd if self._inside(self.cwd) else self._folder
-        box: Dict[str, Any] = {}
+        box: Dict[str, Any] = {"lock": threading.Lock()}
         token = _CALL.set(box)
         try:
             result = super().execute(command, cwd, **kwargs)
@@ -134,11 +158,13 @@ class HandsEnvironment(BaseEnvironment):
         # Hermes has a second, outer deadline that answers for the wait when the wait
         # itself has not returned. What it collected by then may be none or part of the
         # device's answer, so a confirmed answer is rebuilt from the answer itself.
-        if "reply" in box and isinstance(result, dict):
+        # A result the wait already settled is final: settling it again would rebuild it.
+        if "reply" in box and isinstance(result, dict) and result is not box.get("settled"):
             reply = box["reply"].get("result")
 
             def rebuilt() -> dict:
-                fresh = _from_answer(reply, kwargs.get("bounded_capture", False), box.get("proc"))
+                fresh = _once(box, lambda: _from_answer(
+                    reply, kwargs.get("bounded_capture", False), box.get("proc")))
                 self._update_cwd(fresh)   # as Hermes does for every result
                 if result.get("environment_recreated"):
                     fresh["environment_recreated"] = True
@@ -192,6 +218,7 @@ class HandsEnvironment(BaseEnvironment):
         # can arrive in that time. The answer itself, never text a command printed, decides.
         reply = proc._hands_reply.get("result")
         collected = kwargs.get("output")
+        call = _CALL.get()
         rebuilt = None
         if reply is not None and collected is not None:
             try:
@@ -203,8 +230,11 @@ class HandsEnvironment(BaseEnvironment):
                 partial = False
             if partial:  # the answer is known, its text has not all been collected
                 def rebuilt() -> dict:
-                    return _from_answer(reply, kwargs.get("bounded_capture", False), proc)
-        return _settled(result, reply, rebuilt)
+                    return _once(call, lambda: _from_answer(reply, kwargs.get("bounded_capture", False), proc))
+        settled = _settled(result, reply, rebuilt)
+        if call is not None:
+            call["settled"] = settled
+        return settled
 
     def _plain(self, script: str) -> str:
         """The command as Hermes was asked to run it. Hermes wraps each command in session
