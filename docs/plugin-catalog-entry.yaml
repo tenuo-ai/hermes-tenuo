@@ -28,7 +28,8 @@ requires_hermes: ">=0.20"
 docs_url: https://github.com/tenuo-ai/hermes-tenuo#readme
 platforms: []
 capabilities:
-  provides_tools: []
+  provides_tools:
+    - tenuo_delegate
   provides_hooks:
     - pre_tool_call
     - post_tool_call

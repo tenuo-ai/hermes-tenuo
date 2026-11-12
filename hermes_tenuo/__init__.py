@@ -113,6 +113,9 @@ def register(ctx: Any) -> None:
     from hermes_tenuo._guard import WarrantLoadError, build_ingress_only_guard, build_plugin_guard
 
     ingress = _register_a2a_ingress(ctx)
+    enforcing: dict = {"guard": None}  # the enforcing guard, once there is one
+    from hermes_tenuo import a2a_delegate
+    a2a_delegate.register(ctx, lambda: enforcing["guard"])
     try:
         guard = build_plugin_guard(ctx)
     except WarrantLoadError as exc:
@@ -124,7 +127,8 @@ def register(ctx: Any) -> None:
         from hermes_tenuo._config import get_require_warrant
         from hermes_tenuo.kanban import current_task_id
         if not get_require_warrant(ctx) and not current_task_id():
-            _register_guard_hooks(ctx, build_ingress_only_guard(ctx, ingress))
+            enforcing["guard"] = build_ingress_only_guard(ctx, ingress)
+            _register_guard_hooks(ctx, enforcing["guard"])
             logger.info("hermes-tenuo: protected A2A ingress active; other turns are not enforced")
             return
     if guard is None:
@@ -157,6 +161,7 @@ def register(ctx: Any) -> None:
 
     if ingress is not None:
         guard.attach_ingress(ingress)
+    enforcing["guard"] = guard
     _register_guard_hooks(ctx, guard)
     logger.info("hermes-tenuo: active (enforcing)")
 
