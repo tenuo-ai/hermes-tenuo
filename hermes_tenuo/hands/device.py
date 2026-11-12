@@ -402,10 +402,9 @@ def git_lock(folder: str, tmp: str) -> tuple:
         raise HandsError(sandbox.NO_GIT_LOCK)
     paths, problems, notes = gitwatch.sources(folder, also=(tmp,))
     if not problems:
-        linked, complete = gitwatch.other_names(folder, paths)
-        problems = [f"{name} has a second name (a hard link)" for name in linked]
+        problems, complete = gitwatch.loose(folder, (tmp,), paths)
         if not complete:
-            problems.append("there are too many files under .git/hooks and .git/modules to look at")
+            problems.append("the folder is too large to look through for repositories")
     try:
         paths = [] if problems else [_true_path(path) for path in paths]
     except OSError as e:
@@ -1278,7 +1277,7 @@ class Device:
             lines.append("They cannot open apps, control other apps, or touch other programs' processes.")
         lines.extend(f"Excluded from commands: {p}" for p in self.excluded)
         if self.protect_git:
-            lines.append("They cannot change git's settings or hooks, or make a new repository (--protect-git)."
+            lines.append("They cannot change git's settings or hooks, or make or move a .git (--protect-git)."
                          + "".join(f" Also locked: {p}." for p in self.git_locked[:8]))
             if self._git_links:
                 lines.append("Hooks that are links stay in place, but not what they point to: "

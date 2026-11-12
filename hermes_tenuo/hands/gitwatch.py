@@ -143,17 +143,77 @@ def _read(folder_fd: int, relative: str) -> Optional[str]:
     except FileNotFoundError:
         return None
     try:
-        data = b""
-        while len(data) <= _LIMIT:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            data += chunk
-        if len(data) > _LIMIT:
-            raise OSError("too large")
-        return data.decode("utf-8", "replace")
+        return _text(fd)
     finally:
         os.close(fd)
+
+
+def _text(fd: int) -> str:
+    data = b""
+    while len(data) <= _LIMIT:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        data += chunk
+    if len(data) > _LIMIT:
+        raise OSError("too large")
+    return data.decode("utf-8", "replace")
+
+
+def _read_outside(path: str) -> Optional[str]:
+    """The text of a regular file commands cannot write; None if it is absent. Raises OSError otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        return _text(fd)
+    finally:
+        os.close(fd)
+
+
+def _full(value: str, base: str) -> str:
+    """A path from a settings file in folder *base*, as git reads it; empty if it cannot be told."""
+    path = os.path.expanduser(value) if value.startswith("~") else value
+    if not path or path.startswith("~"):
+        return ""
+    return os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+
+
+def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
+    """Whether a file outside the writable folders is reached through a link inside one."""
+    for _ in range(40):
+        if not os.path.islink(path):
+            return False
+        path = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path)))
+        if _locate(roots, path, 0, "") is not None:
+            return True
+    return True
+
+
+def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str]:
+    """The settings files git reads for a folder whose `.git` is a pointer to a git
+    folder commands cannot write: a linked worktree, or a submodule's checkout."""
+    try:
+        text = _read(roots[0][1], ".git") or ""
+    except OSError:
+        text = ""
+    pointer = re.match(r"gitdir:[ \t]*(.+)", text.strip())
+    gitdir = _full(pointer.group(1).strip(), roots[0][0]) if pointer else ""
+    if not gitdir or not os.path.isdir(gitdir):
+        problems.append(".git does not point to a git folder")
+        return []
+    try:
+        common = _read_outside(os.path.join(gitdir, "commondir"))
+    except OSError:
+        common = ""
+    shared = gitdir if common is None else _full(common.strip(), gitdir)
+    if not shared or _locate(roots, shared, 0, "") is not None:
+        problems.append(".git leads to settings in a folder that cannot be locked")
+        return []
+    return [os.path.join(shared, "config"), os.path.join(gitdir, "config.worktree")]
 
 
 def _logical_lines(text: str) -> List[str]:
@@ -331,7 +391,10 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
 
 
 def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> Dict[str, str]:
-    """settings(), and into *read* (when given) where the settings came from."""
+    """settings(), and into *read* (when given) where the settings came from. Only then are
+    settings files outside the folders read too: the ones a `.git` pointer leads to, and
+    the ones an included file names. Commands cannot change those, but what they pull in
+    can be somewhere commands can."""
     found: Dict[str, str] = {}
     if not hasattr(os, "O_NOFOLLOW"):
         return found
@@ -362,11 +425,14 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
 
         git_dirs = _git_dirs(roots, kind, found)
         if read is not None:
-            read.update(kind=kind, git_dirs=list(git_dirs), files=[], missing=[], hooks=[], odd=[])
+            read.update(kind=kind, git_dirs=list(git_dirs), files=[], missing=[], hooks=[], odd=[], pointer=[])
         # Each of the repository's folders may hold shared and per-worktree settings.
         own = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
-        queue = list(own)
+        queue: list = list(own)
         odd = read["odd"] if read is not None else None
+        if read is not None and stat.S_ISREG(kind) and not git_dirs:
+            queue += [(None, path) for path in _pointed(roots, read["pointer"])]
+        most = _FILES + len(queue)
         seen: set = set()
         hook_folders: List[Tuple[int, str]] = []
         while queue:
@@ -374,15 +440,18 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
             if (index, relative) in seen:
                 continue
             seen.add((index, relative))
-            if len(seen) > _FILES + 2 * len(git_dirs):
+            if len(seen) > most:
                 found[f"more included settings files ({_UNCHECKED})"] = "unchecked"
                 break
             try:
-                text = _read(roots[index][1], relative)
+                if index is None and _through_a_root(roots, relative):
+                    raise OSError("reached through a link commands can change")
+                text = _read(roots[index][1], relative) if index is not None else _read_outside(relative)
             except OSError:
-                found[f"{label(index, relative)} ({_UNCHECKED})"] = "unchecked"
+                found[f"{relative if index is None else label(index, relative)} ({_UNCHECKED})"] = "unchecked"
                 continue
-            if read is not None and (index, relative) not in own:   # a file the settings include
+            here = os.path.dirname(relative) if index is None else os.path.join(roots[index][0], os.path.dirname(relative))
+            if read is not None and index is not None and (index, relative) not in own:   # a file the settings include
                 read["files" if text is not None else "missing"].append(os.path.join(roots[index][0], relative))
             if text is None:
                 continue
@@ -390,9 +459,12 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                 name = ".".join(part for part in (section, sub, key) if part)
                 if (section, key) in (("include", "path"), ("includeif", "path")):
                     found[name] = _digest(found.get(name, "") + value)
-                    target = _locate(roots, value, index, os.path.dirname(relative))
+                    full = _full(value, here)
+                    target = _locate(roots, full, 0, "") if full else None
                     if target is not None and target[1] != ".":
                         queue.append(target)
+                    elif target is None and full and read is not None:
+                        queue.append((None, full))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     target = _locate(roots, value, 0, "")
@@ -428,16 +500,21 @@ def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str]
     and hooks folder have fixed names and are not listed. *problems* say why they cannot
     all be named; with any, the list is not complete. *notes* are hooks that are links or
     other special files: the name can be held in place, not what it leads to.
+
+    *folder* may be a repository, or a linked worktree or submodule checkout whose git
+    folder is somewhere commands cannot write.
     """
     read: Dict[str, list] = {}
     found = _scan(folder, also, read)
     odd = list(read.get("odd", ()))
     problems = sorted(name for name in found if name.endswith(f"({_UNCHECKED})") and name not in odd)
     kind, top = read.get("kind"), os.path.normpath(folder)
-    if kind is not None and not stat.S_ISDIR(kind):
-        problems = [p for p in problems if not p.startswith(".git (")]
-        problems.insert(0, ".git is not a folder (a linked worktree or a submodule checkout)")
-    elif kind is not None and read.get("git_dirs") != [(0, ".git")]:
+    if kind is not None and stat.S_ISREG(kind):
+        problems = [p for p in problems if p != f".git ({_UNCHECKED})"] + read.get("pointer", [])
+        if read.get("git_dirs"):
+            problems.insert(0, ".git points to a git folder that commands can write")
+    elif kind is not None and stat.S_ISDIR(kind) and (
+            read.get("git_dirs") != [(0, ".git")] or os.path.lexists(os.path.join(top, ".git", "commondir"))):
         problems.append(".git/commondir sends git to another folder for its settings")
     problems += [f"{os.path.relpath(path, top)} is named in git settings and does not exist"
                  for path in read.get("missing", ())]
@@ -452,44 +529,126 @@ def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str]
     return paths, problems, sorted(odd)
 
 
-_CHECKED = 20000   # files looked at for a second name, in one start
+_WALKED = 150000    # folders looked into for repositories, in one start
+_CHECKED = 200000   # files looked at inside git folders, in one start
+# Object files are shared between repositories on purpose, and git runs none of them.
+_OBJECT = re.compile(r"/objects/(?:[0-9a-f]{2}/[0-9a-f]{38,62}|pack/[^/]+\.(?:pack|idx|rev|bitmap|mtimes))$")
 
 
-def other_names(folder: str, paths: Sequence[str] = ()) -> Tuple[List[str], bool]:
-    """Settings files and hooks that have a second name (a hard link), and whether
-    everything could be looked at. A lock that goes by path does not hold for a file that
-    can also be reached by another one. Looks at the repository's own settings and hooks,
-    its submodules' and *paths*; nothing is opened."""
-    git = os.path.join(folder, ".git")
-    found: List[str] = []
+def _held(path: str) -> bool:
+    """Whether *path* is a git folder the --protect-git rules hold by its name: a `.git`,
+    one of its worktree records, or something under its `modules`."""
+    parts = path.split(os.sep)
+    for at, part in enumerate(parts):
+        rest = [p.lower() for p in parts[at + 1:]]
+        if part.lower() == ".git" and (not rest or rest[0] == "modules" or (len(rest) == 2 and rest[0] == "worktrees")):
+            return True
+    return False
+
+
+def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> Tuple[List[str], bool]:
+    """What the path rules of --protect-git would not hold in *folder* as it is now, and
+    whether everything could be looked at.
+
+    The rules go by path. They do not hold for a settings file or hook that has a second
+    name (a hard link), is a link, or belongs to a repository whose `.git` sends git to a
+    folder with another name. Looks at the folder's own repository, every repository in
+    a subfolder, their submodules and worktree records, and *paths* (what the settings
+    pull in). Reads only pointer files; follows no link.
+    """
+    top = os.path.normpath(folder)
+    reach = [os.path.realpath(p) for p in (folder, *also)]
+    problems: List[str] = []
     left = [_CHECKED]
 
-    def look(path: str) -> None:
+    def name(path: str) -> str:
+        return os.path.relpath(path, top)
+
+    def held(target: str) -> bool:
+        real = os.path.realpath(target)
+        return _held(real) or not any(real == r or real.startswith(r + os.sep) for r in reach)
+
+    def plain(path: str, links: bool = False) -> Optional[os.stat_result]:
         try:
             info = os.lstat(path)
         except OSError:
-            return
-        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-            found.append(os.path.relpath(path, folder))
-        if not stat.S_ISDIR(info.st_mode):
-            return
-        for here, dirs, files in os.walk(path):
-            # A submodule's objects are often shared with the repository they were copied from.
-            dirs[:] = [d for d in dirs if d != "objects"]
-            left[0] -= len(files) + 1
-            if left[0] < 0:
-                return
-            for name in files:
-                try:
-                    info = os.lstat(os.path.join(here, name))
-                except OSError:
-                    continue
-                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
-                    found.append(os.path.relpath(os.path.join(here, name), folder))
+            return None
+        if stat.S_ISLNK(info.st_mode) and not links:
+            problems.append(f"{name(path)} is a link")
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not _OBJECT.search(path):
+            problems.append(f"{name(path)} has a second name (a hard link)")
+        return info
 
-    for path in [*(os.path.join(git, name) for name in ("config", "config.worktree", "hooks", "modules")), *paths]:
-        look(path)
-    return found, left[0] >= 0
+    def tree(path: str, links: bool) -> None:
+        info = plain(path)
+        stack = [path] if info is not None and stat.S_ISDIR(info.st_mode) else []
+        while stack and left[0] >= 0:
+            here = stack.pop()
+            try:
+                entries = [entry.path for entry in os.scandir(here)]
+            except OSError:
+                problems.append(f"{name(here)} cannot be read")
+                continue
+            left[0] -= len(entries) + 1
+            for entry in entries:
+                info = plain(entry, links)
+                if info is not None and stat.S_ISDIR(info.st_mode):
+                    stack.append(entry)
+
+    def pointer(path: str, base: str, prefix: str = "") -> Optional[str]:
+        """Where a pointer file sends git, or None if it is absent or not one."""
+        try:
+            text = (_read_outside(path) or "").strip()
+        except OSError:
+            return None
+        if prefix and not text.startswith(prefix):
+            return None
+        return _full(text[len(prefix):].strip(), base) or None
+
+    def repository(meta: str, nested: bool) -> None:
+        for settings in ("config", "config.worktree", "commondir"):
+            plain(os.path.join(meta, settings))
+        if nested and os.path.lexists(os.path.join(meta, "commondir")):
+            problems.append(f"{name(meta)}/commondir sends git to another folder for its settings")
+        tree(os.path.join(meta, "hooks"), links=True)   # a hook may be a link; the folder may not
+        tree(os.path.join(meta, "modules"), links=False)
+        records = os.path.join(meta, "worktrees")
+        tree(records, links=False)
+        try:
+            names = os.listdir(records)
+        except OSError:
+            names = []
+        for record in names:
+            target = pointer(os.path.join(records, record, "commondir"), os.path.join(records, record))
+            if target is not None and not held(target):
+                problems.append(f"{name(os.path.join(records, record))}/commondir sends git to a folder the lock does not hold")
+
+    walked, stack = _WALKED, [top]
+    while stack and walked >= 0:
+        here = stack.pop()
+        walked -= 1
+        try:
+            entries = list(os.scandir(here))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.lower() != ".git":
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                continue
+            nested = here != top
+            info = plain(entry.path, links=not nested)   # at the top, sources() has the say
+            if info is None:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                repository(entry.path, nested)
+            elif stat.S_ISREG(info.st_mode) and nested:
+                target = pointer(entry.path, here, "gitdir:")
+                if target is not None and not held(target):
+                    problems.append(f"{name(entry.path)} points to a git folder the lock does not hold")
+    for path in paths:
+        tree(path, links=True)
+    return sorted(set(problems)), left[0] >= 0 and walked >= 0
 
 
 def changed(before: Dict[str, str], after: Dict[str, str]) -> List[str]:

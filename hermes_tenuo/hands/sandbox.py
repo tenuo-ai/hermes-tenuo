@@ -76,24 +76,21 @@ def _any_case(name: str) -> str:
     return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else "[.]" if c == "." else c for c in name)
 
 
-def _mac_git_lock(may_change: str, locked: Sequence[str], q) -> List[str]:
+def _mac_git_lock(locked: Sequence[str], q) -> List[str]:
     """Rules that keep commands from changing what git runs (--protect-git).
 
     Rules go by path, so they hold for a name that does not exist yet and for a folder
-    moved between the places commands can write. Wherever that is: no repository can be
-    made (nothing named `.git`, and no `HEAD` outside one), and in each repository the
-    settings files, the hooks folder, the submodules' folder and the records of other
-    worktrees cannot be changed. `locked` adds the files and folders the shared folder's
-    own settings pull in. Names are matched in any letter case; a name that is not plain
-    ASCII cannot be made directly in a git folder, since the file system may read it as
-    one of these."""
+    moved between the places commands can write. Wherever that is: nothing named `.git`
+    can be made, moved or replaced, and in each one the settings files, the hooks folder,
+    the submodules' folder and the records of other worktrees cannot be changed. `locked`
+    adds the files and folders the shared folder's own settings pull in. Names are
+    matched in any letter case; a name that is not plain ASCII cannot be made directly
+    in a git folder, since the file system may read it as one of these."""
     git = "/" + _any_case(".git")
     settings = "|".join(_any_case(name) for name in ("config", "config.worktree", "commondir"))
     worktree = f"{git}/{_any_case('worktrees')}"
     odd = "[^/]*[^ -~][^/]*"
     return [
-        f'(deny file-write* (regex #"/{_any_case("HEAD")}$"))',
-        f'(allow file-write* (require-all (require-any {may_change}) (regex #"{git}/(.*/)?{_any_case("HEAD")}$")))',
         f'(deny file-write* (regex #"{git}$"))',
         f'(deny file-write* (regex #"{git}/({settings})$"))',
         f'(deny file-write* (regex #"{git}/({_any_case("hooks")}|{_any_case("modules")})(/.*)?$"))',
@@ -166,7 +163,7 @@ def _mac_profile(folder: str, tmp: str, readable: Sequence[str] = (), hidden: Se
         f"(allow file-write* {may_change}"
         ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")'
         ' (literal "/dev/tty") (regex #"^/dev/fd/"))',
-        *(_mac_git_lock(may_change, git_locked, q) if git_locked is not None else []),
+        *(_mac_git_lock(git_locked, q) if git_locked is not None else []),
         # Terminal devices belong to whoever is typing in them. A command gets pipes, not
         # a terminal, so it has no use for another program's.
         '(deny file-read* file-write* file-ioctl (regex #"^/dev/(tty|pty)[0-9A-Za-z]+$"))',

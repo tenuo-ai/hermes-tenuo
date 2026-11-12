@@ -103,9 +103,8 @@ _PLANTS = [
     "mkdir -p sub/.git",
     "mkdir -p sub/.GIT",
     "mkdir -p sub && printf 'gitdir: %s\\n' \"$TMPDIR\" > sub/.git",
-    "git init -q --bare bare.git",
-    "mkdir -p plain/objects plain/refs && printf 'ref: refs/heads/main\n' > plain/HEAD",
-    "mkdir -p plain && ln -s ../.git/HEAD plain/head",
+    # a git folder prepared under another name, then renamed into place
+    "mkdir -p staged/objects staged/refs home && cp .git/HEAD .git/config staged/ && mv staged home/.git",
     "git init -q \"$TMPDIR/scratch\"",
     "git clone -q . \"$TMPDIR/copy\"",
     "mkdir -p \"$TMPDIR/x/dotgit\" && mv \"$TMPDIR/x/dotgit\" \"$TMPDIR/x/.git\"",
@@ -142,7 +141,6 @@ def test_commands_cannot_change_what_git_runs(hub, folder):
     assert os.listdir(folder / "tools" / "hooks") == []
     assert not any(".git" in map(str.lower, dirs + files) for _here, dirs, files in os.walk(folder)
                    if _here != str(folder) and not _here.startswith((str(folder / "nested"), str(folder / "other"))))
-    assert not (folder / "bare.git" / "HEAD").exists() and not os.path.lexists(folder / "plain" / "HEAD")
     assert sorted(os.listdir(folder / ".git" / "worktrees" / "other")) == record
     moved = [os.path.join(here, "config") for here, dirs, _files in os.walk(temp) if here.endswith(os.sep + ".git")]
     assert [open(path, "rb").read() for path in moved] in ([], [nested])   # only the one that was moved there, unchanged
@@ -203,17 +201,13 @@ def test_without_the_flag_nothing_changes(hub, folder):
 def test_the_sandbox_profile_gains_git_rules_only_when_asked(tmp_path):
     folder, temp = str(tmp_path / "project"), str(tmp_path / "temp")
     plain = sandbox._mac_profile(folder, temp)
-    assert "[gG][iI][tT]" not in plain and "[hH][eE][aA][dD]" not in plain
+    assert "[gG][iI][tT]" not in plain
     assert sandbox._mac_profile(folder, temp, git_locked=None) == plain
     locked = sandbox._mac_profile(folder, temp, git_locked=[f"{folder}/tools/hooks"])
     added = [line for line in locked.splitlines() if line not in plain.splitlines()]
-    assert all(line.startswith("(deny file-write") or "[hH][eE][aA][dD]" in line for line in added)
+    assert added and all(line.startswith("(deny file-write") for line in added)   # it only ever takes away
     assert f'(deny file-write* (subpath "{folder}/tools/hooks"))' in added
     assert f'(deny file-write-unlink (literal "{folder}/tools"))' in added
-    # A look-only session may write its temp folder, and that is all the one exception names.
-    look_only = sandbox._mac_profile(folder, temp, writable=False, git_locked=[])
-    allowed = [line for line in look_only.splitlines() if line.startswith("(allow file-write*") and "[hH][eE][aA][dD]" in line]
-    assert len(allowed) == 1 and f'(subpath "{temp}")' in allowed[0] and f'(subpath "{folder}")' not in allowed[0]
 
 
 # --- where it cannot hold -----------------------------------------------------------
@@ -272,13 +266,17 @@ def test_sources_names_what_the_settings_pull_in(folder, tmp_path):
     (lambda f: (f / ".git" / "config").open("a").write("[core]\n\thooksPath = .\n"), "whole folder"),
     (lambda f: (f / ".git" / "commondir").write_text("../elsewhere\n") and (f / "elsewhere").mkdir(), "commondir"),
     (lambda f: (f / ".git" / "commondir").write_text("/var/empty\n"), "commondir"),
+    (lambda f: (f / ".git" / "commondir").write_text(".\n"), "commondir"),          # even one that changes nothing yet
     (lambda f: (os.rename(f / ".git" / "config", f / "real.cfg"),
                 (f / ".git" / "config").symlink_to("../real.cfg")), "cannot be checked"),
     (lambda f: ((f / "hooks-here").mkdir(), (f / ".hooks").symlink_to("hooks-here"),
                 (f / ".git" / "config").open("a").write("[core]\n\thooksPath = .hooks\n")), "cannot be checked"),
-    (lambda f: (os.rename(f / ".git", f / "meta"), (f / ".git").write_text("gitdir: meta\n")), "not a folder"),
-    (lambda f: (os.rename(f / ".git", f.parent / "outside"),
-                (f / ".git").write_text(f"gitdir: {f.parent / 'outside'}\n")), "not a folder"),
+    (lambda f: (os.rename(f / ".git", f / "meta"), (f / ".git").write_text("gitdir: meta\n")), "commands can write"),
+    (lambda f: (os.rename(f / ".git", f.parent / "temp"),                            # the commands' temp folder
+                (f / ".git").write_text(f"gitdir: {f.parent / 'temp'}\n")), "commands can write"),
+    (lambda f: (os.rename(f / ".git", f / "x"), (f / ".git").write_text("not a pointer\n")), "does not point"),
+    (lambda f: (os.rename(f / ".git", f / "x"), (f / ".git").write_text("gitdir: /var/empty/none\n")), "does not point"),
+    (lambda f: (os.rename(f / ".git", f / "x"), (f / ".git").symlink_to("x")), "cannot be checked"),
 ])
 def test_sources_says_when_it_cannot_name_everything(folder, tmp_path, arrange, problem):
     arrange(folder)
@@ -286,19 +284,128 @@ def test_sources_says_when_it_cannot_name_everything(folder, tmp_path, arrange, 
     assert any(problem in text for text in problems), problems
 
 
-def test_a_settings_file_with_a_second_name_is_found(folder):
-    assert gitwatch.other_names(str(folder)) == ([], True)
-    os.link(folder / ".git" / "config", folder / "alias")
+# --- a shared folder whose git folder is elsewhere ----------------------------------
+
+@pytest.fixture
+def worktree(folder, tmp_path):
+    """A linked worktree of the repository in `folder`. Its settings are in the main
+    repository, outside what is shared, and pull in a file and a hooks folder inside it."""
+    (tmp_path / "shared.cfg").write_text(f"[include]\n\tpath = {tmp_path / 'tree' / 'extra.cfg'}\n")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[core]\n\thooksPath = .hooks\n[include]\n\tpath = {tmp_path / 'shared.cfg'}\n")
+    tree = tmp_path / "tree"
+    git(folder, "worktree", "add", "-q", str(tree), "-b", "tree")
+    (tree / ".hooks").mkdir()
+    (tree / "extra.cfg").write_text("[user]\n\tname = t\n")
+    return tree
+
+
+def test_sources_follows_a_worktrees_settings_out_of_the_folder_and_back(worktree, tmp_path):
+    paths, problems, notes = _sources(worktree, tmp_path)
+    assert sorted(paths) == [str(worktree / ".hooks"), str(worktree / "extra.cfg")] and not problems and not notes
+    assert gitwatch.loose(str(worktree), (), paths) == ([], True)
+    # Without the flag nothing outside the shared folder is read.
+    assert "core.hookspath" not in gitwatch.settings(str(worktree))
+    os.link(worktree / ".git", worktree / "alias")
+    assert gitwatch.loose(str(worktree)) == ([".git has a second name (a hard link)"], True)
+
+
+def test_sources_reads_what_an_included_file_outside_the_folder_pulls_in(folder, tmp_path):
+    (tmp_path / "outside.cfg").write_text("[core]\n\thooksPath = .hooks\n")
     (folder / ".hooks").mkdir()
-    (folder / ".hooks" / "pre-commit").write_text("#!/bin/sh\n")
-    os.link(folder / ".hooks" / "pre-commit", folder / "another")
-    (folder / ".git" / "modules" / "lib" / "objects").mkdir(parents=True)
-    (folder / ".git" / "modules" / "lib" / "config").write_text("")
-    os.link(folder / ".git" / "modules" / "lib" / "config", folder / "third")
-    (folder / ".git" / "modules" / "lib" / "objects" / "pack").write_text("")
-    os.link(folder / ".git" / "modules" / "lib" / "objects" / "pack", folder / "shared-object")
-    found, complete = gitwatch.other_names(str(folder), [str(folder / ".hooks")])
-    assert sorted(found) == [".git/config", ".git/modules/lib/config", ".hooks/pre-commit"] and complete
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {tmp_path / 'outside.cfg'}\n")
+    assert _sources(folder, tmp_path) == ([str(folder / ".hooks")], [], [])
+    os.unlink(tmp_path / "outside.cfg")
+    (folder / "inside.cfg").write_text("")
+    (tmp_path / "outside.cfg").symlink_to(folder / "link")           # reached through a link commands can change
+    (folder / "link").symlink_to(tmp_path / "elsewhere.cfg")
+    (tmp_path / "elsewhere.cfg").write_text("")
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("outside.cfg (cannot be checked)" in text for text in problems), problems
+
+
+@locks
+def test_a_shared_worktree_is_locked_too(hub, worktree):
+    pointer = (worktree / ".git").read_bytes()
+    running = up(hub, worktree, protect_git=True)
+    try:
+        assert any("--protect-git" in line and str(worktree / ".hooks") in line for line in running.lines)
+        for plant in [
+            "printf 'gitdir: %s\n' \"$TMPDIR\" > .git",
+            "mv .git .git-aside",
+            "cp .git copy && mv copy .git",
+            "ln .git alias",
+            "printf '#!/bin/sh\n' > .hooks/pre-commit",
+            "mv .hooks .hooks-aside",
+            "printf '[core]\n\tfsmonitor = ./watch.sh\n' >> extra.cfg",
+        ]:
+            out, code = run(hub, f"{{ {plant} ; }} && echo PLANTED")
+            assert "PLANTED" not in out and code != 0, (plant, out)
+        out, code = run(hub, "echo work > notes.txt && cat notes.txt")
+        assert (out.strip(), code) == ("work", 0)
+    finally:
+        running.stop()
+        running.thread.join(timeout=10)
+    assert (worktree / ".git").read_bytes() == pointer and os.listdir(worktree / ".hooks") == []
+    assert (worktree / "extra.cfg").read_text() == "[user]\n\tname = t\n"
+
+
+# --- what is already there and would not be held ------------------------------------
+
+def _module(folder, name):
+    meta = folder / ".git" / "modules" / name
+    (meta / "objects" / "ab").mkdir(parents=True)
+    (meta / "hooks").mkdir()
+    for plain in ("HEAD", "config"):
+        (meta / plain).write_text("")
+    return meta
+
+
+@pytest.mark.parametrize("arrange, problem", [
+    (lambda f: os.link(f / ".git" / "config", f / "alias"), ".git/config has a second name"),
+    (lambda f: os.link(f / ".git" / "hooks" / "pre-commit.sample", f / "alias"), "pre-commit.sample has a second name"),
+    (lambda f: os.link(_module(f, "lib") / "config", f / "alias"), ".git/modules/lib/config has a second name"),
+    (lambda f: os.link(_module(f, "objects") / "config", f / "alias"), ".git/modules/objects/config has a second name"),
+    (lambda f: (os.rename(_module(f, "lib") / "config", f / "module-settings"),
+                (f / ".git" / "modules" / "lib" / "config").symlink_to("../../../module-settings")), "config is a link"),
+    (lambda f: (os.rename(f / ".git" / "modules", f / "elsewhere"),
+                (f / ".git" / "modules").symlink_to("../elsewhere")), ".git/modules is a link"),
+    (lambda f: os.link(f / "other-tree" / ".git", f / "alias"), "other-tree/.git has a second name"),
+    (lambda f: os.link(f / ".git" / "worktrees" / "other-tree" / "commondir", f / "alias"), "commondir has a second name"),
+    (lambda f: (f / ".git" / "worktrees" / "other-tree" / "commondir").write_text("../../../unheld\n"), "does not hold"),
+    (lambda f: os.link(f / "nested" / ".git" / "config", f / "alias"), "nested/.git/config has a second name"),
+    (lambda f: os.link(f / "deep" / "er" / "nested" / ".git" / "hooks" / "pre-commit.sample", f / "alias"), "has a second name"),
+    (lambda f: (f / "nested" / ".git" / "commondir").write_text(".\n"), "nested/.git/commondir"),
+    (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").write_text("gitdir: ../meta\n")),
+     "nested/.git points to a git folder the lock does not hold"),
+    (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").symlink_to("../meta")),
+     "nested/.git is a link"),
+])
+def test_the_folder_is_looked_through_for_what_the_lock_would_not_hold(folder, arrange, problem):
+    git(folder, "init", "-q", "nested")
+    git(folder, "init", "-q", "deep/er/nested")
+    git(folder, "worktree", "add", "-q", str(folder / "other-tree"), "-b", "other-tree")
+    (folder / "pointed").mkdir()
+    (folder / "pointed" / ".git").write_text("gitdir: ../.git/modules/lib\n")       # held by its name: fine
+    meta = _module(folder, "kept")
+    (meta / "objects" / "ab" / ("0" * 38)).write_text("")
+    os.link(meta / "objects" / "ab" / ("0" * 38), folder / "shared-object")           # objects may be shared
+    (folder / ".git" / "hooks" / "pre-commit").symlink_to("../../check.sh")           # a hook may be a link
+    assert gitwatch.loose(str(folder)) == ([], True)
+    arrange(folder)
+    problems, complete = gitwatch.loose(str(folder))
+    assert complete and any(problem in text for text in problems), problems
+
+
+def test_a_folder_too_large_to_look_through_is_not_called_clean(folder, monkeypatch):
+    for n in range(5):
+        (folder / f"d{n}").mkdir()
+    monkeypatch.setattr(gitwatch, "_WALKED", 3)
+    assert gitwatch.loose(str(folder))[1] is False
+    monkeypatch.setattr(gitwatch, "_WALKED", 100)
+    monkeypatch.setattr(gitwatch, "_CHECKED", 3)
+    assert gitwatch.loose(str(folder))[1] is False
 
 
 @locks

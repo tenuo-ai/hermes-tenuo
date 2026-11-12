@@ -407,9 +407,9 @@ To refuse those changes instead of reporting them, start with `--protect-git`
 (macOS only). Wherever commands can write, in the shared folder and in their
 temp folder:
 
-- no repository can be created: `git init`, `git clone`, `git worktree add`
-  and `git submodule add` fail, and so do tools and tests that make a
-  repository in a temp folder;
+- nothing named `.git` can be created, so `git init`, `git clone`,
+  `git worktree add` and `git submodule add` fail, and so do tools and tests
+  that make a repository in a temp folder;
 - a repository's `.git` cannot be moved, replaced or pointed somewhere else;
 - its settings (`.git/config`, `config.worktree`, `commondir`), its hooks
   folder, its submodules (`.git/modules`) and its records of other worktrees
@@ -426,21 +426,33 @@ a linked worktree or a repository in a subfolder that was already there.
 Commands get a temp folder of their own for these sessions, so caches from
 sessions without the flag are not reused.
 
-Hands does not start with the flag when it cannot lock everything git reads
-its settings from: the shared folder is itself a linked worktree or a
-submodule checkout (`.git` is a file), the settings name a file or a hooks
-folder that is missing or reached through a link, or a settings file or hook
-has a second name (a hard link). `hermes-tenuo hands check --protect-git`
-says which. Reporting stays on as well.
+The shared folder can also be a linked worktree or a submodule checkout, whose
+git folder is elsewhere: Hands reads that repository's settings to find what
+they pull in from the shared folder, and locks the `.git` pointer.
 
-The flag keeps settings as they are when Hands starts; it does not examine
+Before it starts with the flag, Hands looks through the shared folder for
+anything the lock would not hold, and does not start if it finds some:
+
+- a settings file or hook with a second name (a hard link), or one that is a
+  link, in the folder's own repository, a repository in a subfolder, a
+  submodule or a worktree record;
+- a `.git` that sends git to a folder commands can write under another name
+  (a `.git` file or a `commondir` pointing there);
+- settings that name a file or a hooks folder that is missing or reached
+  through a link;
+- a folder too large to look through.
+
+`hermes-tenuo hands check --protect-git` says which. On a very large folder
+the look takes a few seconds. Reporting stays on as well.
+
+The flag keeps settings as they are when Hands starts; it does not judge
 them. A hook or setting that was already there still runs what it names, so if
 a hook is a link to a script in the project, or calls one, commands can change
-that script. Not covered: files in the shared folder that your git settings
-outside it name, what the settings of a repository in a subfolder pull in, a
-bare repository that was already in the folder, and work a command left
-unfinished (look at `git status` before continuing a rebase you did not
-start).
+that script. Not covered: files in the shared folder that your global git
+settings name, what the settings of a repository in a subfolder pull in, a
+repository without a `.git` (a bare one, which commands can still make or
+change), and work a command left unfinished (look at `git status` before
+continuing a rebase you did not start).
 
 On Linux the flag is refused. Git has to create and rename files in `.git`,
 and bubblewrap can make existing files read-only but cannot refuse new names

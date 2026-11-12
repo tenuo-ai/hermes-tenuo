@@ -1078,7 +1078,7 @@ def main() -> None:
     up_p.add_argument("--read-home", action="store_true",
                       help="Let commands read your whole home folder, except keys, credentials and browser data")
     up_p.add_argument("--protect-git", action="store_true",
-                      help="Keep commands from changing git settings and hooks, or making repositories (macOS)")
+                      help="Keep commands from changing git settings and hooks, or making a .git (macOS)")
     check_p = hands_sub.add_parser("check", help="See whether this machine is ready for `hands up`, without pairing")
     check_p.add_argument("invite", nargs="?", metavar="INVITE", help="The hands://... line, to test that its server is reachable")
     check_p.add_argument("--dir", default=".", metavar="FOLDER", help="Folder you plan to share (default: here)")
