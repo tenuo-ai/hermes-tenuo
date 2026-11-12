@@ -80,6 +80,8 @@ _PLANTS = [
     "printf x > '.git/config.wor\u212atree'",        # a letter the file system reads as k
     "mkdir -p .git/modules/planted",
     "mkdir -p .git/worktrees/planted",
+    "mkdir -p .git/worktrees/other/hooks",
+    "printf changed > .git/worktrees/other/gitdir",
     "printf '%s\n' \"$TMPDIR\" > .git/worktrees/other/commondir",
     "mv .git/worktrees/other \"$TMPDIR/other-record\"",
     "mv .git/worktrees \"$TMPDIR/records\"",
@@ -342,19 +344,6 @@ def test_settings_reached_through_a_link_commands_can_change_are_not_trusted(fol
     assert any("(cannot be checked)" in text for text in problems), problems
 
 
-def test_a_shared_worktrees_hooks_folder_is_followed_back_into_it(worktree, folder, tmp_path):
-    os.rename(folder / ".git" / "hooks", folder / ".git" / "hooks-kept")
-    (worktree / "local-hooks").mkdir()
-    (folder / ".git" / "hooks").symlink_to(worktree / "local-hooks")
-    paths, problems, _notes = _sources(worktree, tmp_path)
-    assert str(worktree / "local-hooks") in paths and not problems
-    os.unlink(folder / ".git" / "hooks")
-    (worktree / "hop").symlink_to("local-hooks")
-    (folder / ".git" / "hooks").symlink_to(worktree / "hop")          # through a link commands can change
-    _paths, problems, _notes = _sources(worktree, tmp_path)
-    assert any("hooks (cannot be checked)" in text for text in problems), problems
-
-
 @locks
 def test_a_shared_worktree_is_locked_too(hub, worktree):
     pointer = (worktree / ".git").read_bytes()
@@ -468,3 +457,118 @@ def test_the_device_does_not_start_with_a_lock_that_would_not_hold(hub, folder):
     assert any(ok is False and "does not exist" in text
                for ok, text in device_module.check(hub.invite(), str(folder), protect_git=True))
     assert not hub.sessions()
+
+
+@pytest.mark.parametrize("location", [".git/objects/nested", "deep/nested"])
+def test_repositories_inside_metadata_are_inspected(folder, location):
+    nested = folder / location
+    nested.mkdir(parents=True)
+    git(nested, "init", "-q")
+    os.link(nested / ".git" / "config", folder / "alias")
+    problems, complete = gitwatch.loose(str(folder))
+    assert complete and any("has a second name" in p for p in problems)
+
+
+def test_module_commondir_cannot_redirect_to_writable_metadata(folder):
+    meta = _module(folder, "lib")
+    (meta / "commondir").write_text("../../../unheld\n")
+    problems, complete = gitwatch.loose(str(folder))
+    assert complete and any("commondir" in p and "does not hold" in p for p in problems)
+
+
+def test_unreadable_workspace_is_not_called_clean(folder, monkeypatch):
+    original = os.scandir
+    hidden = folder / "hidden"
+    hidden.mkdir()
+    def unreadable(path):
+        if os.fspath(path) == str(hidden):
+            raise PermissionError("unreadable")
+        return original(path)
+    monkeypatch.setattr(os, "scandir", unreadable)
+    problems, _ = gitwatch.loose(str(folder))
+    assert any("hidden cannot be read" in p for p in problems)
+
+
+def test_settings_fifo_is_not_called_clean(folder):
+    config = folder / ".git" / "config"
+    config.unlink()
+    os.mkfifo(config)
+    problems, _ = gitwatch.loose(str(folder))
+    assert any("config is not a regular" in p for p in problems)
+
+
+def test_writable_temp_metadata_is_also_inspected(folder, tmp_path):
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    git(temp, "init", "-q")
+    os.link(temp / ".git" / "config", temp / "alias")
+    problems, _ = gitwatch.loose(str(folder), also=(str(temp),))
+    assert any("has a second name" in p for p in problems)
+
+
+
+def test_outside_include_cannot_traverse_writable_directory_link(folder, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config").write_text("[user]\nname = t\n")
+    (folder / "redirect").symlink_to(outside, target_is_directory=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(folder / "redirect", target_is_directory=True)
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[include]\npath = {alias}/config\n")
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("cannot be checked" in p for p in problems)
+
+
+
+def test_included_settings_do_not_get_the_shared_object_exemption(folder):
+    config = folder / ".git" / "objects" / "pack" / "settings.pack"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text("[user]\nname = t\n")
+    os.link(config, folder / "alias")
+    problems, _ = gitwatch.loose(str(folder), paths=(str(config),))
+    assert any("has a second name" in p for p in problems)
+
+
+
+def test_external_included_settings_hard_link_is_rejected(folder, tmp_path):
+    outside = tmp_path / "external.cfg"
+    outside.write_text("[user]\nname = t\n")
+    os.link(outside, folder / "alias")
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[include]\npath = {outside}\n")
+    assert any("cannot be checked" in p for p in _sources(folder, tmp_path)[1])
+
+
+@pytest.mark.parametrize("layout", ["directory-link", "hook-hard-link"])
+def test_shared_worktree_external_default_hooks_are_checked(folder, tmp_path, layout):
+    import shutil
+    worktree = tmp_path / "worktree"
+    git(folder, "worktree", "add", "-q", str(worktree), "-b", "worktree")
+    hooks = folder / ".git" / "hooks"
+    if layout == "directory-link":
+        shutil.rmtree(hooks)
+        (worktree / "local-hooks").mkdir()
+        hooks.symlink_to(worktree / "local-hooks", target_is_directory=True)
+    else:
+        (hooks / "pre-commit").write_text("#!/bin/sh\n")
+        os.link(hooks / "pre-commit", worktree / "alias")
+    assert any("hook" in p for p in _sources(worktree, tmp_path)[1])
+
+
+
+@pytest.mark.parametrize("layout", ["directory-link", "hook-hard-link"])
+def test_explicit_external_hooks_are_checked(folder, tmp_path, layout):
+    outside = tmp_path / "outside-hooks"
+    outside.mkdir()
+    if layout == "directory-link":
+        (folder / "bridge").symlink_to(outside, target_is_directory=True)
+        alias = tmp_path / "alias-hooks"
+        alias.symlink_to(folder / "bridge", target_is_directory=True)
+    else:
+        (outside / "pre-commit").write_text("#!/bin/sh\n")
+        os.link(outside / "pre-commit", folder / "alias")
+        alias = outside
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[core]\nhooksPath = {alias}\n")
+    assert any("hook" in p for p in _sources(folder, tmp_path)[1])

@@ -438,10 +438,10 @@ anything the lock would not hold, and does not start if it finds some:
   submodule or a worktree record;
 - a `.git` that sends git to a folder commands can write under another name
   (a `.git` file or a `commondir` pointing there);
-- settings that name a file or a hooks folder that is missing, reached
-  through a link commands can change, or (outside the shared folder) has a
-  second name;
-- a subfolder that cannot be read, or a folder too large to look through.
+- settings that name a file or a hooks folder that is missing or reached
+  through a link;
+- protected metadata that is unreadable or a special file, or a folder too
+  large to look through. The scan includes the session’s writable temp folder.
 
 `hermes-tenuo hands check --protect-git` says which. On a very large folder
 the look takes a few seconds. Reporting stays on as well.
