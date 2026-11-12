@@ -190,11 +190,9 @@ registration on and misconfigured.
 
 ## Residual risks (D1 work)
 
-- **State is in memory.** Grants, context owners and nonces are lost on restart: in-flight tasks then
-  fail closed (no grant → no tools), but a captured request could be replayed into its own context
-  within the 5-minute freshness window after a restart. Persist nonces and context ownership.
-- **Revocation.** Grants are short-lived (the sender's ttl, 300 s in the lab); no signed revocation list
-  is consulted at ingress or tool time yet.
+- **State across restarts** (addressed after D0): nonces and context ownership persist; grants do not,
+  so an in-flight task runs no tools after a restart.
+- **Revocation** (addressed after D0): signed revocation lists at ingress and every tool call.
 - **Refusals look like success to the sender.** A dropped A2A message returns `TASK_STATE_COMPLETED` with
   empty text immediately; a resend with the same `messageId` waits for `A2A_REPLY_TIMEOUT` (60 s in the
   lab) and fails. Enforcement is unaffected; the sender cannot tell why.
@@ -205,6 +203,22 @@ registration on and misconfigured.
 - **Optional tool arguments become required** under a constraining grant (see the live-bot finding).
 - **Tested on v0.22.6 only.** v0.23.1's A2A adapter and dispatch hook are unchanged by inspection, but
   the live matrix was not run there (no v0.23.1 image on playground and limited disk).
+
+## Progress after D0 (branch `feat/a2a-delegation`)
+
+- **D2 sender:** `tenuo_delegate` grants from the current session's own warrant (as the guard resolves
+  it) to a pinned peer key; peers only from operator config; Hermes Guests rule vocabulary; `"*"`
+  leaves other arguments open when the sender's warrant allows it; one context per task; no retries;
+  multi-hop delegation stays within the grant and the next peer verifies the whole chain.
+- **D1 receiver:** signed revocation lists checked at ingress and at every tool call (Tenuo's
+  `enforce_tool_call` does not apply an authorizer's list, so the plugin checks the chain ids itself);
+  missing, forged or rolled-back lists refuse everything; nonces and context ownership persist across
+  restarts.
+- **D3:** `hermes-tenuo a2a key | check | revoke`; [setup guide](a2a-delegation.md); live two-agent lab
+  (`spikes/a2a-d0/two_agent.py`): two real Hermes gateways, A's agent calls `tenuo_delegate`, B
+  enforces. 4/4: delegated light turned on; B's attempt outside the grant denied; A could not
+  delegate a door its own warrant lacks; an unpaired peer refused. No request left A in the last two.
+- Tests: 845 passed, 13 skipped (Hermes-source tests).
 
 ## Smallest upstream Hermes changes
 
