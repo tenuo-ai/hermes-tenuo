@@ -163,7 +163,8 @@ D1–D3 work in #82 is outside this release.
   This used scripted tool dispatch, without transferring model credentials.
 
 Required gates still pending at this preparation commit:
-- Verify final merged-commit CI and artifact jobs, then publish the reviewed tag.
+- Verify final merged-commit CI and artifact jobs with the Tenuo 0.3.7 security
+  floor, then publish the reviewed tag.
 - Verify a fresh PyPI installation and Hands session before submitting the
   catalog repin. The catalog draft deliberately retains its placeholder until
   the final release commit is known.

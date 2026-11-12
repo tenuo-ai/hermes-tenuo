@@ -4,6 +4,8 @@
 
 ### Upgrading from 0.3
 
+- Upgrade Tenuo to 0.3.7. This release requires its stricter delegation checks
+  for wildcard tools, issuer bounds and clearance.
 - Keep one installation. With hermes-tenuo installed both by pip in the Hermes
   environment and as a directory plugin, 0.4.0 blocks every tool call until one
   is removed. `hermes-tenuo doctor` says which two it found.

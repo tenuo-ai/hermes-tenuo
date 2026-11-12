@@ -52,7 +52,7 @@ jobs:
         run: uv pip install --python hermes-agent/.venv/bin/python . pytest
       - name: Install plugin runtime dependencies (directory route)
         if: matrix.route == 'directory'
-        run: uv pip install --python hermes-agent/.venv/bin/python "tenuo>=0.3.6,<0.4" "path-jail>=0.3,<0.4" pytest
+        run: uv pip install --python hermes-agent/.venv/bin/python "tenuo>=0.3.7,<0.4" "path-jail>=0.3,<0.4" pytest
       - name: Install bubblewrap (the Hands sandbox on Linux)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
