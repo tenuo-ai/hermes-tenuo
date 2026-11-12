@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -372,6 +373,21 @@ def test_a_path_that_only_goes_up_from_its_settings_file_is_followed(folder, tmp
         f.write("[include]\n\tpath = ../conf/git/base.cfg\n")
     assert _sources(folder, tmp_path) == (
         [str(folder / "conf" / "git" / "base.cfg"), str(folder / "conf" / "common.cfg")], [], [])
+
+
+@pytest.mark.parametrize("setting", ["[include]\n\tpath = {}x.cfg\n", "[core]\n\thooksPath = {}hooks\n"])
+@pytest.mark.parametrize("step", ["./", "a/", "../"])
+def test_a_settings_path_too_long_to_open_is_not_walked(folder, tmp_path, step, setting):
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(setting.format(step * 300_000))        # under the size read from one settings file
+    started = time.monotonic()
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert time.monotonic() - started < 3      # it took several times that, and grew with the square of the length
+    assert len(problems) == 1 and problems[0].endswith("(cannot be checked)") and len(problems[0]) < 400, problems
+    assert ".git/config" not in problems[0]
+    started = time.monotonic()
+    assert {"include.path", "core.hookspath"} & set(gitwatch.settings(str(folder)))      # still seen when it changes
+    assert time.monotonic() - started < 3
 
 
 def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path):

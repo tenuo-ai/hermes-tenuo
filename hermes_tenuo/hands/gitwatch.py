@@ -15,6 +15,7 @@ cannot be read that way is reported instead of skipped.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import os
 import re
@@ -67,6 +68,7 @@ _HOOK_NAMES = (
     "p4-pre-submit", "post-index-change",
 )
 _UNCHECKED = "cannot be checked"
+_LONGEST = 4096       # characters in a path: no system here opens a longer one
 
 
 def _digest(text: str) -> str:
@@ -207,6 +209,11 @@ def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
     return False
 
 
+def _shown(path: str) -> str:
+    """A path for a message to the person: one too long to read is cut short."""
+    return path if len(path) <= 240 else path[:120] + " ... " + path[-80:]
+
+
 def _spelled(value: str, base: str) -> str:
     """A path from a settings file in folder *base*, as git hands it to the system: `..`
     is left for the system to take from where the path really is. Empty if it cannot be told."""
@@ -229,15 +236,17 @@ def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optio
     path = os.path.expanduser(value) if value.startswith("~") else value
     if not path or path.startswith("~"):
         return None
+    if len(path if os.path.isabs(path) else os.path.join(base, path)) > _LONGEST:
+        return None     # nothing can open it, and it is not worth the time to walk
 
     def writable(folder: str) -> bool:
         # By what the folder is, not how it is spelled: _locate also knows another letter case.
         return _locate(roots, folder, 0, "") is not None
 
     here = os.sep if os.path.isabs(path) else os.path.realpath(base)
-    parts, hops, went_in = path.split(os.sep), 0, False
+    parts, hops, went_in = collections.deque(path.split(os.sep)), 0, False
     while parts:
-        part = parts.pop(0)
+        part = parts.popleft()
         if part in ("", "."):
             continue
         if part == "..":
@@ -250,8 +259,9 @@ def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optio
             hops += 1
             if hops > 40 or writable(here):
                 return None
-            parts = os.readlink(step).split(os.sep) + parts
-            if not parts[0]:
+            target = os.readlink(step)
+            parts.extendleft(reversed(target.split(os.sep)))
+            if os.path.isabs(target):
                 here = os.sep
             continue
         here = step
@@ -547,7 +557,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
                     if read is None:
-                        target = _locate(roots, full, 0, "") if full else None
+                        target = _locate(roots, full, 0, "") if full and len(full) <= _LONGEST else None
                         if target is not None and target[1] != ".":
                             queue.append(target)
                         continue
@@ -556,7 +566,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     ends = _followed(roots, value, here) if full else None
                     target = _locate(roots, ends, 0, "") if ends else None
                     if full and ends is None:
-                        found[f"{full} ({_UNCHECKED})"] = "unchecked"   # commands can change where it leads
+                        found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"   # commands can change where it leads
                     elif target is not None and target[1] != ".":
                         queue.append(target)
                     elif target is None and full:
@@ -564,7 +574,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     if read is None:
-                        target = _locate(roots, value, 0, "")
+                        target = _locate(roots, value, 0, "") if len(value) <= _LONGEST else None
                         if target is not None and target not in hook_folders:
                             hook_folders.append(target)   # "." is the folder itself
                         continue
@@ -572,7 +582,7 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     ends = _followed(roots, value, roots[0][0]) if full else None
                     target = _locate(roots, ends, 0, "") if ends else None
                     if full and ends is None:
-                        found[f"{full} ({_UNCHECKED})"] = "unchecked"
+                        found[f"{_shown(full)} ({_UNCHECKED})"] = "unchecked"
                     elif target is not None and target not in hook_folders:
                         hook_folders.append(target)
                     elif target is None and full:
