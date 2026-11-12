@@ -1,0 +1,7 @@
+name: tenuo-a2a-d0
+version: 0.0.1
+description: D0 spike only. Protected A2A ingress; inbound A2A turns run only on a verified, receiver-held Tenuo grant. Other platforms untouched.
+kind: standalone
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_tool_call
