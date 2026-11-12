@@ -344,6 +344,48 @@ def test_settings_reached_through_a_link_commands_can_change_are_not_trusted(fol
     assert any("(cannot be checked)" in text for text in problems), problems
 
 
+@pytest.mark.parametrize("setting", ["[include]\n\tpath = ../bridge/../settings.cfg\n",
+                                     "[core]\n\thooksPath = bridge/../hooks\n"])
+@pytest.mark.parametrize("bridge", ["a link", "a folder"])
+def test_a_path_that_goes_down_and_back_up_in_the_folder_is_not_trusted(folder, tmp_path, setting, bridge):
+    """`..` is taken from where the path really is, so a folder on the way that is a link,
+    or that commands could replace with one, sends it somewhere else."""
+    (folder / "actual" / "sub").mkdir(parents=True)
+    for top in (folder, folder / "actual"):
+        (top / "settings.cfg").write_text("")
+        (top / "hooks").mkdir()
+    if bridge == "a link":
+        (folder / "bridge").symlink_to("actual/sub")
+    else:
+        (folder / "bridge").mkdir()
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(setting)
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), (paths, problems)
+
+
+def test_a_path_that_only_goes_up_from_its_settings_file_is_followed(folder, tmp_path):
+    (folder / "conf" / "git").mkdir(parents=True)
+    (folder / "conf" / "git" / "base.cfg").write_text("[include]\n\tpath = ../common.cfg\n")
+    (folder / "conf" / "common.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n\tpath = ../conf/git/base.cfg\n")
+    assert _sources(folder, tmp_path) == (
+        [str(folder / "conf" / "git" / "base.cfg"), str(folder / "conf" / "common.cfg")], [], [])
+
+
+def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path):
+    shouted = folder.parent / folder.name.upper()
+    if not shouted.exists() or not os.path.samefile(shouted, folder):
+        pytest.skip("needs a file system that ignores letter case")
+    (folder / "inside.cfg").write_text("")
+    (folder / "bridge.cfg").symlink_to(folder / "inside.cfg")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {shouted / 'bridge.cfg'}\n")
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), (paths, problems)
+
+
 @locks
 def test_a_shared_worktree_is_locked_too(hub, worktree):
     pointer = (worktree / ".git").read_bytes()

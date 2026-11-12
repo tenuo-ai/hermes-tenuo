@@ -207,30 +207,56 @@ def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
     return False
 
 
-def _loose_link(roots: List[Tuple[str, int, str]], path: str) -> bool:
-    """Whether *path*, taken one component at a time, follows a link that is in a folder
-    commands can write. Where it ends does not matter: a path that ends in such a folder
-    is locked there, but only if no link on the way can send it somewhere else."""
-    reach = [os.path.realpath(root) for root, _fd, _label in roots]
-    parts, here, hops = path.split(os.sep), os.sep, 0
+def _spelled(value: str, base: str) -> str:
+    """A path from a settings file in folder *base*, as git hands it to the system: `..`
+    is left for the system to take from where the path really is. Empty if it cannot be told."""
+    path = os.path.expanduser(value) if value.startswith("~") else value
+    if not path or path.startswith("~"):
+        return ""
+    return path if os.path.isabs(path) else os.path.join(base, path)
+
+
+def _followed(roots: List[Tuple[str, int, str]], value: str, base: str) -> Optional[str]:
+    """Where *value*, a path in a settings file in folder *base*, really leads, taken one
+    component at a time the way the system does. None when commands could make it lead
+    somewhere else, or when it cannot be told.
+
+    That is the case when it follows a link that is in a folder commands can write, and
+    when it goes into such a folder and back up with `..`: the folder it went into can be
+    replaced with a link, and `..` is then taken from where that link leads. Going up from
+    *base* itself is fine: the folders above a settings file are held in place with it.
+    """
+    path = os.path.expanduser(value) if value.startswith("~") else value
+    if not path or path.startswith("~"):
+        return None
+
+    def writable(folder: str) -> bool:
+        # By what the folder is, not how it is spelled: _locate also knows another letter case.
+        return _locate(roots, folder, 0, "") is not None
+
+    here = os.sep if os.path.isabs(path) else os.path.realpath(base)
+    parts, hops, went_in = path.split(os.sep), 0, False
     while parts:
         part = parts.pop(0)
         if part in ("", "."):
             continue
         if part == "..":
+            if went_in:
+                return None
             here = os.path.dirname(here)
             continue
         step = os.path.join(here, part)
         if os.path.islink(step):
             hops += 1
-            if hops > 40 or any(step.startswith(r + os.sep) for r in reach):
-                return True
+            if hops > 40 or writable(here):
+                return None
             parts = os.readlink(step).split(os.sep) + parts
             if not parts[0]:
                 here = os.sep
             continue
         here = step
-    return False
+        went_in = went_in or writable(here)
+    return here
 
 
 def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str]:
@@ -520,26 +546,38 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                 if (section, key) in (("include", "path"), ("includeif", "path")):
                     found[name] = _digest(found.get(name, "") + value)
                     full = _full(value, here)
-                    target = _locate(roots, full, 0, "") if full else None
-                    if read is not None and full and _loose_link(roots, full):
-                        found[f"{full} ({_UNCHECKED})"] = "unchecked"   # on the way: a link commands can change
+                    if read is None:
+                        target = _locate(roots, full, 0, "") if full else None
+                        if target is not None and target[1] != ".":
+                            queue.append(target)
+                        continue
+                    # Before locking, the file is the one the system would open, not the
+                    # one the path reads as once `..` is taken out of it.
+                    ends = _followed(roots, value, here) if full else None
+                    target = _locate(roots, ends, 0, "") if ends else None
+                    if full and ends is None:
+                        found[f"{full} ({_UNCHECKED})"] = "unchecked"   # commands can change where it leads
                     elif target is not None and target[1] != ".":
                         queue.append(target)
-                    elif target is None and full and read is not None:
-                        queue.append((None, full))
+                    elif target is None and full:
+                        queue.append((None, _spelled(value, here)))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
-                    target = _locate(roots, value, 0, "")
-                    spelled = _full(value, roots[0][0])
-                    if read is not None and spelled and _loose_link(roots, spelled):
-                        found[f"{spelled} ({_UNCHECKED})"] = "unchecked"
+                    if read is None:
+                        target = _locate(roots, value, 0, "")
+                        if target is not None and target not in hook_folders:
+                            hook_folders.append(target)   # "." is the folder itself
+                        continue
+                    full = _full(value, roots[0][0])
+                    ends = _followed(roots, value, roots[0][0]) if full else None
+                    target = _locate(roots, ends, 0, "") if ends else None
+                    if full and ends is None:
+                        found[f"{full} ({_UNCHECKED})"] = "unchecked"
                     elif target is not None and target not in hook_folders:
-                        hook_folders.append(target)   # "." is the folder itself
-                    elif target is None and read is not None:
-                        outside = _full(value, roots[0][0])
+                        hook_folders.append(target)
+                    elif target is None and full:
                         issues: List[str] = []
-                        if outside:
-                            _outside_hooks(roots, outside, issues)
+                        _outside_hooks(roots, _spelled(value, roots[0][0]), issues)
                         for issue in issues:
                             found[f"{issue} ({_UNCHECKED})"] = "unchecked"
                 elif _runs(section, sub, key, value):
