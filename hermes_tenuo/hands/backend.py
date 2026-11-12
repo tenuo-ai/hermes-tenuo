@@ -7,8 +7,10 @@ this class only decides where one bash command runs.
 from __future__ import annotations
 
 import collections
+import contextvars
+import re
 import threading
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
 from tools.environments.base import BaseEnvironment
@@ -17,6 +19,35 @@ from tools.environments.base_output import _ThreadedProcessHandle
 from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
 
 NAME = "hands"
+
+# What the device answered for the command one `execute` call is running. Hermes runs the
+# wait on a worker thread under a copy of the caller's context, so the call's own box is
+# visible there; calls that share an environment each have their own.
+_CALL: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar("hands_call", default=None)
+# How Hermes marks a result it timed out, with or without output before it.
+_TIMED_OUT = re.compile(r"\n?\[Command timed out after [^\]\n]*s\]\Z")
+_UNKNOWN = ("hands: no confirmed result arrived before the wait ended. "
+            "The command may have run, or still be running on the device: "
+            "check before running it again\n")
+
+
+def _settled(result: dict, reply: Optional[tuple]) -> dict:
+    """A result Hermes timed out, corrected by what the device actually answered.
+
+    Hermes stamps exit 124 when its own deadline passes, also when the device's answer
+    arrives while it is still collecting output, and its terminal tool then suggests
+    running the command again. Only the device's answer says whether it timed out: with
+    none, the outcome is unknown; with one, that is the outcome.
+    """
+    if result.get("returncode") != 124:
+        return result
+    if reply is None:
+        return {"output": _UNKNOWN, "returncode": 125}
+    if reply[1] != 124:
+        result = {k: v for k, v in result.items() if k != "hermes_timed_out"}
+        result["returncode"] = reply[1]
+        result["output"] = _TIMED_OUT.sub("", str(result.get("output") or ""))
+    return result
 
 
 class HandsEnvironment(BaseEnvironment):
@@ -73,7 +104,17 @@ class HandsEnvironment(BaseEnvironment):
         # device; anything outside the granted folder starts in the folder.
         if not self._inside(cwd):
             cwd = self.cwd if self._inside(self.cwd) else self._folder
-        return super().execute(command, cwd, **kwargs)
+        box: Dict[str, Any] = {}
+        token = _CALL.set(box)
+        try:
+            result = super().execute(command, cwd, **kwargs)
+        finally:
+            _CALL.reset(token)
+        # Hermes has a second, outer deadline that answers for the wait when the wait
+        # itself has not returned. Its result is settled the same way.
+        if "reply" in box and isinstance(result, dict):
+            result = _settled(result, box["reply"].get("result"))
+        return result
 
     def _wrap_command(self, command: str, cwd: str) -> str:
         # Remember which plain command each wrapped script came from, for the device's log.
@@ -92,6 +133,9 @@ class HandsEnvironment(BaseEnvironment):
         asking = chat._owner()
 
         reply = {}  # per command, including when multiple waits share this environment
+        call = _CALL.get()
+        if call is not None:
+            call["reply"] = reply
 
         def run() -> tuple:
             try:
@@ -112,23 +156,9 @@ class HandsEnvironment(BaseEnvironment):
 
     def _wait_for_process(self, proc, timeout: int = 120, **kwargs: Any) -> dict:
         result = super()._wait_for_process(proc, timeout=timeout, **kwargs)
-        if result.get("returncode") != 124:
-            return result
-        # Hermes cancels at its deadline, then briefly drains output. The hub can
-        # report during that drain, but Hermes still stamps the result as 124.
-        # Use the actual reply, never command-controlled text, to decide whether
-        # a timeout (and the terminal tool's retry advice) is justified.
-        reply = proc._hands_reply.get("result")
-        if reply is None:
-            return {"output": "hands: no confirmed result arrived before the wait ended. "
-                    "The command may have run, or still be running on the device: "
-                    "check before running it again\n", "returncode": 125}
-        if reply[1] != 124:
-            result["returncode"] = reply[1]
-            suffix = f"\n[Command timed out after {timeout}s]"
-            if result["output"].endswith(suffix):
-                result["output"] = result["output"][:-len(suffix)]
-        return result
+        # Hermes cancels at its deadline, then briefly collects output. The device's answer
+        # can arrive in that time. The answer itself, never text a command printed, decides.
+        return _settled(result, proc._hands_reply.get("result"))
 
     def _plain(self, script: str) -> str:
         """The command as Hermes was asked to run it. Hermes wraps each command in session
