@@ -8,8 +8,13 @@ audit view. It runs without a model or a Hermes process.
 
 ## Wrap your servers
 
-Install the optional extra. From a checkout of this repository, run
-`pip install -e '.[mcp]'` in your development environment. Then use the JSON or YAML file that already contains
+Install the optional extra in your Python environment:
+
+```sh
+python -m pip install 'hermes-tenuo[mcp]==0.4.0'
+```
+
+Then use the JSON or YAML file that already contains
 your `mcpServers` or Hermes `mcp_servers` settings.
 
 ```sh

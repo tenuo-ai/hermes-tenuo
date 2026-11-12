@@ -21,7 +21,12 @@ jobs:
         run: |
           python -m venv /tmp/tenuo-wheel
           /tmp/tenuo-wheel/bin/pip install dist/*.whl
+          for wheel in dist/*.whl; do
+            /tmp/tenuo-wheel/bin/pip install "${wheel}[mcp]"
+          done
           cd /tmp
+          /tmp/tenuo-wheel/bin/python -c "import hermes_tenuo.mcp_gateway"
+          /tmp/tenuo-wheel/bin/hermes-tenuo mcp --help
           /tmp/tenuo-wheel/bin/hermes-tenuo --version
           /tmp/tenuo-wheel/bin/hermes-tenuo status
           /tmp/tenuo-wheel/bin/hermes-tenuo hands --help
