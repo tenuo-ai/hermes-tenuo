@@ -70,6 +70,8 @@ def cmd_check(_args: Any) -> int:
         for peer in sender.peers.values():
             token = "set" if profile_env.get(peer.token_env, os.environ.get(peer.token_env)) else f"{peer.token_env} not in this environment"
             print(f"  {peer.name}: {peer.url} (token {token})")
+            if token != "set":
+                problems.append(f"a2a_delegation: peer {peer.name!r} needs {peer.token_env}")
         print("  The session must hold a warrant that allows tenuo_delegate and covers what it delegates.")
     elif not any(p.startswith("a2a_delegation") for p in problems):
         print("Delegating: off (no a2a_delegation block).")

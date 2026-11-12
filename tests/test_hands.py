@@ -53,21 +53,47 @@ def folder(tmp_path, monkeypatch):
     return project
 
 
+_serving: list = []  # every device a test started, until end_devices() has ended it
+
+
 class Running:
     """A device serving in a background thread."""
 
-    def __init__(self, device: Device):
-        self.device, self.lines = device, []
+    def __init__(self, device: Device, hub: "Hub | None" = None):
+        self.device, self.lines, self.hub = device, [], hub
         device.say = self.lines.append
         self.thread = threading.Thread(target=device.serve, daemon=True)
         self.thread.start()
+        _serving.append(self)
 
     def stop(self):
         self.device.stop()
 
+    def release(self):
+        """Stop the device and answer the request it has open. A device waiting for a
+        command hears of a stop only when the server answers, up to a whole poll later."""
+        self.device.stop()
+        if self.hub is not None:
+            with self.hub._lock:
+                session = self.hub._sessions.pop(self.device.me, None)
+            if session is not None:
+                session.jobs.put(None)
+
+
+def end_devices(wait: float = 10.0) -> list:
+    """End every device the test left serving, and wait for their threads, so none makes
+    a request while a later test runs. Returns the ones still alive after *wait*."""
+    started, _serving[:] = list(_serving), []
+    for running in started:
+        running.release()
+    deadline = time.time() + wait
+    for running in started:
+        running.thread.join(max(0.0, deadline - time.time()))
+    return [running for running in started if running.thread.is_alive()]
+
 
 def up(hub: Hub, folder, ttl=600, name="laptop", invite=True, **kwargs) -> Running:
-    running = Running(Device(hub.invite() if invite else None, str(folder), ttl, name=name, **kwargs))
+    running = Running(Device(hub.invite() if invite else None, str(folder), ttl, name=name, **kwargs), hub)
     deadline = time.time() + 10
     while time.time() < deadline and not any(s.online and s.name == name for s in hub.sessions()):
         time.sleep(0.05)
@@ -290,9 +316,49 @@ def test_selected_device_routing_failure_does_not_run_on_server(monkeypatch):
 
     called = []
     monkeypatch.setattr(builtins, "__import__", broken_import)
-    with pytest.raises(HandsUnavailable, match="was not run"):
-        chat.around_tool(next_call=lambda: called.append(True))
+    # Answered, not raised: Hermes carries on without a middleware that raises.
+    answer = json.loads(chat.around_tool(next_call=lambda: called.append(True)))
+    assert "was not run" in answer["error"] and not called
+
+
+def test_a_refused_call_is_answered_instead_of_raised(monkeypatch):
+    called = []
+
+    def refuses(tool_name, next_call, task_id):
+        raise HandsUnavailable("hands: 'laptop' belongs to the person who paired it; this call was not run")
+
+    monkeypatch.setattr(chat, "_around_tool", refuses)
+    answer = json.loads(chat.around_tool(tool_name="terminal", next_call=lambda: called.append(True)))
+    assert "belongs to the person who paired it" in answer["error"] and not called
+
+    def breaks(tool_name, next_call, task_id):
+        raise RuntimeError("unexpected")
+
+    # Any failure before the tool has run, in a conversation that uses a machine.
+    monkeypatch.setattr(chat, "_around_tool", breaks)
+    monkeypatch.setitem(chat._wanted, "", "laptop")
+    answer = json.loads(chat.around_tool(tool_name="terminal", next_call=lambda: called.append(True)))
+    assert "was not run" in answer["error"] and not called
+    # A conversation that uses the server is Hermes's to carry on with.
+    monkeypatch.delitem(chat._wanted, "")
+    with pytest.raises(RuntimeError):
+        chat.around_tool(tool_name="terminal", next_call=lambda: called.append(True))
     assert not called
+
+
+def test_a_failure_of_the_tool_itself_is_not_turned_into_a_refusal(monkeypatch):
+    monkeypatch.setitem(chat._wanted, "", "laptop")
+
+    def tool_fails():
+        raise HandsUnavailable("hands: the device went away")
+
+    def passes_on(tool_name, next_call, task_id):
+        return next_call()
+
+    monkeypatch.setattr(chat, "_around_tool", passes_on)
+    with pytest.raises(HandsUnavailable, match="went away"):
+        chat.around_tool(tool_name="terminal", next_call=tool_fails)
+    assert chat.around_tool(tool_name="terminal", next_call=lambda: "ran") == "ran"
 
 
 @sandboxed
@@ -1252,6 +1318,116 @@ def test_the_owner_is_whoever_sent_the_message(monkeypatch):
     monkeypatch.setitem(sys.modules, "gateway", None)   # not inside Hermes at all
     monkeypatch.setitem(sys.modules, "gateway.session_context", None)
     assert chat._owner() == ""
+
+
+def test_a_chat_is_private_only_when_hermes_says_so(monkeypatch):
+    telegram = {"HERMES_SESSION_PLATFORM": "telegram"}
+    _hermes_says(monkeypatch, **telegram, HERMES_SESSION_CHAT_TYPE="dm")
+    assert chat._private()
+    for kind in ("group", "channel", "thread", ""):
+        _hermes_says(monkeypatch, **telegram, HERMES_SESSION_CHAT_TYPE=kind)
+        assert not chat._private(), kind
+    _hermes_says(monkeypatch, names_sender=False, **telegram, HERMES_SESSION_CHAT_TYPE="group")
+    assert not chat._private()
+    _hermes_says(monkeypatch, names_sender=False, **telegram, HERMES_SESSION_CHAT_TYPE="dm")
+    assert chat._private()
+    # A single-user Hermes has no one else to read the line.
+    _hermes_says(monkeypatch, HERMES_SESSION_PLATFORM="cli")
+    assert chat._private()
+    _hermes_says(monkeypatch, names_sender=False, HERMES_SESSION_PLATFORM="cli")
+    assert chat._private()
+    _hermes_says(monkeypatch)
+    assert chat._private()
+    monkeypatch.setitem(sys.modules, "gateway", None)   # not inside Hermes at all
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)
+    assert chat._private()
+
+
+def test_a_pairing_line_is_not_posted_where_others_can_read_it(hub, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:alice")
+    monkeypatch.setattr(chat, "_private", lambda: False)
+    for words in ("invite", "setup edit", "setup read", "setup online"):
+        said = chat.command(words)
+        assert "direct message" in said and "hands up" not in said and "://" not in said, words
+    assert not hub._invites
+    assert "setup read" in chat.command("setup")          # the choices name no secret
+    monkeypatch.setattr(chat, "_private", lambda: True)
+    assert "hands up" in chat.command("setup edit") and len(hub._invites) == 1
+
+
+def test_only_its_owner_switches_a_shared_conversation(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    monkeypatch.setattr(chat, "_release", lambda conversation: None)
+    Device(hub.invite("telegram:alice"), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:alice")
+    assert "now runs commands on: laptop" in chat.command("on laptop")
+    for asking in ("telegram:bob", chat.NOBODY):
+        monkeypatch.setattr(chat, "_owner", lambda asking=asking: asking)
+        for words in ("off", "on", "on laptop"):
+            said = chat.command(words)
+            assert ("Only they can switch it" in said or "cannot tell who sent" in said), (asking, words, said)
+        assert chat._wanted.get("group") == "laptop"
+    # What the model is told on someone else's turn: not that the owner should reconnect.
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:bob")
+    assert "belongs to another person" in chat.before_turn()["context"]
+    # Once the machine's time is over, anyone in the chat can return it to the server.
+    hub.pick("laptop").expires = time.time() - 1
+    assert "on the server again" in chat.command("off") and "group" not in chat._wanted
+    # The owner never needs anyone's leave.
+    Device(None, str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    monkeypatch.setattr(chat, "_owner", lambda: "telegram:alice")
+    chat.command("on laptop")
+    assert "on the server again" in chat.command("off") and "group" not in chat._wanted
+
+
+def test_two_peoples_switches_do_not_cross(hub, folder, monkeypatch):
+    """One /hands on or /hands off, with its clean-up, is over before the next one looks."""
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "group")
+    Device(hub.invite("telegram:alice"), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()
+    who = threading.local()
+    monkeypatch.setattr(chat, "_owner", lambda: getattr(who, "name", "telegram:bob"))
+    said, crossed = {}, []
+
+    def alice_switches_on():
+        who.name = "telegram:alice"
+        said["alice"] = chat.command("on laptop")
+
+    def meanwhile(real):
+        def hooked(*args):
+            if getattr(who, "name", "telegram:bob") == "telegram:bob":
+                if "thread" not in said:
+                    said["thread"] = threading.Thread(target=alice_switches_on)
+                    said["thread"].start()
+                said["thread"].join(0.3)
+                crossed.append("alice" in said)   # hers went through while his was under way
+            return real(*args)
+        return hooked
+
+    monkeypatch.setattr(chat, "_remember", meanwhile(chat._remember))        # inside look-and-change
+    monkeypatch.setattr(chat, "_release", meanwhile(lambda conversation: None))   # his clean-up
+    assert "on the server again" in chat.command("off")      # bob: the conversation used the server
+    said["thread"].join(10)
+    assert crossed and not any(crossed), crossed
+    assert "now runs commands on: laptop" in said["alice"] and chat._wanted.get("group") == "laptop"
+    assert "Only they can switch it" in chat.command("off") and chat._wanted.get("group") == "laptop"
+    chat._wanted.pop("group", None)
+
+
+def test_a_machine_that_is_nobodys_can_be_switched_by_anyone(hub, folder, monkeypatch):
+    monkeypatch.setattr(chat, "get_hub", lambda: hub)
+    monkeypatch.setattr(chat, "can_switch", True)
+    monkeypatch.setattr(chat, "_conversation", lambda: "one")
+    monkeypatch.setattr(chat, "_release", lambda conversation: None)
+    Device(hub.invite(), str(folder), 60, name="laptop", allow_unsandboxed=True).pair()   # a single-user Hermes
+    monkeypatch.setattr(chat, "_owner", lambda: "")
+    assert "now runs commands on: laptop" in chat.command("on laptop")
+    assert "on the server again" in chat.command("off")
 
 
 def test_a_message_with_no_sender_cannot_set_up_or_take_a_machine(hub, folder, monkeypatch):

@@ -196,6 +196,14 @@ class PluginGuard:
     def __init__(self, guard: HermesGuard):
         self._guard = guard
 
+    def delegation_session(self, session_id: str, task_id: str) -> str:
+        """Resolve dispatch attribution before selecting or auditing delegation authority."""
+        resolved, reason = self._guard._attribute_session(session_id, task_id)
+        if reason:
+            from hermes_tenuo.a2a_delegate import DelegationError
+            raise DelegationError(reason)
+        return resolved
+
     def delegation_authority(self, session_id: str):
         """This session's chain and key for ``tenuo_delegate`` (hermes_tenuo.a2a_delegate)."""
         return self._guard.delegation_authority(session_id)

@@ -1170,6 +1170,14 @@ class HermesGuard:
             return None
         turn = ingress.current_turn()
         if turn is None:
+            # Continuations can lose gateway context after the ingress-bound session is known.
+            with self._session_lock:
+                entry = self._session_warrants.get(session_id)
+                if session_id in self._ingress_roots and entry is not None and _marker_reason(entry[0]) is None:
+                    chain = self._session_warrant_chains.get(session_id, [])
+                    revoked = ingress.is_revoked(None, [*chain, entry[0]])
+                    if revoked is not None:
+                        return f"tenuo: {revoked}; tool call blocked"
             return None
         grant = ingress.grant_for(*turn)
         if grant is None:
@@ -1188,6 +1196,9 @@ class HermesGuard:
                 # A child must keep its own key and narrower grant. Only the ingress
                 # grant itself or a verified descendant belongs to this A2A turn.
                 chain = self._session_warrant_chains.get(session_id, [])
+                revoked = ingress.is_revoked(grant, [*chain, entry[0]])
+                if revoked is not None:
+                    return f"tenuo: {revoked}; tool call blocked"
                 if entry[0] is not grant.warrant and not any(
                         str(w.id) == str(grant.warrant.id) for w in chain):
                     return "tenuo: this session's warrant does not descend from the A2A grant"

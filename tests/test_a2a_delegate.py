@@ -298,3 +298,56 @@ def test_a_delegated_turn_presents_its_grant_to_an_mcp_verifier(k, w_a, home):
     a_meta = a_guard.call_meta("s-a", "ha_get_state", {"entity_id": "light.porch"})
     assert verifier.verify("ha_get_state", {"entity_id": "light.porch"}, meta=a_meta).allowed
     assert HermesGuard().call_meta("s", "x", {}) is None
+
+
+@pytest.mark.parametrize("scoped", [None, "", "unscoped", "scoped-token"])
+def test_scoped_peer_credentials_never_fall_back_to_the_launch_profile(monkeypatch, scoped):
+    import sys
+    from types import ModuleType
+    from hermes_tenuo.a2a_delegate import _secret
+
+    module = ModuleType("agent.secret_scope")
+    class UnscopedSecretError(Exception):
+        pass
+    def get_secret(name):
+        if scoped == "unscoped":
+            raise UnscopedSecretError(name)
+        return scoped
+    module.UnscopedSecretError = UnscopedSecretError
+    module.get_secret = get_secret
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", module)
+    monkeypatch.setenv("TOKEN_HOME", "launch-profile-token")
+    assert _secret("TOKEN_HOME") == ("scoped-token" if scoped == "scoped-token" else "")
+
+
+def test_sessionless_handler_uses_child_authority_and_refuses_unknown_tasks(k, w_a, monkeypatch):
+    from hermes_tenuo import a2a_delegate
+    from hermes_tenuo._guard import PluginGuard
+    from hermes_tenuo.a2a_ingress import grant_to
+
+    child = grant_to(k.a, [w_a], k.c.public_key,
+                     {"ha_get_state": {"entity_id": Exact("light.porch")},
+                      "tenuo_delegate": {name: Wildcard() for name in ("peer", "task", "tools", "ttl_seconds")}}, 120)
+    guard = HermesGuard(warrant=w_a, signing_key=k.a, trusted_roots=[k.root.public_key])
+    guard.set_session_warrant("child", child, k.c, parent_warrant=[w_a])
+    guard._remember_task("child-task", "child")
+    monkeypatch.setattr(a2a_delegate, "load_sender_config", lambda ctx: _config(k))
+    monkeypatch.setattr(a2a_delegate, "_current_session_id", lambda: "")
+    ctx = _Ctx()
+    a2a_delegate.register(ctx, lambda: PluginGuard(guard))
+    handler = ctx.tools["tenuo_delegate"].handler
+    # The parent could grant LIGHT, but the child cannot. No network call is made.
+    result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, task_id="child-task"))
+    assert not result["ok"] and "not within" in result["error"]
+    result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, task_id="unknown"))
+    assert not result["ok"] and "does not identify one session" in result["error"]
+    sent = []
+    def capture_delegate(**kwargs):
+        sent.append(kwargs)
+        return {"grant": {"id": "delegated"}, "peer": "home", "context_id": "context", "state": "done"}
+    monkeypatch.setattr(a2a_delegate, "delegate", capture_delegate)
+    result = json.loads(handler({"peer": "home", "task": "Read porch", "tools": LIGHT}, task_id="child-task"))
+    assert result["ok"] and sent[-1]["chain"] == [w_a, child] and sent[-1]["key"] is k.c
+    guard._remember_task("child-task", "another-child")
+    result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, task_id="child-task"))
+    assert not result["ok"] and "does not identify one session" in result["error"]

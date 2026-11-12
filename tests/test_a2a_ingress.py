@@ -497,3 +497,55 @@ def test_a_restarted_receiver_still_refuses_an_older_revocation_list(keys, w_a, 
     restarted = _ingress(keys, revocation_list=path, state_dir=tmp_path)
     result = restarted.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
     assert result["action"] == "skip" and "older than version 4" in result["reason"]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_same_version_revocation_replacement_cannot_restore_authority(keys, w_a, tmp_path, restart):
+    import os
+    path = tmp_path / "srl.b64"
+    first = _srl(keys, [w_a.id], version=4)
+    _write_srl(path, first)
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    assert ingress.revocations().is_revoked(str(w_a.id))
+    stamp = path.stat()
+    _write_srl(path, _srl(keys, ["x" * len(str(w_a.id))], version=4))
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    if restart:
+        ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    with pytest.raises(IngressRefused, match="conflicts"):
+        ingress.revocations()
+    _write_srl(path, first)
+    assert ingress.revocations().is_revoked(str(w_a.id))
+    _write_srl(path, _srl(keys, [w_a.id], version=5))
+    assert ingress.revocations().version == 5
+
+
+def test_revoked_local_descendant_cannot_run_or_delegate(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    _admit(keys, w_a, ingress, "ctx-1", "light.guest_room")
+    grant = ingress.grant_for("agent-a", "ctx-1")
+    guard = _guard(keys, ingress)
+    child_key = SigningKey.generate()
+    child = grant_to(keys.b, [w_a, grant.warrant], child_key.public_key, {"light_get": {}}, 60)
+    guard.set_session_warrant("child", child, child_key, parent_warrant=[w_a, grant.warrant])
+    turn = ("agent-a", "ctx-1")
+    assert _call(guard, ingress, turn, "light_get", {}, "child") is None
+    _write_srl(path, _srl(keys, [child.id], version=2))
+    result = _call(guard, ingress, turn, "light_get", {}, "child")
+    assert result["action"] == "block" and "revoked" in result["message"]
+    assert guard.delegation_authority("child") == ([], None)
+    assert _call(guard, ingress, None, "light_get", {}, "child")["action"] == "block"
+    assert guard.delegation_authority("child") == ([], None)
+    assert _call(guard, ingress, turn, "light_get", {}, "parent") is None
+
+
+def test_revocation_floor_without_digest_requires_a_newer_signed_list(keys, tmp_path):
+    path = tmp_path / "srl.b64"
+    (tmp_path / "a2a_revocation_version.json").write_text('{"version": 4}')
+    _write_srl(path, _srl(keys, [], version=4))
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    with pytest.raises(IngressRefused, match="publish a newer version"):
+        ingress.revocations()
+    _write_srl(path, _srl(keys, [], version=5))
+    assert ingress.revocations().version == 5

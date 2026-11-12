@@ -11,6 +11,14 @@
 - Git settings that name more than 64 files or hooks folders, or a path longer than 4096
   characters or deeper than 256 folders, are reported as ones that cannot be checked
   instead of being followed.
+- A tool call that Hands refuses (the machine belongs to someone else in a shared chat, the
+  call cannot be routed, the conversation already has its own sandbox) is answered with the
+  refusal and is not run.
+- In a chat other people can read, `/hands setup` and `/hands invite` ask for a direct
+  message instead of printing the pairing line. Pair there, then type `/hands on <name>` in
+  the shared chat.
+- While a shared conversation uses someone's machine, only that person can switch it with
+  `/hands on` or `/hands off`, until the machine's time is over or it is revoked.
 
 ## 0.4.0 - 2026-11-12
 

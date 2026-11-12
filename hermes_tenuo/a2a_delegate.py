@@ -31,7 +31,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import time
 import urllib.error
 import urllib.request
@@ -145,14 +144,9 @@ def grant_spec(tools: Any) -> Dict[str, Dict[str, Any]]:
 
 
 def _secret(name: str) -> str:
-    try:
-        from agent.secret_scope import get_secret
-        value = get_secret(name)
-        if value:
-            return str(value)
-    except Exception:
-        pass
-    return os.environ.get(name, "")
+    from hermes_tenuo._config import _env_secret
+
+    return _env_secret(name) or ""
 
 
 def _egress_text(text: str) -> str:
@@ -291,7 +285,9 @@ def register(ctx: Any, get_guard: Any) -> bool:
             if not available():
                 raise DelegationError("delegation is not configured on this agent")
             guard = get_guard()
-            session_id = _current_session_id()
+            session_id = str(_kw.get("session_id") or _current_session_id())
+            task_id = str(_kw.get("task_id") or "")
+            session_id = guard.delegation_session(session_id, task_id)
             chain, key = guard.delegation_authority(session_id)
             result = delegate(config=config, chain=chain, key=key, peer=args.get("peer", ""),
                               task=args.get("task", ""), tools=args.get("tools"),

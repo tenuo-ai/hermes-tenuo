@@ -110,3 +110,21 @@ def test_revocation_list_bytes_are_read_raw_or_as_base64():
     raw = bytes(range(256)) + b"  \n"  # binary that ends in whitespace bytes stays intact
     assert srl_bytes(raw) == raw
     assert srl_bytes(base64.b64encode(b"abc") + b"\n") == b"abc"
+
+
+@pytest.mark.parametrize("token", [None, "", "example-token"])
+def test_sender_readiness_requires_each_peer_token(tmp_path, monkeypatch, capsys, token):
+    from hermes_tenuo.a2a_delegate import Peer, SenderConfig
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("PEER_TEST_TOKEN", raising=False)
+    if token is not None:
+        (tmp_path / ".env").write_text(f"PEER_TEST_TOKEN={token}\n")
+    monkeypatch.setattr("hermes_tenuo.a2a_ingress.load_ingress", lambda *a, **kw: None)
+    monkeypatch.setattr("hermes_tenuo.a2a_delegate.load_sender_config", lambda ctx: SenderConfig(
+        peers={"peer": Peer("peer", "http://peer:9900", "unused", "PEER_TEST_TOKEN")}))
+    assert a2a_cli.cmd_check(None) == (0 if token else 1)
+    output = capsys.readouterr()
+    assert "example-token" not in output.out + output.err
+    if not token:
+        assert "PEER_TEST_TOKEN" in output.err

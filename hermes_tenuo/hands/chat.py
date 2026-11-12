@@ -26,6 +26,9 @@ _saved: Dict[str, Dict[str, Any]] = {}  # task -> the overrides it had before /h
 _cwd_before: Dict[str, Dict[str, Any]] = {}  # conversation -> gateway cwd records to restore on /hands off
 _route: "contextvars.ContextVar[Any]" = contextvars.ContextVar("hands_device", default=None)
 can_switch = False  # set when this Hermes version lets a plugin wrap tool calls
+_switching = threading.Lock()  # one /hands on or /hands off at a time
+_NOT_YOURS = ("This conversation is using '{}', which belongs to the person who paired it. "
+              "Only they can switch it; nothing was changed.")
 
 HELP = """Hands runs this conversation's commands on your own machine.
   /hands setup         choose permissions and connect your machine
@@ -99,7 +102,13 @@ def before_turn(**_: Any) -> dict:
     try:
         session = hub.pick(name or "", _owner())
     except HandsUnavailable:
-        state = {"target": "paired device unavailable", "action": "Ask the user to reconnect locally. " + _return_to_server()}
+        if _held_by(_conversation(), _owner()):
+            state = {"target": "paired device unavailable to this sender: it belongs to another person in this chat",
+                     "action": "Terminal and file tools are refused for this sender. The person who paired the "
+                               "machine can type /hands off."}
+        else:
+            state = {"target": "paired device unavailable",
+                     "action": "Ask the user to reconnect locally. " + _return_to_server()}
     else:
         state = {"machine": session.name, "folder": session.folder, "access": session.mode,
                  "internet": session.network, "minutes_left": max(0, int((session.expires - time.time()) / 60))}
@@ -151,6 +160,56 @@ def _owner() -> str:
         return NOBODY if (messaging() if callable(messaging) else platform not in ("", "cli", "desktop")) else ""
     except Exception:
         return NOBODY
+
+
+def _private() -> bool:
+    """Whether only the person asking reads this chat: a single-user Hermes (the CLI, the
+    desktop app), or a direct message on a chat platform. A chat on a platform that Hermes
+    does not describe counts as shared."""
+    try:
+        from gateway import session_context as context
+    except Exception:
+        return True
+    try:
+        read = context.get_session_env
+        messaging = getattr(context, "session_is_messaging_surface", None)
+        if not (messaging() if callable(messaging) else
+                str(read("HERMES_SESSION_PLATFORM", "") or "") not in ("", "cli", "desktop")):
+            return True
+        return str(read("HERMES_SESSION_CHAT_TYPE", "") or "") == "dm"
+    except Exception:
+        return False
+
+
+def _someone_elses(hub: Any, name: Any, asking: str) -> bool:
+    """Whether machine *name* is another person's and still inside its time window."""
+    return bool(hub is not None and name) and any(
+        s.name == name and s.owner and s.owner != asking for s in hub.sessions())
+
+
+def _held_by(conversation: str, asking: str) -> str:
+    """The machine this conversation uses, when it is someone else's and still inside its
+    time window; "" otherwise. Only that person switches the conversation while it is."""
+    with _lock:
+        name = _wanted.get(conversation)
+    return name if _someone_elses(get_hub(), name, asking) else ""
+
+
+def _switch(conversation: str, asking: str, name: Any) -> str:
+    """Point *conversation* at machine *name* (None: back at the server). The look at whose
+    machine it uses now and the change are one step, so two people's commands cannot cross.
+    Returns "" when done, or the machine it was left on because that is someone else's."""
+    hub = get_hub()
+    with _lock:
+        current = _wanted.get(conversation)
+        if _someone_elses(hub, current, asking):
+            return current
+        if name is None:
+            _wanted.pop(conversation, None)
+        else:
+            _wanted[conversation] = name
+        _remember()
+    return ""
 
 
 def _remember() -> None:
@@ -234,6 +293,10 @@ def command(raw_args: str = "") -> str:
     if asking == NOBODY and verb in ("invite", "setup", "verify", "on", "revoke"):
         return ("Hands cannot tell who sent this message, so nothing was changed. "
                 "Send the command again as a message of its own.")
+    if verb in ("invite", "setup") and not _private():
+        return ("Other people can read this chat, and anyone who ran the pairing line would connect their "
+                "machine in your name. Send /hands setup to me in a direct message, then type "
+                "/hands on <name> here.")
     try:
         if verb in ("invite", "setup"):
             mode = words[1] if verb == "setup" else "edit"
@@ -275,17 +338,23 @@ def command(raw_args: str = "") -> str:
                 return ("This Hermes version can't switch one conversation to a machine. Set "
                         "`terminal.backend: hands` for a profile to run all of its commands there.")
             name = words[1] if len(words) > 1 else ""
-            session = hub.pick(name, asking)
-            with _lock:
-                _wanted[_conversation()] = session.name
-                _remember()
+            conversation = _conversation()
+            with _switching:
+                held = _held_by(conversation, asking)  # said before any word about their own machines
+                session = None if held else hub.pick(name, asking)
+                held = held or _switch(conversation, asking, session.name)
+            if held:
+                return _NOT_YOURS.format(held)
             return ("This conversation now runs commands on: " + describe(session)
                     + "\n" + _return_to_server() + " Ctrl-C on the laptop ends access.")
         if verb == "off":
-            with _lock:
-                _wanted.pop(_conversation(), None)
-                _remember()
-            _release(_conversation())
+            conversation = _conversation()
+            with _switching:  # with its clean-up, so that cannot undo a later /hands on
+                held = _switch(conversation, asking, None)
+                if not held:
+                    _release(conversation)
+            if held:
+                return _NOT_YOURS.format(held)
             if _whole_profile():
                 return ("This profile runs every conversation's commands on your machine (terminal.backend: "
                         "hands), so /hands off cannot move this one to the server. Change the profile's "
@@ -498,8 +567,33 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
 
 def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, task_id: str = "",
                 **_: Any) -> Any:
-    """tool_execution middleware: run this tool call on the device when the conversation is
-    switched on (or the whole profile uses the `hands` backend).
+    """tool_execution middleware. A call that Hands refuses is answered here, as the tool's
+    result. Hermes carries on without a middleware that raises before the tool has run, which
+    would run a refused call on the server."""
+    reached = []
+
+    def run_tool(*a: Any, **kw: Any) -> Any:
+        reached.append(True)
+        return next_call(*a, **kw)
+
+    try:
+        return _around_tool(tool_name, run_tool, task_id)
+    except HandsUnavailable as e:
+        if reached:
+            raise
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    except Exception as e:
+        with _lock:
+            switched = _wanted.get(_conversation()) is not None
+        if reached or not switched:
+            raise
+        logger.warning("hermes-tenuo hands: could not route tool call to the device (%s)", e)
+        return json.dumps({"error": "hands: could not route this tool call to the device; it was not run"})
+
+
+def _around_tool(tool_name: str, next_call: Any, task_id: str) -> Any:
+    """Run this tool call on the device when the conversation is switched on (or the whole
+    profile uses the `hands` backend).
 
     Hermes picks the terminal backend from a per-context policy, so the switch wraps this
     call only. The task also gets its own environment slot, so the server's shell for the
@@ -560,7 +654,7 @@ def around_tool(tool_name: str = "", args: Any = None, next_call: Any = None, ta
             register_task_env_overrides(task, {**before, "env_type": NAME})
         elif switched:
             _drop_shell(task)  # /hands on <another machine>: never keep running on the first one
-        if _other_shell(task):
+        if tool_name in ON_DEVICE and _other_shell(task):
             raise HandsUnavailable("hands: this conversation already has its own sandbox on the server, so its "
                                    "commands cannot move to your machine. Start a new conversation and type "
                                    "/hands on there; this call was not run")

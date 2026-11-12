@@ -138,7 +138,7 @@ release PR and publication run.
 
 The candidate includes the Hands timeout follow-up (#79), Git protection (#78),
 opt-in A2A delegation groundwork (#80), and MCP wrapping (#81). A2A remains experimental;
-the A2A sender, receiver hardening and operator commands (#84) are outside this release.
+further A2A delegation work is outside this release.
 
 - Real Hermes 0.23.1 (`95fc3e668f`), with its complete runtime dependencies:
   36 Hands dispatch and timeout/output regressions passed on the merged candidate

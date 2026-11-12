@@ -31,6 +31,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -156,13 +157,30 @@ class _JsonState:
     def __init__(self, path: Optional[Any]) -> None:
         self.path = path
 
-    def load(self) -> Dict[str, float]:
+    def load(self) -> Dict[str, Any]:
         if self.path is None or not self.path.exists():
             return {}
         data = json.loads(self.path.read_text())
-        return {str(k): float(v) for k, v in dict(data).items()}
+        return {str(k): v for k, v in dict(data).items()}
 
-    def save(self, data: Dict[str, float]) -> None:
+    @contextmanager
+    def locked(self):
+        """Serialize revocation acceptance by receivers sharing the same state directory."""
+        if self.path is None:
+            yield
+            return
+        import fcntl
+        import os
+
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def save(self, data: Dict[str, Any]) -> None:
         if self.path is None:
             return
         from hermes_tenuo.issuance import write_private_file
@@ -366,7 +384,7 @@ class A2AIngress:
         self.nonces = NonceStore(path=state_dir / "a2a_nonces.json" if state_dir else None)
         self._audit = audit
         self._srl_path = revocation_list
-        self._srl_stamp: Optional[Tuple[float, int]] = None
+        self._srl_digest: Optional[str] = None
         self._srl: Optional[Any] = None
         self._srl_error: Optional[str] = None
         self._srl_lock = threading.Lock()
@@ -383,28 +401,31 @@ class A2AIngress:
             return None
         from tenuo import Authorizer, SignedRevocationList
 
-        with self._srl_lock:
+        with self._srl_lock, self._srl_floor.locked():
             try:
-                stat = self._srl_path.stat()
-                stamp = (stat.st_mtime, stat.st_size)
-                if stamp != self._srl_stamp:
-                    srl = SignedRevocationList.from_bytes(srl_bytes(self._srl_path.read_bytes()))
-                    Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
-                    floor = int(self._srl_floor.load().get("version", 0))
-                    if self._srl is not None:
-                        floor = max(floor, int(self._srl.version))
-                    if srl.version < floor:
-                        raise ValueError(f"version {srl.version} is older than version {floor} already accepted")
-                    if srl.version > floor:
-                        self._srl_floor.save({"version": float(srl.version)})
-                    self._srl, self._srl_stamp, self._srl_error = srl, stamp, None
+                raw = srl_bytes(self._srl_path.read_bytes())
+                digest = hashlib.sha256(raw).hexdigest()
+                # Read the bytes on every check: timestamps and sizes can be preserved on replacement.
+                srl = SignedRevocationList.from_bytes(raw)
+                Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
+                accepted = self._srl_floor.load()
+                floor = int(accepted.get("version", 0))
+                prior_digest = accepted.get("digest")
+                if self._srl is not None and int(self._srl.version) >= floor:
+                    floor, prior_digest = int(self._srl.version), self._srl_digest
+                if srl.version < floor:
+                    raise ValueError(f"version {srl.version} is older than version {floor} already accepted")
+                if srl.version == floor and (accepted or self._srl is not None) and digest != prior_digest:
+                    raise ValueError("revocation list conflicts with the accepted version; publish a newer version")
+                self._srl_floor.save({"version": int(srl.version), "digest": digest})
+                self._srl, self._srl_digest, self._srl_error = srl, digest, None
             except Exception as exc:
                 self._srl_error = f"the revocation list cannot be used ({exc})"
             if self._srl_error:
                 raise IngressRefused(self._srl_error)
             return self._srl
 
-    def is_revoked(self, grant: VerifiedGrant) -> Optional[str]:
+    def is_revoked(self, grant: Optional[VerifiedGrant], session_chain: Optional[List[Any]] = None) -> Optional[str]:
         """Why the grant may no longer be used, or None. Checked at every tool call."""
         try:
             srl = self.revocations()
@@ -412,7 +433,7 @@ class A2AIngress:
             return str(refused)
         if srl is None:
             return None
-        for warrant in [*grant.chain, grant.warrant]:
+        for warrant in ([*grant.chain, grant.warrant] if grant is not None else []) + (session_chain or []):
             if srl.is_revoked(str(warrant.id)):
                 return "this delegation was revoked"
         return None

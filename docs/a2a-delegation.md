@@ -129,3 +129,9 @@ that is missing, not signed by a trusted root, or older than the last one refuse
 - A sender sees a dropped task as an empty reply (`refused_or_empty`), not a reasoned refusal.
 - The receiving agent's model still runs for an admitted task on its own credentials.
 - Tested with Hermes v0.22.6.
+
+
+The receiver persists the accepted revocation-list version and content digest. A different list at
+that same version is refused, including after restart; publish a strictly newer signed list to update
+revocations. If upgrading a preview workspace whose saved version has no digest, publish a newer list
+before resuming delegated work. Do not delete the saved state to recover.
