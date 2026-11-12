@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Hands
+
+- `hands up --protect-git` (macOS): commands cannot change a repository's settings or
+  hooks, move or replace `.git`, or create one, instead of having such changes reported.
+  Works for a repository, a linked worktree or a submodule checkout. Hands does not start
+  with the flag if the folder holds something the lock would not hold. The flag is refused
+  on Linux, where bubblewrap cannot hold it; changes are reported there as before.
+
 ## 0.4.0 - 2026-11-11
 
 ### Upgrading from 0.3

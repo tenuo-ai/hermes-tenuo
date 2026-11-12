@@ -143,17 +143,111 @@ def _read(folder_fd: int, relative: str) -> Optional[str]:
     except FileNotFoundError:
         return None
     try:
-        data = b""
-        while len(data) <= _LIMIT:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            data += chunk
-        if len(data) > _LIMIT:
-            raise OSError("too large")
-        return data.decode("utf-8", "replace")
+        return _text(fd)
     finally:
         os.close(fd)
+
+
+def _text(fd: int) -> str:
+    data = b""
+    while len(data) <= _LIMIT:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        data += chunk
+    if len(data) > _LIMIT:
+        raise OSError("too large")
+    return data.decode("utf-8", "replace")
+
+
+def _read_outside(path: str) -> Optional[str]:
+    """The text of a regular file commands cannot write; None if it is absent. Raises OSError otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("not a regular file")
+        if info.st_nlink > 1:
+            raise OSError("outside settings may have a writable hard-link alias")
+        return _text(fd)
+    finally:
+        os.close(fd)
+
+
+def _full(value: str, base: str) -> str:
+    """A path from a settings file in folder *base*, as git reads it; empty if it cannot be told."""
+    path = os.path.expanduser(value) if value.startswith("~") else value
+    if not path or path.startswith("~"):
+        return ""
+    return os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+
+
+def _through_a_root(roots: List[Tuple[str, int, str]], path: str) -> bool:
+    """Detect writable links in any component, including links reached via outside aliases."""
+    pending = os.path.abspath(path).split(os.sep)
+    current, links = os.sep, 0
+    while pending:
+        part = pending.pop(0)
+        if not part or part == ".":
+            continue
+        current = os.path.normpath(os.path.join(current, part))
+        if _locate(roots, current, 0, "") is not None:
+            return True
+        if os.path.islink(current):
+            links += 1
+            if links > 40:
+                return True
+            target = os.readlink(current)
+            target = target if os.path.isabs(target) else os.path.join(os.path.dirname(current), target)
+            pending = target.split(os.sep) + pending
+            current = os.sep
+    return False
+
+
+def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str]:
+    """The settings files git reads for a folder whose `.git` is a pointer to a git
+    folder commands cannot write: a linked worktree, or a submodule's checkout."""
+    try:
+        text = _read(roots[0][1], ".git") or ""
+    except OSError:
+        text = ""
+    pointer = re.match(r"gitdir:[ \t]*(.+)", text.strip())
+    gitdir = _full(pointer.group(1).strip(), roots[0][0]) if pointer else ""
+    if not gitdir or not os.path.isdir(gitdir):
+        problems.append(".git does not point to a git folder")
+        return []
+    try:
+        common = _read_outside(os.path.join(gitdir, "commondir"))
+    except OSError:
+        common = ""
+    shared = gitdir if common is None else _full(common.strip(), gitdir)
+    if not shared or _locate(roots, shared, 0, "") is not None:
+        problems.append(".git leads to settings in a folder that cannot be locked")
+        return []
+    _outside_hooks(roots, os.path.join(shared, "hooks"), problems)
+    return [os.path.join(shared, "config"), os.path.join(gitdir, "config.worktree")]
+
+
+def _outside_hooks(roots: List[Tuple[str, int, str]], hooks: str, problems: List[str]) -> None:
+    """Outside hook locations must not be redirectable or aliased from writable paths."""
+    try:
+        if _through_a_root(roots, hooks):
+            problems.append("external hooks traverse a writable folder")
+        else:
+            # Individual hook symlinks may reference project scripts (documented),
+            # but a regular hook must not have an unprotected writable hard-link alias.
+            for hook in _HOOK_NAMES:
+                try:
+                    info = os.lstat(os.path.join(hooks, hook))
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                    problems.append(f"external hook {hook} has a second name (a hard link)")
+    except OSError:
+        problems.append("external hooks cannot be inspected")
 
 
 def _logical_lines(text: str) -> List[str]:
@@ -238,9 +332,11 @@ def _hook_mark(fd: int, name: str, budget: List[int]) -> Optional[str]:
         os.close(hook)
 
 
-def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int]) -> None:
+def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], budget: List[int],
+           odd: Optional[List[str]] = None) -> None:
     """Fingerprint the hooks in one folder. Only the names git runs are looked at, so a
-    hooks folder that is the project itself costs no more than any other."""
+    hooks folder that is the project itself costs no more than any other. `odd` collects
+    the hooks that are there but are not plain files."""
     try:
         fd = _open(folder_fd, relative, directory=True)
     except FileNotFoundError:
@@ -265,6 +361,8 @@ def _hooks(folder_fd: int, relative: str, label: str, found: Dict[str, str], bud
                 # notice when it is replaced.
                 found[f"{label}/{name} ({_UNCHECKED})"] = (
                     f"{info.st_mode}:{info.st_size}:{info.st_mtime_ns}:{info.st_ino}")
+                if odd is not None:
+                    odd.append(f"{label}/{name} ({_UNCHECKED})")
     finally:
         os.close(fd)
 
@@ -323,6 +421,14 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
     *also* (the commands' temp folder). A setting that pulls in a file is itself recorded,
     so one that points anywhere else is still seen when it is added or changed.
     """
+    return _scan(folder, also, None)
+
+
+def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> Dict[str, str]:
+    """settings(), and into *read* (when given) where the settings came from. Only then are
+    settings files outside the folders read too: the ones a `.git` pointer leads to, and
+    the ones an included file names. Commands cannot change those, but what they pull in
+    can be somewhere commands can."""
     found: Dict[str, str] = {}
     if not hasattr(os, "O_NOFOLLOW"):
         return found
@@ -352,8 +458,15 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
             return _path_label(roots, index, relative)
 
         git_dirs = _git_dirs(roots, kind, found)
+        if read is not None:
+            read.update(kind=kind, git_dirs=list(git_dirs), files=[], missing=[], hooks=[], odd=[], pointer=[])
         # Each of the repository's folders may hold shared and per-worktree settings.
-        queue = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
+        own = [(index, os.path.join(gitdir, name)) for index, gitdir in git_dirs for name in ("config", "config.worktree")]
+        queue: list = list(own)
+        odd = read["odd"] if read is not None else None
+        if read is not None and stat.S_ISREG(kind) and not git_dirs:
+            queue += [(None, path) for path in _pointed(roots, read["pointer"])]
+        most = _FILES + len(queue)
         seen: set = set()
         hook_folders: List[Tuple[int, str]] = []
         while queue:
@@ -361,46 +474,247 @@ def settings(folder: str, also: Sequence[str] = ()) -> Dict[str, str]:
             if (index, relative) in seen:
                 continue
             seen.add((index, relative))
-            if len(seen) > _FILES + 2 * len(git_dirs):
+            if len(seen) > most:
                 found[f"more included settings files ({_UNCHECKED})"] = "unchecked"
                 break
             try:
-                text = _read(roots[index][1], relative)
+                if index is None and _through_a_root(roots, relative):
+                    raise OSError("reached through a link commands can change")
+                text = _read(roots[index][1], relative) if index is not None else _read_outside(relative)
             except OSError:
-                found[f"{label(index, relative)} ({_UNCHECKED})"] = "unchecked"
+                found[f"{relative if index is None else label(index, relative)} ({_UNCHECKED})"] = "unchecked"
                 continue
+            here = os.path.dirname(relative) if index is None else os.path.join(roots[index][0], os.path.dirname(relative))
+            if read is not None and index is not None and (index, relative) not in own:   # a file the settings include
+                read["files" if text is not None else "missing"].append(os.path.join(roots[index][0], relative))
             if text is None:
                 continue
             for section, sub, key, value in _entries(text):
                 name = ".".join(part for part in (section, sub, key) if part)
                 if (section, key) in (("include", "path"), ("includeif", "path")):
                     found[name] = _digest(found.get(name, "") + value)
-                    target = _locate(roots, value, index, os.path.dirname(relative))
+                    full = _full(value, here)
+                    target = _locate(roots, full, 0, "") if full else None
                     if target is not None and target[1] != ".":
                         queue.append(target)
+                    elif target is None and full and read is not None:
+                        queue.append((None, full))
                 elif (section, key) == ("core", "hookspath"):
                     found[name] = _digest(found.get(name, "") + value)
                     target = _locate(roots, value, 0, "")
                     if target is not None and target not in hook_folders:
                         hook_folders.append(target)   # "." is the folder itself
+                    elif target is None and read is not None:
+                        outside = _full(value, roots[0][0])
+                        issues: List[str] = []
+                        if outside:
+                            _outside_hooks(roots, outside, issues)
+                        for issue in issues:
+                            found[f"{issue} ({_UNCHECKED})"] = "unchecked"
                 elif _runs(section, sub, key, value):
                     found[name] = _digest(found.get(name, "") + value)
         budget = [_HOOK_BYTES]
         for index, gitdir in git_dirs:
             hooks = os.path.join(gitdir, "hooks")
             shown = "hooks" if (index, gitdir) == (0, ".git") else label(index, hooks)
-            _hooks(roots[index][1], hooks, shown, found, budget)
+            _hooks(roots[index][1], hooks, shown, found, budget, odd)
         # Git uses the last hooks path it reads; every one named is looked at, so the
         # order files were read in here cannot hide the one in effect.
         for index, relative in hook_folders[:_HOOK_FOLDERS]:
             where = "hooks in the shared folder" if (index, relative) == (0, ".") else label(index, relative)
-            _hooks(roots[index][1], relative, where, found, budget)
+            _hooks(roots[index][1], relative, where, found, budget, odd)
+        if read is not None:
+            read["hooks"] = [os.path.normpath(os.path.join(roots[index][0], relative)) for index, relative in hook_folders]
         if len(hook_folders) > _HOOK_FOLDERS:
             found[f"more hooks folders ({_UNCHECKED})"] = "unchecked"
         return found
     finally:
         for _root, fd, _label in roots:
             os.close(fd)
+
+
+def sources(folder: str, also: Sequence[str] = ()) -> Tuple[List[str], List[str], List[str]]:
+    """What must not change for git in *folder* to keep running what it runs now.
+
+    Returns (paths, problems, notes). *paths* are the files and hooks folders the
+    repository's settings pull in from places commands can write; its own settings files
+    and hooks folder have fixed names and are not listed. *problems* say why they cannot
+    all be named; with any, the list is not complete. *notes* are hooks that are links or
+    other special files: the name can be held in place, not what it leads to.
+
+    *folder* may be a repository, or a linked worktree or submodule checkout whose git
+    folder is somewhere commands cannot write.
+    """
+    read: Dict[str, list] = {}
+    found = _scan(folder, also, read)
+    odd = list(read.get("odd", ()))
+    problems = sorted(name for name in found if name.endswith(f"({_UNCHECKED})") and name not in odd)
+    kind, top = read.get("kind"), os.path.normpath(folder)
+    if kind is not None and stat.S_ISREG(kind):
+        problems = [p for p in problems if p != f".git ({_UNCHECKED})"] + read.get("pointer", [])
+        if read.get("git_dirs"):
+            problems.insert(0, ".git points to a git folder that commands can write")
+    elif kind is not None and stat.S_ISDIR(kind) and (
+            read.get("git_dirs") != [(0, ".git")] or os.path.lexists(os.path.join(top, ".git", "commondir"))):
+        problems.append(".git/commondir sends git to another folder for its settings")
+    problems += [f"{os.path.relpath(path, top)} is named in git settings and does not exist"
+                 for path in read.get("missing", ())]
+    paths: List[str] = []
+    for path in [*read.get("files", ()), *read.get("hooks", ())]:
+        if path in (top, *map(os.path.normpath, also)):
+            problems.append("core.hooksPath names a whole folder commands work in")
+        elif not os.path.lexists(path):
+            problems.append(f"{os.path.relpath(path, top)} is named in git settings and does not exist")
+        elif path not in paths:
+            paths.append(path)
+    return paths, problems, sorted(odd)
+
+
+_WALKED = 150000    # directory entries inspected for repositories, in one start
+_CHECKED = 200000   # files looked at inside git folders, in one start
+# Object files are shared between repositories on purpose, and git runs none of them.
+_OBJECT = re.compile(r"/objects/(?:[0-9a-f]{2}/[0-9a-f]{38,62}|pack/[^/]+\.(?:pack|idx|rev|bitmap|mtimes))$")
+
+
+def _held(path: str) -> bool:
+    """Whether *path* is a git folder the --protect-git rules hold by its name: a `.git`,
+    one of its worktree records, or something under its `modules`."""
+    parts = path.split(os.sep)
+    for at, part in enumerate(parts):
+        rest = [p.lower() for p in parts[at + 1:]]
+        if part.lower() == ".git" and (not rest or rest[0] == "modules" or (len(rest) == 2 and rest[0] == "worktrees")):
+            return True
+    return False
+
+
+def loose(folder: str, also: Sequence[str] = (), paths: Sequence[str] = ()) -> Tuple[List[str], bool]:
+    """What the path rules of --protect-git would not hold in *folder* as it is now, and
+    whether everything could be looked at.
+
+    The rules go by path. They do not hold for a settings file or hook that has a second
+    name (a hard link), is a link, or belongs to a repository whose `.git` sends git to a
+    folder with another name. Looks at the folder's own repository, every repository in
+    a subfolder, their submodules and worktree records, and *paths* (what the settings
+    pull in). Reads only pointer files; follows no link.
+    """
+    top = os.path.normpath(folder)
+    reach = [os.path.realpath(p) for p in (folder, *also)]
+    problems: List[str] = []
+    left = [_CHECKED]
+
+    def name(path: str) -> str:
+        return os.path.relpath(path, top)
+
+    def held(target: str) -> bool:
+        real = os.path.realpath(target)
+        return _held(real) or not any(real == r or real.startswith(r + os.sep) for r in reach)
+
+    def plain(path: str, links: bool = False, objects: bool = False) -> Optional[os.stat_result]:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            problems.append(f"{name(path)} cannot be inspected")
+            return None
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            problems.append(f"{name(path)} is not a regular file or directory")
+        if stat.S_ISLNK(info.st_mode) and not links:
+            problems.append(f"{name(path)} is a link")
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and not (objects and _OBJECT.search(path)):
+            problems.append(f"{name(path)} has a second name (a hard link)")
+        return info
+
+    def tree(path: str, links: bool, objects: bool = False) -> None:
+        info = plain(path)
+        stack = [path] if info is not None and stat.S_ISDIR(info.st_mode) else []
+        while stack and left[0] >= 0:
+            here = stack.pop()
+            try:
+                with os.scandir(here) as scan:
+                    entries = []
+                    for entry in scan:
+                        entries.append(entry.path)
+                        if len(entries) > left[0]:
+                            left[0] = -1
+                            return
+            except OSError:
+                problems.append(f"{name(here)} cannot be read")
+                continue
+            left[0] -= len(entries) + 1
+            for entry in entries:
+                info = plain(entry, links, objects)
+                if not links and os.path.basename(entry).lower() == "commondir":
+                    target = pointer(entry, os.path.dirname(entry))
+                    if target is not None and not held(target):
+                        problems.append(f"{name(entry)} sends git to a folder the lock does not hold")
+                if info is not None and stat.S_ISDIR(info.st_mode):
+                    stack.append(entry)
+
+    def pointer(path: str, base: str, prefix: str = "") -> Optional[str]:
+        """Where a pointer file sends git, or None if it is absent or not one."""
+        try:
+            text = (_read_outside(path) or "").strip()
+        except OSError:
+            problems.append(f"{name(path)} cannot be read")
+            return None
+        if prefix and not text.startswith(prefix):
+            return None
+        return _full(text[len(prefix):].strip(), base) or None
+
+    def repository(meta: str, nested: bool) -> None:
+        for settings in ("config", "config.worktree", "commondir"):
+            plain(os.path.join(meta, settings))
+        if nested and os.path.lexists(os.path.join(meta, "commondir")):
+            problems.append(f"{name(meta)}/commondir sends git to another folder for its settings")
+        tree(os.path.join(meta, "hooks"), links=True)   # a hook may be a link; the folder may not
+        tree(os.path.join(meta, "modules"), links=False, objects=True)
+        records = os.path.join(meta, "worktrees")
+        tree(records, links=False)
+        try:
+            names = os.listdir(records)
+        except OSError:
+            names = []
+        for record in names:
+            target = pointer(os.path.join(records, record, "commondir"), os.path.join(records, record))
+            if target is not None and not held(target):
+                problems.append(f"{name(os.path.join(records, record))}/commondir sends git to a folder the lock does not hold")
+
+    walked, stack = _WALKED, [top, *(p for p in also if os.path.isdir(p))]
+    while stack and walked >= 0:
+        here = stack.pop()
+        walked -= 1
+        try:
+            with os.scandir(here) as scan:
+                entries = []
+                for entry in scan:
+                    walked -= 1
+                    if walked < 0:
+                        break
+                    entries.append(entry)
+        except OSError:
+            problems.append(f"{name(here)} cannot be read")
+            continue
+        for entry in entries:
+            if entry.name.lower() != ".git":
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                continue
+            nested = here != top
+            info = plain(entry.path, links=not nested)   # at the top, sources() has the say
+            if info is None:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                repository(entry.path, nested)
+                # A repository can itself contain repositories (even under objects/).
+                stack.append(entry.path)
+            elif stat.S_ISREG(info.st_mode) and nested:
+                target = pointer(entry.path, here, "gitdir:")
+                if target is not None and not held(target):
+                    problems.append(f"{name(entry.path)} points to a git folder the lock does not hold")
+    for path in paths:
+        tree(path, links=True)
+    return sorted(set(problems)), left[0] >= 0 and walked >= 0
 
 
 def changed(before: Dict[str, str], after: Dict[str, str]) -> List[str]:

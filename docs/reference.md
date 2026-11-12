@@ -347,7 +347,7 @@ someone else in a shared chat does not run on it.
 | `/hands off` | chat | This conversation runs on the server again. |
 | `/hands status` | chat | Which machines are up, and for how long. |
 | `/hands revoke <name>` | chat | Forgets a machine; it needs a new invite. |
-| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. `--network` lets them use the internet. |
+| `hermes-tenuo hands up [INVITE] --dir FOLDER --for 4h` | your machine | Shares one folder. The invite is only needed the first time. `--read-only` lets commands look at the folder without changing it. `--read FOLDER` shows them one more folder in your home folder; `--read-home` shows all of it. `--network` lets them use the internet. `--protect-git` (macOS) keeps them from changing git settings and hooks. |
 | `hermes-tenuo hands check [INVITE] --dir FOLDER` | your machine | Says whether this machine is ready: the folder, the sandbox, whether the server can be reached. Pairs nothing and runs nothing. |
 | `hermes-tenuo hands up [INVITE] --dir FOLDER --preview` | your machine | Shows sharing policy locally, without connecting, pairing, or creating a key. |
 | `hermes-tenuo hands log` | your machine | What the server ran here. |
@@ -402,6 +402,63 @@ note when a command adds or changes one, and again when Hands stops; check
 `.git/config` and `.git/hooks` before using git there yourself. Repositories in
 subfolders are not watched. On macOS, commands cannot open other terminal
 windows, read your preferences, or read other programs' temporary files.
+
+To refuse those changes instead of reporting them, start with `--protect-git`
+(macOS only). Wherever commands can write, in the shared folder and in their
+temp folder:
+
+- nothing named `.git` can be created, so `git init`, `git clone`,
+  `git worktree add` and `git submodule add` fail, and so do tools and tests
+  that make a repository in a temp folder;
+- a repository's `.git` cannot be moved, replaced or pointed somewhere else;
+- its settings (`.git/config`, `config.worktree`, `commondir`), its hooks
+  folder, its submodules (`.git/modules`) and its records of other worktrees
+  cannot be changed;
+- for the shared folder's own repository, the files its settings include and
+  the hooks folder they name (`core.hooksPath`) cannot be changed either.
+
+So `git config`, `git remote add`, `git lfs install`, hook installers and work
+inside a submodule fail. `git push -u`, checking out a remote branch and
+`git branch -m` do their work and then say the settings could not be written
+(pass `--no-track` to avoid the message). Commit, branch, checkout, merge,
+rebase, stash, tag, diff, status, fetch, pull and push work as before, also in
+a linked worktree or a repository in a subfolder that was already there.
+Commands get a temp folder of their own for these sessions, so caches from
+sessions without the flag are not reused.
+
+The shared folder can also be a linked worktree or a submodule checkout, whose
+git folder is elsewhere: Hands reads that repository's settings to find what
+they pull in from the shared folder, and locks the `.git` pointer.
+
+Before it starts with the flag, Hands looks through the shared folder for
+anything the lock would not hold, and does not start if it finds some:
+
+- a settings file or hook with a second name (a hard link), or one that is a
+  link, in the folder's own repository, a repository in a subfolder, a
+  submodule or a worktree record;
+- a `.git` that sends git to a folder commands can write under another name
+  (a `.git` file or a `commondir` pointing there);
+- settings that name a file or a hooks folder that is missing or reached
+  through a link;
+- protected metadata that is unreadable or a special file, or a folder too
+  large to look through. The scan includes the session’s writable temp folder.
+
+`hermes-tenuo hands check --protect-git` says which. On a very large folder
+the look takes a few seconds. Reporting stays on as well.
+
+The flag keeps settings as they are when Hands starts; it does not judge
+them. A hook or setting that was already there still runs what it names, so if
+a hook is a link to a script in the project, or calls one, commands can change
+that script. Not covered: files in the shared folder that your global git
+settings name, what the settings of a repository in a subfolder pull in, a
+repository without a `.git` (a bare one, which commands can still make or
+change), and work a command left unfinished (look at `git status` before
+continuing a rebase you did not start).
+
+On Linux the flag is refused. Git has to create and rename files in `.git`,
+and bubblewrap can make existing files read-only but cannot refuse new names
+in a folder that stays writable, so a lock there would not hold. Changes are
+reported, as without the flag.
 
 What your machine enforces, whatever the server asks:
 
@@ -590,8 +647,8 @@ hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
 hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home] [--network]   # on your own machine
-hermes-tenuo hands check [INVITE] [--dir FOLDER]
+hermes-tenuo hands up [INVITE] [--dir FOLDER] [--for 4h] [--name NAME] [--read-only] [--read FOLDER] [--read-home] [--network] [--protect-git]   # on your own machine
+hermes-tenuo hands check [INVITE] [--dir FOLDER] [--protect-git]
 hermes-tenuo hands log [--last N]
 ```
 
