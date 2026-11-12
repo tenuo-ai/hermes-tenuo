@@ -428,6 +428,25 @@ NO_NETWORK = ("Could not resolve host", "Temporary failure in name resolution", 
               "Network is unreachable", "network is unreachable", "ENOTFOUND", "EAI_AGAIN")
 
 
+# A machine sends a file with what it recognises as secrets replaced, and Hermes will
+# not write back a file it could not read exactly. That refusal is right, but neither
+# side says why, so the result does.
+_WITH_TERMINAL = ("Edit it with a terminal command instead (sed, or a short script), "
+                  "or ask the user to make the change.")
+
+
+def _redaction_note(data: Dict[str, Any], tool_name: str, session: Any) -> str:
+    if tool_name == "read_file" and "[redacted]" in str(data.get("content") or ""):
+        return (f"'{session.name}' replaced what it recognises as secrets in this file with [redacted] before "
+                "sending it. The file on the machine is unchanged, and the file tools cannot edit it. "
+                + _WITH_TERMINAL)
+    if tool_name in ("patch", "write_file") and "Failed to read file" in str(data.get("error") or ""):
+        return (f"If this file holds something '{session.name}' recognises as a secret, it is sent with that "
+                "part replaced, and the file tools refuse to write a file they could not read exactly. "
+                + _WITH_TERMINAL)
+    return ""
+
+
 def _marked(result: Any, tool_name: str, session: Any) -> Any:
     """The tool's result, saying which machine it ran on. A refusal by that machine's
     sandbox also says what the machine shares, since the bare system message does not."""
@@ -441,10 +460,13 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
         return result
     data["ran_on"] = f"{session.name} (the user's own machine, in {session.folder})"
     text = " ".join(str(data.get(key) or "") for key in ("output", "error"))
+    redaction = _redaction_note(data, tool_name, session)
     # Only what the machine said holds its commands is repeated. One that runs them with
     # no sandbox, or did not say, gets no explanation: the failure is an ordinary one.
     mode = getattr(session, "mode", "")
     if mode not in ("sandboxed", "read-only"):
+        if redaction:
+            data["hands_note"] = redaction
         return json.dumps(data, ensure_ascii=False)
     offline = getattr(session, "network", "") == "off"
     if offline:  # said with every result: a failed install does not always say why
@@ -464,6 +486,8 @@ def _marked(result: Any, tool_name: str, session: Any) -> Any:
                          "The user can allow it by starting Hands on that machine with --network.")
         elif refused:
             notes.append("Commands there also have no internet access unless the user starts Hands with --network.")
+    if redaction:
+        notes.append(redaction)
     if notes:
         data["hands_note"] = " ".join(notes)
     return json.dumps(data, ensure_ascii=False)

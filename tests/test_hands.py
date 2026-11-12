@@ -760,6 +760,23 @@ class _Where:
     name, folder, mode = "laptop", "/work/app", "sandboxed"
 
 
+def test_a_file_sent_with_secrets_replaced_says_why_it_cannot_be_edited():
+    shown = json.dumps({"content": '1|api_key_header = "[redacted]"\n2|x = 1'})
+    note = json.loads(chat._marked(shown, "read_file", _Where()))["hands_note"]
+    assert "[redacted]" in note and "file tools cannot edit it" in note and "terminal command" in note
+    assert "hands_note" not in json.loads(chat._marked(json.dumps({"content": "1|x = 1"}), "read_file", _Where()))
+    for tool in ("patch", "write_file"):
+        failed = json.dumps({"success": False, "error": "Failed to read file: /work/app/auth.py"})
+        note = json.loads(chat._marked(failed, tool, _Where()))["hands_note"]
+        assert "recognises as a secret" in note and "terminal command" in note
+    other = json.dumps({"success": False, "error": "old_string not found"})
+    assert "hands_note" not in json.loads(chat._marked(other, "patch", _Where()))
+
+    class Unsandboxed(_Where):
+        mode = "none"
+    assert "hands_note" in json.loads(chat._marked(shown, "read_file", Unsandboxed()))   # redaction is not the sandbox's
+
+
 def test_results_say_which_machine_they_ran_on():
     marked = json.loads(chat._marked(json.dumps({"output": "ok", "exit_code": 0}), "terminal", _Where()))
     assert marked["output"] == "ok" and marked["exit_code"] == 0
