@@ -70,6 +70,10 @@
 - A result that cannot be reported because the connection dropped is kept and
   sent when it is back. A command whose result never arrives is reported as
   outcome unknown.
+- A command is reported by what the machine answered, not by Hermes's own
+  deadline: an answer that arrives just after it is kept as it is, and no
+  answer is outcome unknown, never a plain timeout to run again. A call Hermes
+  holds for approval is not labelled as having run on the machine.
 - A certificate the machine does not trust is explained, with `SSL_CERT_FILE`
   for a private certificate authority.
 - Behind a reverse proxy on the same host, connection limits apply to each

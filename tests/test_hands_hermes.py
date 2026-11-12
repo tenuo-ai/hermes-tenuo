@@ -67,7 +67,8 @@ SCRIPT = textwrap.dedent('''
             data = {"output": raw}
         out[key] = {"exit": data.get("exit_code"), "text": str(data.get("output", data.get("content", data))),
                     "pid": data.get("pid"), "session": data.get("session_id"),
-                    "ran_on": data.get("ran_on"), "note": data.get("hands_note")}
+                    "ran_on": data.get("ran_on"), "note": data.get("hands_note"),
+                    "hint": data.get("hint"), "status": data.get("status")}
 
     def up(folder, name="laptop", invite=None, state=None):
         if state:
@@ -115,6 +116,29 @@ SCRIPT = textwrap.dedent('''
     tool("escape", "terminal", {"command": f"echo x > {server_dir}/escape.txt"})
     # A system folder: the sandbox refuses this in words on macOS and on Linux alike.
     tool("refused", "terminal", {"command": "echo x > /usr/hands-refusal-probe"})
+    # The actual Hermes guard stops these calls before the backend sees them.
+    import tools.terminal_tool as terminal_module
+    real_guards = terminal_module._check_all_guards
+    try:
+        for status in ("pending_approval", "blocked"):
+            terminal_module._check_all_guards = lambda *a, **kw: {"approved": False, "status": status}
+            tool(status, "terminal", {"command": "touch never-approved"})
+    finally:
+        terminal_module._check_all_guards = real_guards
+    assert not (device_dir / "src" / "never-approved").exists()
+    # A real device executes once, but its result cannot reach Hermes before the deadline.
+    from hermes_tenuo.hands import device as device_module
+    real_post = device_module._post
+    def lose_result(url, body, timeout):
+        if url.endswith("/result"):
+            raise ConnectionError("test: result connection dropped")
+        return real_post(url, body, timeout=timeout)
+    try:
+        device_module._post = lose_result
+        tool("unknown", "terminal", {"command": "echo once >> once.txt", "timeout": 3})
+    finally:
+        device_module._post = real_post
+    assert (device_dir / "src" / "once.txt").read_text() == "once\\n"
     # A process left running: it starts, a later command sees it, and it can be stopped.
     tool("bg", "terminal", {"command": "sleep 300", "background": True})
     tool("bg_poll", "process", {"action": "poll", "session_id": out["bg"]["session"]})
@@ -243,6 +267,11 @@ def _on_the_device(out, project, server_dir):
     assert not list(Path(server_dir).iterdir())
     # Each result says which machine it ran on; a refusal there also says what it shares.
     for key in ("first", "pwd", "read", "write", "escape"):
+        if out[key]["status"] in ("pending_approval", "blocked"):
+            # Hermes held this call for approval (it does for a chat sender): it never
+            # reached the machine, so the result must not say it ran there.
+            assert out[key]["ran_on"] is None and out[key]["note"] is None, (key, out[key])
+            continue
         assert out[key]["ran_on"] and "laptop" in out[key]["ran_on"] and there in out[key]["ran_on"], (key, out[key])
     for key in ("bg_poll", "bg_poll_named"):  # the process tool reports on an earlier process: not marked
         assert out[key]["ran_on"] is None, (key, out[key])
@@ -253,6 +282,13 @@ def _on_the_device(out, project, server_dir):
     assert out["refused"]["exit"] != 0 and not os.path.exists("/usr/hands-refusal-probe")
     assert out["refused"]["note"] and "shares only" in out["refused"]["note"], out["refused"]
     assert out["pwd"]["note"] is None
+    for key in ("pending_approval", "blocked"):
+        assert out[key]["status"] == key and out[key]["ran_on"] is None, out[key]
+        assert out[key]["note"] is None, out[key]
+    assert out["unknown"]["exit"] == 125, out["unknown"]
+    assert "check before running it again" in out["unknown"]["text"], out["unknown"]
+    assert "Command timed out" not in out["unknown"]["text"], out["unknown"]
+    assert not out["unknown"]["hint"], out["unknown"]
     log = (project.parent / "device-state" / "log.jsonl").read_text()
     assert '"command": "pwd"' in log and '"command": "cd src && pwd"' in log
     assert out["bg"]["pid"], out["bg"]
@@ -291,8 +327,190 @@ def test_a_profile_whose_backend_is_hands(tmp_path):
     assert "the server" not in out["status"].splitlines()[-1], out["status"]
 
 
+@pytest.mark.parametrize("captured", ["captured\n[Command timed out after 3s]", "[Command timed out after 3s]"])
+@pytest.mark.parametrize("reply, expected", [
+    (("lost reply", 125), 125),
+    (("finished", 0), 0),
+    (("device timed out", 124), 124),
+    (None, 125),
+])
+def test_adapter_preserves_confirmed_outcome_after_outer_timeout(monkeypatch, reply, expected, captured):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    # Exercise the deadline/drain race without depending on OS scheduling. The
+    # full tool-dispatch tests above also drop actual HTTP result submissions.
+    # A command that printed nothing gets the marker with no line break before it.
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": captured, "returncode": 124, "hermes_timed_out": True,
+        "full_output_path": "/tmp/retained-output", "output_total_chars": 10000,
+    })
+    proc = SimpleNamespace(_hands_reply={} if reply is None else {"result": reply})
+    env = object.__new__(HandsEnvironment)
+    result = env._wait_for_process(proc, timeout=3, bounded_capture=True)
+    assert result["returncode"] == expected
+    if expected != 124:
+        assert "Command timed out" not in result["output"]
+        assert "hermes_timed_out" not in result      # Hermes counts outcomes by this flag first
+    else:
+        assert result["hermes_timed_out"] is True and "Command timed out" in result["output"]
+    if reply is None:
+        assert "check before running it again" in result["output"]
+    else:
+        assert result["full_output_path"] == "/tmp/retained-output"
+
+
+def _environment(monkeypatch, tmp_path, answer):
+    """A Hands environment on Hermes's real `execute`, with a stand-in for the device."""
+    import collections
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class Session:
+        name, folder, tmp, owner, device = "laptop", "/work/app", "/work/tmp", "", "d1"
+
+    class Hub:
+        def pick(self, device, owner):
+            return Session()
+
+        def run(self, session, command, **kwargs):
+            return answer()
+
+    env = object.__new__(HandsEnvironment)
+    env._hub, env._task, env._device = Hub(), "t", "laptop"
+    env._session, env._folder = Session(), Session.folder
+    env._wrapped = collections.deque(maxlen=32)
+    BaseEnvironment.__init__(env, cwd=Session.folder, timeout=1)
+    return env
+
+
+def _after(seconds, answer):
+    import time
+
+    def run():
+        time.sleep(seconds)
+        return answer
+    return run
+
+
+@pytest.mark.parametrize("answer, code, says", [
+    (_after(0, ("quick\n", 0)), 0, "quick"),
+    # The device answers just after Hermes's deadline, while Hermes is collecting output.
+    (_after(1.3, ("done-late\n", 0)), 0, "done-late"),
+    (_after(1.2, ("hands: no result came back\n", 125)), 125, "no result came back"),
+    # No answer at all: Hermes's outer deadline answers for the wait.
+    (_after(30, ("never\n", 0)), 125, "check before running it again"),
+])
+def test_execute_reports_what_the_device_answered_not_hermes_timeout(monkeypatch, tmp_path, answer, code, says):
+    result = _environment(monkeypatch, tmp_path, answer).execute("echo hi", timeout=1)
+    assert result["returncode"] == code and says in result["output"], result
+    assert "Command timed out" not in result["output"] and "hermes_timed_out" not in result, result
+
+
+class _SlowToDeliver(str):
+    """An answer that is known at once but whose text takes a while to reach Hermes."""
+
+    def encode(self, *args, **kwargs):
+        import time
+        time.sleep(4)
+        return super().encode(*args, **kwargs)
+
+
+@pytest.mark.parametrize("text, code", [
+    ("done, with output\n", 0),
+    ("device timeout diagnostics\n", 124),
+    ("hands: no result came back: check before running it again\n", 125),
+])
+def test_an_answer_known_before_its_text_arrives_keeps_its_text(monkeypatch, tmp_path, text, code):
+    # Hermes's inner wait and its outer deadline both end before the text is delivered.
+    env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(text), code)))
+    result = env.execute("echo hi", timeout=1)
+    assert result["returncode"] == code and result["output"] == text, result
+    assert bool(result.get("hermes_timed_out")) == (code == 124)
+    assert "Command timed out" not in result["output"]
+
+
+def test_partly_collected_output_is_replaced_by_the_whole_answer(monkeypatch):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    from tools.environments.base_output import _BoundedOutputCollector
+    whole = "line one\nline two\nline three\n"
+    collected = _BoundedOutputCollector(50_000)
+    collected.append("line one\n")                       # all Hermes had when its deadline passed
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": "line one\n\n[Command timed out after 3s]", "returncode": 124, "hermes_timed_out": True})
+    proc = SimpleNamespace(_hands_reply={"result": (whole, 0)})
+    env = object.__new__(HandsEnvironment)
+    result = env._wait_for_process(proc, timeout=3, output=collected, bounded_capture=False)
+    assert result == {"output": whole, "returncode": 0}
+    # Fully collected output is kept as Hermes captured it, with what it knows about it.
+    collected.append("line two\nline three\n")
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": whole + "\n[Command timed out after 3s]", "returncode": 124, "hermes_timed_out": True,
+        "full_output_path": "/tmp/retained-output"})
+    result = env._wait_for_process(proc, timeout=3, output=collected, bounded_capture=True)
+    assert result == {"output": whole, "returncode": 0, "full_output_path": "/tmp/retained-output"}
+
+
+def test_a_large_answer_rebuilt_after_the_deadline_is_capped_like_any_output(monkeypatch, tmp_path):
+    big = "x" * 400_000 + "\nEND\n"
+    env = _environment(monkeypatch, tmp_path, _after(0.2, (_SlowToDeliver(big), 0)))
+    result = env.execute("echo hi", timeout=1, bounded_capture=True)
+    assert result["returncode"] == 0 and result["output"].endswith("END\n"), result["output"][-80:]
+    assert len(result["output"]) < len(big) and result.get("output_total_chars") == len(big), {
+        k: v for k, v in result.items() if k != "output"}
+
+
+def test_a_timeout_the_device_confirms_stays_a_timeout(monkeypatch, tmp_path):
+    env = _environment(monkeypatch, tmp_path, _after(1.2, ("hands: stopped after 1 seconds\n", 124)))
+    result = env.execute("sleep 9", timeout=1)
+    assert result["returncode"] == 124 and result.get("hermes_timed_out") is True, result
+
+
+def test_calls_sharing_an_environment_are_settled_separately(monkeypatch, tmp_path):
+    import threading
+    answers = iter([_after(1.3, ("first-late\n", 0)), _after(30, ("never\n", 0))])
+    lock = threading.Lock()
+
+    def answer():
+        with lock:
+            mine = next(answers)
+        return mine()
+    env = _environment(monkeypatch, tmp_path, answer)
+    results = {}
+
+    def call(name):
+        results[name] = env.execute(f"echo {name}", timeout=1)
+    first = threading.Thread(target=call, args=("a",))
+    first.start()
+    import time
+    time.sleep(0.2)
+    second = threading.Thread(target=call, args=("b",))
+    second.start()
+    first.join(20)
+    second.join(20)
+    assert results["a"]["returncode"] == 0 and "first-late" in results["a"]["output"], results
+    assert results["b"]["returncode"] == 125 and "check before running it again" in results["b"]["output"], results
+
+
 def test_first_session_with_real_gateway_identity(tmp_path):
     out, project, server_dir = _run(tmp_path, "gateway")
     _on_the_device(out, project, server_dir)
     assert out["after"]["text"].strip() == os.path.realpath(server_dir), out["after"]
     assert out["fresh_after"]["text"].strip() == os.path.realpath(server_dir), out["fresh_after"]
+
+
+@pytest.mark.parametrize("whole, captured", [("x", ""), ("xy", "x"), ("\ufeffxy", "x")])
+@pytest.mark.parametrize("code", [0, 124, 125])
+def test_one_missing_character_rebuilds_confirmed_reply(monkeypatch, whole, captured, code):
+    from types import SimpleNamespace
+    from hermes_tenuo.hands.backend import HandsEnvironment, BaseEnvironment
+    from tools.environments.base_output import _BoundedOutputCollector
+    collected = _BoundedOutputCollector(50_000)
+    collected.append(captured)
+    monkeypatch.setattr(BaseEnvironment, "_wait_for_process", lambda *a, **kw: {
+        "output": captured + "\n[Command timed out after 3s]", "returncode": 124,
+        "hermes_timed_out": True})
+    proc = SimpleNamespace(_hands_reply={"result": (whole, code)})
+    result = object.__new__(HandsEnvironment)._wait_for_process(proc, timeout=3, output=collected)
+    assert result["output"] == whole and result["returncode"] == code
+    assert bool(result.get("hermes_timed_out")) == (code == 124)
