@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -318,13 +319,148 @@ def test_sources_reads_what_an_included_file_outside_the_folder_pulls_in(folder,
     with open(folder / ".git" / "config", "a") as f:
         f.write(f"[include]\n\tpath = {tmp_path / 'outside.cfg'}\n")
     assert _sources(folder, tmp_path) == ([str(folder / ".hooks")], [], [])
-    os.unlink(tmp_path / "outside.cfg")
-    (folder / "inside.cfg").write_text("")
-    (tmp_path / "outside.cfg").symlink_to(folder / "link")           # reached through a link commands can change
-    (folder / "link").symlink_to(tmp_path / "elsewhere.cfg")
-    (tmp_path / "elsewhere.cfg").write_text("")
+    os.link(tmp_path / "outside.cfg", folder / "alias")              # a second name commands can write
     _paths, problems, _notes = _sources(folder, tmp_path)
     assert any("outside.cfg (cannot be checked)" in text for text in problems), problems
+
+
+@pytest.mark.parametrize("arrange", [
+    # the file itself is a link in the folder that leads out again
+    lambda f, o: ((o / "outside.cfg").symlink_to(f / "link"), (f / "link").symlink_to(o / "real.cfg")),
+    # a folder on the way is
+    lambda f, o: ((o / "safe").mkdir(), (o / "safe" / "outside.cfg").write_text(""), (f / "bridge").symlink_to(o / "safe"),
+                  (o / "alias").symlink_to(f / "bridge"), (o / "outside.cfg").symlink_to("alias/outside.cfg")),
+    # it leads into the folder through a link there
+    lambda f, o: ((o / "outside.cfg").symlink_to(f / "link"), (f / "link").symlink_to("inside.cfg"),
+                  (f / "inside.cfg").write_text("")),
+    # it passes through the folder and out again without a link
+    lambda f, o: ((f / "sub").mkdir(), (o / "outside.cfg").symlink_to(f"{f}/sub/../../real.cfg")),
+])
+def test_settings_reached_through_a_link_commands_can_change_are_not_trusted(folder, tmp_path, arrange):
+    (tmp_path / "real.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {tmp_path / 'outside.cfg'}\n")
+    arrange(folder, tmp_path)
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), problems
+
+
+@pytest.mark.parametrize("setting", ["[include]\n\tpath = ../bridge/../settings.cfg\n",
+                                     "[core]\n\thooksPath = bridge/../hooks\n"])
+@pytest.mark.parametrize("bridge", ["a link", "a folder"])
+def test_a_path_that_goes_down_and_back_up_in_the_folder_is_not_trusted(folder, tmp_path, setting, bridge):
+    """`..` is taken from where the path really is, so a folder on the way that is a link,
+    or that commands could replace with one, sends it somewhere else."""
+    (folder / "actual" / "sub").mkdir(parents=True)
+    for top in (folder, folder / "actual"):
+        (top / "settings.cfg").write_text("")
+        (top / "hooks").mkdir()
+    if bridge == "a link":
+        (folder / "bridge").symlink_to("actual/sub")
+    else:
+        (folder / "bridge").mkdir()
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(setting)
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), (paths, problems)
+
+
+def test_a_path_that_only_goes_up_from_its_settings_file_is_followed(folder, tmp_path):
+    (folder / "conf" / "git").mkdir(parents=True)
+    (folder / "conf" / "git" / "base.cfg").write_text("[include]\n\tpath = ../common.cfg\n")
+    (folder / "conf" / "common.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n\tpath = ../conf/git/base.cfg\n")
+    assert _sources(folder, tmp_path) == (
+        [str(folder / "conf" / "git" / "base.cfg"), str(folder / "conf" / "common.cfg")], [], [])
+
+
+@pytest.mark.parametrize("setting", ["[include]\n\tpath = {}x.cfg\n", "[core]\n\thooksPath = {}hooks\n"])
+@pytest.mark.parametrize("step", ["./", "a/", "../"])
+def test_a_settings_path_too_long_to_open_is_not_walked(folder, tmp_path, step, setting):
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(setting.format(step * 300_000))        # under the size read from one settings file
+    started = time.monotonic()
+    _paths, problems, _notes = _sources(folder, tmp_path)
+    assert time.monotonic() - started < 3      # it took several times that, and grew with the square of the length
+    assert len(problems) == 1 and problems[0].endswith("(cannot be checked)") and len(problems[0]) < 400, problems
+    assert ".git/config" not in problems[0]
+    started = time.monotonic()
+    assert {"include.path", "core.hookspath"} & set(gitwatch.settings(str(folder)))      # still seen when it changes
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize("lead, outcome", [("/nowhere-{}/", "more paths named in settings (cannot be checked)"),
+                                           ("../missing-{}/", "x.cfg (cannot be checked)")])
+def test_many_long_paths_that_lead_nowhere_do_not_hold_up_the_look(folder, tmp_path, lead, outcome):
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n" + "".join("\tpath = " + lead.format(n) + "a/" * 1900 + "x.cfg\n" for n in range(200)))
+    started = time.monotonic()
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert time.monotonic() - started < 5          # one such path took seconds, and a settings file holds hundreds
+    assert paths == [] and any(outcome in text for text in problems), problems
+    assert "more paths named in settings (cannot be checked)" in problems and all(len(text) < 400 for text in problems)
+    started = time.monotonic()
+    assert "include.path" in gitwatch.settings(str(folder))
+    assert time.monotonic() - started < 5
+
+
+def test_a_path_to_nothing_outside_the_folder_is_left_alone(folder, tmp_path):
+    """Commands cannot put anything there, so git never reads it."""
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {tmp_path}/absent/../project/extra.cfg\n[core]\n\thooksPath = {tmp_path}/absent/hooks\n")
+    (folder / "extra.cfg").write_text("")
+    assert _sources(folder, tmp_path) == ([], [], [])
+
+
+def test_a_settings_path_is_followed_only_so_deep(folder, tmp_path):
+    """Looking at a file costs more the deeper it is, and commands can make folders very deep."""
+    deep = "/".join(["d"] * 200)
+    if len(str(folder / deep / deep)) + 40 > os.pathconf(str(folder), "PC_PATH_MAX"):
+        deep = "/".join(["d"] * 150)                    # as deep as both fit here
+    (folder / deep).mkdir(parents=True)
+    (folder / deep / "near.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = ../{deep}/near.cfg\n")
+    assert _sources(folder, tmp_path) == ([str(folder / deep / "near.cfg")], [], [])
+    (folder / deep / deep).mkdir(parents=True)
+    (folder / deep / deep / "far.cfg").write_text("")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = ../{deep}/{deep}/far.cfg\n[core]\n\thooksPath = {deep}/{deep}\n")
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert paths == [str(folder / deep / "near.cfg")] and len(problems) == 2, (paths, problems)
+    assert all(text.endswith("(cannot be checked)") for text in problems), problems
+    # Without the lock, what is not looked at is named too, so a change to it is not thought seen.
+    seen = gitwatch.settings(str(folder))
+    assert {"include.path", "core.hookspath"} <= set(seen)
+    assert sum(name.endswith("(cannot be checked)") for name in seen) == 2, sorted(seen)
+
+
+def test_a_path_with_many_idle_steps_is_still_watched(folder):
+    """`./` many times over leads to the same file: what it holds is followed as before."""
+    (folder / "extra.cfg").write_text("")
+    (folder / "hooks").mkdir()
+    with open(folder / ".git" / "config", "a") as f:
+        f.write("[include]\n\tpath = ../" + "./" * 300 + "extra.cfg\n[core]\n\thooksPath = " + "./" * 300 + "hooks\n")
+    before = gitwatch.settings(str(folder))
+    assert not any(name.endswith("(cannot be checked)") for name in before), sorted(before)
+    (folder / "extra.cfg").write_text("[core]\n\tfsmonitor = ./run.sh\n")
+    (folder / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    assert len(gitwatch.changed(before, gitwatch.settings(str(folder)))) == 2
+
+
+@pytest.mark.parametrize("deep", ["", "/".join(["d"] * 70)])
+def test_a_link_reached_by_another_spelling_of_the_folder_is_not_trusted(folder, tmp_path, deep):
+    shouted = folder.parent / folder.name.upper()
+    if not shouted.exists() or not os.path.samefile(shouted, folder):
+        pytest.skip("needs a file system that ignores letter case")
+    (folder / deep).mkdir(parents=True, exist_ok=True)       # however far down the link is
+    (folder / deep / "inside.cfg").write_text("")
+    (folder / deep / "bridge.cfg").symlink_to(folder / deep / "inside.cfg")
+    with open(folder / ".git" / "config", "a") as f:
+        f.write(f"[include]\n\tpath = {shouted / deep / 'bridge.cfg'}\n")
+    paths, problems, _notes = _sources(folder, tmp_path)
+    assert any("(cannot be checked)" in text for text in problems), (paths, problems)
 
 
 @locks
@@ -379,6 +515,8 @@ def _module(folder, name):
     (lambda f: os.link(f / "nested" / ".git" / "config", f / "alias"), "nested/.git/config has a second name"),
     (lambda f: os.link(f / "deep" / "er" / "nested" / ".git" / "hooks" / "pre-commit.sample", f / "alias"), "has a second name"),
     (lambda f: (f / "nested" / ".git" / "commondir").write_text(".\n"), "nested/.git/commondir"),
+    (lambda f: (_module(f, "lib") / "commondir").write_text("../../../metadata\n"), ".git/modules/lib/commondir sends"),
+    (lambda f: os.chmod(f / "nested", 0), "nested cannot be read"),
     (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").write_text("gitdir: ../meta\n")),
      "nested/.git points to a git folder the lock does not hold"),
     (lambda f: (os.rename(f / "nested" / ".git", f / "meta"), (f / "nested" / ".git").symlink_to("../meta")),
@@ -396,8 +534,23 @@ def test_the_folder_is_looked_through_for_what_the_lock_would_not_hold(folder, a
     (folder / ".git" / "hooks" / "pre-commit").symlink_to("../../check.sh")           # a hook may be a link
     assert gitwatch.loose(str(folder)) == ([], True)
     arrange(folder)
-    problems, complete = gitwatch.loose(str(folder))
+    try:
+        problems, complete = gitwatch.loose(str(folder))
+    finally:
+        os.chmod(folder / "nested", 0o755) if os.path.lexists(folder / "nested") else None
+    if "cannot be read" in problem and os.geteuid() == 0:
+        pytest.skip("root reads every folder")
     assert complete and any(problem in text for text in problems), problems
+
+
+def test_a_file_the_settings_include_is_checked_whatever_it_is_called(folder):
+    """Object files may have other names; a settings file that is named like one may not."""
+    (folder / "objects" / "pack").mkdir(parents=True)
+    included = folder / "objects" / "pack" / "settings.idx"
+    included.write_text("")
+    assert gitwatch.loose(str(folder), (), [str(included)]) == ([], True)
+    os.link(included, folder / "alias")
+    assert gitwatch.loose(str(folder), (), [str(included)]) == (["objects/pack/settings.idx has a second name (a hard link)"], True)
 
 
 def test_a_folder_too_large_to_look_through_is_not_called_clean(folder, monkeypatch):

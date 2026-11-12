@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Hands
+
+- `hands up --protect-git`: the look through the folder before locking also covers a
+  settings file or hooks folder whose path passes through a link inside the shared folder,
+  or goes into a folder there and back up with `..`. A path that only goes up from its
+  settings file (`../extra.cfg`) is followed as before.
+- Git settings that name more than 64 files or hooks folders, or a path longer than 4096
+  characters or deeper than 256 folders, are reported as ones that cannot be checked
+  instead of being followed.
+
 ## 0.4.0 - 2026-11-12
 
 ### Upgrading from 0.3
