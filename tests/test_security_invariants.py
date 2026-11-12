@@ -190,6 +190,31 @@ class TestFailClosed:
         guard.set_session_warrant("alice", parent_warrant, agent_key)
         assert guard.pre_tool_call("web_search", {"query": "x"}, session_id="eve") is None
 
+    def test_narrower_session_keeps_its_warrant_across_turns(
+        self, parent_warrant, agent_key, cloud_key
+    ):
+        """A per-session warrant narrower than the config warrant must not widen on a later turn."""
+        from tenuo import Warrant, Wildcard
+
+        viewer = (
+            Warrant.mint_builder().holder(agent_key.public_key)
+            .capability("tool:web_search", query=Wildcard()).ttl(600).mint(cloud_key)
+        )
+        guard = HermesGuard(
+            warrant=parent_warrant, signing_key=agent_key, trusted_roots=[cloud_key.public_key],
+        )
+        guard.set_session_warrant("viewer", viewer, agent_key)
+        for _turn in range(3):
+            assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="viewer") is None
+            denied = guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="viewer")
+            assert denied and denied["action"] == "block"
+            guard.on_session_end("viewer")
+        # The config warrant itself allows read_file; the viewer never reaches it.
+        assert guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="other") is None
+        guard.clear_session_warrant("viewer")
+        assert guard.pre_tool_call("tool:web_search", {"query": "x"}, session_id="viewer")
+        assert guard.pre_tool_call("tool:read_file", {"path": "/data/x"}, session_id="viewer")
+
     def test_unconfigured_guard_still_passes_through(self):
         """No warrant and no session registry remains the documented no-op."""
         guard = HermesGuard()
@@ -314,22 +339,31 @@ class TestMonotonicity:
 
 class TestExpiryCap:
 
-    def test_child_ttl_capped_at_parent_remaining(self, agent_key, cloud_key):
-        """Child warrant TTL is capped at parent's remaining lifetime by Rust core."""
-        from tenuo import Warrant, Wildcard
+    def test_child_ttl_never_outlives_parent(self, agent_key, cloud_key):
+        """Oversized TTLs are rejected; Hermes requests a bounded child TTL."""
+        from tenuo import MonotonicityError, Warrant, Wildcard
         parent = (
             Warrant.mint_builder()
             .holder(agent_key.public_key)
             .capability("tool:web_search", query=Wildcard())
+            .capability("delegate_task")
             .ttl(60)
             .mint(cloud_key)
         )
         b = parent.attenuate_builder()
         b.inherit_all()
         b.with_ttl(86400)  # request 24h — parent only has 60s
-        b.with_ttl(86400)
-        child = b.delegate(agent_key)
-        # Child expires at same time as parent, not 24h from now
+        with pytest.raises(MonotonicityError):
+            b.delegate(agent_key)
+
+        guard = HermesGuard(
+            warrant=parent,
+            signing_key=agent_key,
+            trusted_roots=[cloud_key.public_key],
+        )
+        assert guard.pre_tool_call("delegate_task", {}, session_id="parent") is None
+        guard.on_subagent_start("parent", "child")
+        child, _ = guard._resolve_warrant("child")
         assert child.expires_at() <= parent.expires_at()
 
 

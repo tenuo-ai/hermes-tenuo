@@ -81,14 +81,15 @@ A chat agent, a nightly job, and a Telegram user are three warrants.
    Switch back to `block` (the default) before you call it done.
    Do not ship `log`.
 8. **`hermes-tenuo doctor` after every config change.** Enabled with
-   no warrant is a no-op — the plugin loads and enforces nothing.
+   no warrant leaves general tool-call authorization off. Hands can still enforce
+   its independent device grants; it does not need a manually minted warrant.
 
 ## Mint
 
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 
@@ -104,8 +105,13 @@ Paste the printed block into `plugins.entries.hermes-tenuo`. Export
 | `tool:arg=a\|b\|c` | one of the choices |
 | `tool:arg=MIN..MAX` | a number in that range, inclusive. `0..4000` also rules out negatives |
 | `tool:arg=value` | exact |
-| `tool:arg=*` | that argument may be anything |
+| `tool:arg=*` | that argument must be present and may be anything |
 | `tool:a=..,b=..` | several constraints on one tool |
+
+Once a tool has any constraint, name every argument the call sends: an
+unnamed argument is denied. `write_file` always sends `content`, so add
+`content=*`. To accept optional arguments such as `read_file`'s `offset` and
+`limit`, mint in Python with `_allow_unknown=True`.
 
 Only a complete numeric `MIN..MAX` value is a range; other values containing
 `..` are exact strings. Range bounds use IEEE-754 numbers and must stay within
@@ -126,7 +132,7 @@ TTL matches the schedule. Tools are the job, not the interactive agent.
 ```bash
 hermes-tenuo mint --ttl 1h \
   --allow read_file:path=/data/reports \
-  --allow write_file:path=/tmp/nightly \
+  --allow 'write_file:path=/tmp/nightly,content=*' \
   --allow memory
 ```
 
@@ -204,11 +210,15 @@ Mint onto the path the worker loads:
 
 ```bash
 hermes-tenuo mint --task <task_id> --ttl 2h \
+  --issuer-key issuer.key --holder-public-key holder.pub \
   --allow read_file:path=/data/that-card
 ```
 
-That writes `~/.hermes/tenuo/warrants/<task_id>.warrant` for the
-current holder (`TENUO_SIGNING_KEY` if set). A worker with no file
+That writes `~/.hermes/tenuo/warrants/<task_id>.warrant`, signed by
+the issuer the worker's `trusted_root` names, for the worker's holder
+key. Without `--issuer-key` the warrant is signed by a new issuer each
+time, and the worker rejects it until `trusted_root` is changed to
+match. A worker with no file
 is blocked entirely — it must not fall back to the install-wide
 warrant. A denial marks the task blocked on the board.
 

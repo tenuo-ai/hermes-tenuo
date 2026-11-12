@@ -79,6 +79,8 @@ _DRIVER = textwrap.dedent(
     out = {
         "plugin": plugin,
         "skill": pm.find_plugin_skill("hermes-tenuo:tenuo-scope") is not None,
+        "hands_skill": pm.find_plugin_skill("hermes-tenuo:hands") is not None,
+        "hands_setup": pm._plugin_commands["hands"]["handler"]("setup"),
         "deny": invoke_hook("pre_tool_call", tool_name="terminal", args={"command": "ls"}, session_id="s1"),
         "allow": invoke_hook("pre_tool_call", tool_name="read_file", args={"path": "/data/x"}, session_id="s1"),
         "audit_exists": os.path.exists(os.path.join(home, "tenuo", "audit.jsonl")),
@@ -111,7 +113,8 @@ class TestDirectoryRoute:
     def test_configured_enforces(self, tmp_path):
         r = _run("directory", True, tmp_path)
         assert r["plugin"] and r["plugin"]["source"] == "user" and r["plugin"]["error"] is None, r["plugin"]
-        assert r["plugin"]["hooks"] == 5 and r["skill"]
+        assert r["plugin"]["hooks"] == 7 and r["skill"]
+        assert r["hands_skill"] and "Hands is off" in r["hands_setup"]
         assert r["deny"] and r["deny"][0]["action"] == "block"
         assert r["allow"] == []
         assert r["audit_exists"]
@@ -119,9 +122,9 @@ class TestDirectoryRoute:
 
     def test_unconfigured_is_a_loud_noop(self, tmp_path):
         r = _run("directory", False, tmp_path)
-        assert r["plugin"]["hooks"] == 5 and r["plugin"]["error"] is None
+        assert r["plugin"]["hooks"] == 7 and r["plugin"]["error"] is None
         assert r["deny"] == [] and r["allow"] == []
-        assert "NOT enforced" in r["stderr"]
+        assert "general tool-call authorization is off" in r["stderr"]
 
 
 @pytest.mark.skipif(not _plugin_installed(), reason="entrypoint route needs the package pip-installed")
@@ -129,12 +132,13 @@ class TestEntrypointRoute:
     def test_configured_enforces(self, tmp_path):
         r = _run("entrypoint", True, tmp_path)
         assert r["plugin"] and r["plugin"]["source"] == "entrypoint" and r["plugin"]["error"] is None, r["plugin"]
-        assert r["plugin"]["hooks"] == 5 and r["skill"]
+        assert r["plugin"]["hooks"] == 7 and r["skill"]
+        assert r["hands_skill"] and "Hands is off" in r["hands_setup"]
         assert r["deny"] and r["deny"][0]["action"] == "block"
         assert r["allow"] == []
         assert r["audit_exists"]
 
     def test_unconfigured_is_a_loud_noop(self, tmp_path):
         r = _run("entrypoint", False, tmp_path)
-        assert r["plugin"]["hooks"] == 5 and r["deny"] == [] and r["allow"] == []
-        assert "NOT enforced" in r["stderr"]
+        assert r["plugin"]["hooks"] == 7 and r["deny"] == [] and r["allow"] == []
+        assert "general tool-call authorization is off" in r["stderr"]

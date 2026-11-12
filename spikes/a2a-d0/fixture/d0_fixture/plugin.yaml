@@ -1,0 +1,8 @@
+name: d0-fixture
+version: 0.1.0
+description: Synthetic home devices for the A2A delegation lab. Every effect is recorded; nothing real is touched.
+kind: standalone
+provides_tools:
+  - light_get
+  - light_set
+  - door_unlock

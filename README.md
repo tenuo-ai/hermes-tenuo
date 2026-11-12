@@ -1,410 +1,166 @@
-# hermes-tenuo
+# Tenuo for Hermes Agent
 
-[![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
-[![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)
+**Let Hermes work. Decide what it can do.**
 
-**Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
+Give your Hermes agent **signed, expiring permissions** with Tenuo warrants:
+which tools it may call, which arguments it may use, and for how long.
+With **Hands**, connect your remote Hermes to a project on your Mac or Linux
+laptop while its memory and skills stay on the server.
 
-See it without installing Hermes or talking to a model:
+| What do you want Hermes to do? | Start here |
+|---|---|
+| Run a task with clear limits on tools, files and duration | [Try Tenuo warrants](#try-tenuo-warrants) |
+| Work in a local project from your existing remote chat | [Try Hands](#try-hands) |
+| Wrap MCP servers you already use and trace scoped calls | [Verify delegated MCP calls](docs/mcp-wrapper.md) |
 
-```bash
-pip install hermes-tenuo
-hermes-tenuo demo
-```
+Use either feature on its own, or both together.
 
-```text
-A nightly job gets a permission slip: read /data/reports,
-write /tmp/nightly, then stop. Nothing else runs.
-No Hermes process, no API key.
+## Try Tenuo warrants
 
-== Cron ==
-The job does the work. Then it tries to leave the slip.
-  ALLOW  read_file  path=/data/reports/q3.csv
-  ALLOW  write_file  path=/tmp/nightly/report.md
-  DENY   read_file  path=/opt/private/payroll.csv
-         Constraint 'path' not satisfied: value does not match constraint  ← /opt/private/payroll.csv is not under /data/reports
-  DENY   terminal  command=ls
-         Tool 'terminal' is not authorized  ← terminal is not on the slip
-  (one second later)
-  DENY   read_file  path=/data/reports/q3.csv
-         Warrant has expired  ← the job window ended
+Give a nightly report job access to its reports folder, let a researcher search
+without writing files, or give a delegated agent fewer permissions than its
+parent. The limits are checked before the tool handler runs.
 
-That slip is a Tenuo warrant: signed, expiring, checked before
-the handler runs. Same check, two more shapes:
-
-== delegate_task ==
-Same rule, after a handoff. The researcher was only granted web_search.
-  [orchestrator] ALLOW  read_file  path=/data/input.csv
-  [orchestrator] ALLOW  delegate_task  task=research q3  context=web_search only
-  [researcher] ALLOW  web_search  query=AI papers 2026
-  [researcher] DENY   write_file  path=/data/output/x.md
-         Tool 'write_file' is not authorized  ← the researcher was not granted write_file
-
-== Gateway ==
-Same server, two slips.
-  [analyst] ALLOW  read_file  path=/data/reports/q1.csv
-  [analyst] DENY   write_file  path=/data/output/x.txt
-         Tool 'write_file' is not authorized  ← write_file is not on the analyst's slip
-  [viewer] ALLOW  read_file  path=/data/public/faq.md
-  [viewer] DENY   read_file  path=/data/reports/q1.csv
-         Constraint 'path' not satisfied: value does not match constraint  ← /data/reports is not on the viewer's slip
-```
-
-A [Tenuo](https://github.com/tenuo-ai/tenuo) warrant is that slip. Each Hermes
-tool call is checked against it — tool name and arguments — before the
-handler runs. A `delegate_task` child only gets what the parent granted. A
-gateway user carries their own slip. Keys and decisions stay local.
-
-The plugin returns the denial as the tool result, so the model sees why
-the handler never ran:
+A warrant is a signed permission slip with an expiry. Here is a shortened
+example from the runnable demo:
 
 ```text
-read_file  path=/opt/private/payroll.csv
-Constraint 'path' not satisfied: value does not match constraint
+ALLOW  read_file  path=/data/reports/q3.csv
+DENY   read_file  path=/opt/private/payroll.csv
+DENY   terminal  command=ls
+After expiry: DENY read_file path=/data/reports/q3.csv
 ```
 
-For a recorded session with a real model and a planted prompt injection,
-see [docs/walkthrough.md](docs/walkthrough.md).
+**See the checks run locally—no Hermes process or model API key needed:**
 
-## Install into Hermes
+```sh
+uvx --refresh hermes-tenuo demo
+```
 
-**1. Install.** hermes-tenuo is in the
-[Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins/hermes-tenuo),
-so this installs the reviewed, pinned commit:
+**Apply it to your Hermes:** [install and configure Tenuo](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes),
+mint a warrant for the task, and run `hermes-tenuo doctor` to check the configuration.
+For example, this grants only `web_search` for one hour:
 
-```bash
-hermes plugins install hermes-tenuo
+```sh
+uvx hermes-tenuo mint --ttl 1h --allow web_search
+```
+
+The command prints the configuration and signing-key instructions. Apply them
+in the Hermes profile serving the task, check the configuration, and restart
+that profile. Installing the plugin alone does not activate tool authorization.
+
+[See a real-model prompt-injection walkthrough](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/walkthrough.md)
+or explore [argument constraints and delegation](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#scoping-arguments).
+Tool-call authorization checks the calls and arguments it covers; Hands adds
+an OS sandbox for work on the connected device.
+
+## Give your remote Hermes hands
+
+**Your Hermes lives on a server. Your project is on your laptop.**
+
+Open the Hermes chat you already use, connect a folder, and ask it to get to work.
+You keep the same agent, memory and skills. Hands needs no manually minted warrant.
+
+### From your chat to your local files
+
+Ask Hermes:
+
+> Run the tests in this folder. Fix the invoice calculation without changing
+> the tests, then rerun them.
+
+The practice project gives you a small, visible result:
+
+```text
+On your laptop                         In your existing Hermes chat
+───────────────────────────────────    ─────────────────────────────
+invoice.py + two failing tests     ←    Run the tests and inspect the code
+invoice.py updated                ←    Fix the calculation
+Two tests pass                    ←    Run the tests again
+```
+
+```diff
+ def total_after_discount(subtotal, discount):
+-    return subtotal * discount
++    return subtotal * (1 - discount)
+```
+
+The edited file is on your laptop, ready for you to inspect. Your Hermes keeps
+its existing memory and skills. Then try your own project: investigate a test
+failure, review local changes, or write a script for files in the shared folder.
+
+You choose the folder and how long to share it. Internet access is off by default.
+Press **Ctrl-C on your laptop to end access**. Commands and results are sent to
+your remote Hermes and its model; keep private files out with
+[personal exclusions](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md#preview-and-keep-private-files-out).
+
+## Try Hands
+
+You'll need a running Hermes with terminal-provider and tool-middleware support,
+and a Mac or Linux laptop with Python 3. macOS uses its built-in sandbox;
+Linux needs [bubblewrap](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine).
+Hands supports terminal and file work, not GUI or browser control.
+
+**1. Server — install and connect once.**
+
+```sh
+hermes plugins install tenuo-ai/hermes-tenuo
 hermes plugins enable hermes-tenuo
 ```
 
-`install` asks for `TENUO_WARRANT` and `TENUO_SIGNING_KEY`. You mint those
-in the next step, so leave both empty for now. `enable` installs the `tenuo`
-dependency into the Hermes runtime.
+Leave the optional credential prompts empty. Enable installs the dependencies.
+Follow the [Tailscale connection setup](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md#2-connect-your-server-and-laptop)
+to connect the server and laptop, then restart the Hermes gateway/profile serving
+your chat. An existing HTTPS endpoint works too; the guide covers both.
 
-If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead. That also puts the `hermes-tenuo` command on your path, so you can
-drop the `uvx` prefix below. To run the latest unreleased code:
-`pip install "git+https://github.com/tenuo-ai/hermes-tenuo.git"`.
+**2. Laptop — create a practice folder.**
 
-Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
-the plugin loader of upstream Hermes `main` using both install routes; the
-badge above is its latest result.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed:
 
-**2. Mint a warrant.** This generates a key pair and a warrant, and prints
-the exact config block to paste.
-
-```bash
-uvx hermes-tenuo mint --ttl 1h \
-  --allow read_file:path=/data \
-  --allow web_search
+```sh
+uvx --refresh hermes-tenuo --version
+uvx hermes-tenuo hands demo
 ```
 
-```yaml
-# ~/.hermes/config.yaml   (printed by the command above)
-plugins:
-  enabled:
-    - hermes-tenuo
-  entries:
-    hermes-tenuo:
-      warrant: <base64>            # or a path to a .warrant file
-      trusted_root: <base64>       # the public key that signed it
-      signing_key_env: TENUO_SIGNING_KEY
-```
+Check that the version is 0.4.0 or newer. Follow the printed `cd` command.
+The demo creates a new temporary project; it does not change your existing files.
 
-Put the printed `TENUO_SIGNING_KEY` in `~/.hermes/.env`. Hermes reads that
-file when it starts. The `uvx` command below does not, so export the same
-value in this shell before the check:
+**3. Hermes chat — connect this folder.**
 
-```bash
-export TENUO_SIGNING_KEY=<printed by mint>
-```
+Run `/hands setup edit`. Copy the command it prints into your laptop terminal
+inside the practice folder. This shares the project for one hour, with internet off.
+Keep that terminal open, then run `/hands verify` in the same chat.
 
-**3. Check it, then start Hermes.** Run these in order:
+**4. Hermes chat — ask for the fix.**
 
-```bash
-hermes plugins doctor hermes-tenuo
-uvx hermes-tenuo doctor
-hermes
-```
+> Run `python3 -m unittest -v` in the shared folder. Fix the invoice calculation
+> in invoice.py without changing the tests, then rerun the tests.
 
-- `hermes plugins doctor hermes-tenuo` — Hermes loads the plugin and registers
-  its hooks. This does not look at your warrant. If it cannot find the plugin,
-  go back to step 1.
-- `uvx hermes-tenuo doctor` — checks the config you pasted, the warrant, its
-  expiry, and that the signing key matches the warrant holder. Fix anything it
-  marks with `✗` before you start Hermes. This command runs outside Hermes, so
-  it does not report the enforcement path.
-- `hermes` — start the agent.
+Inspect the local change. When you're done, press **Ctrl-C** in the laptop's
+sharing terminal, then `/hands off` in chat to return tools to the server.
+`/hands off` alone changes routing; it does not end the laptop grant.
 
-If you installed with `pip install hermes-tenuo` into the same environment
-Hermes uses, drop the `uvx` prefix. `hermes-tenuo doctor` then also prints
-which enforcement path is active.
+**[Troubleshooting and the full walkthrough →](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/hands-first-session.md)**
 
-Ask the agent to read `/opt/private/payroll.csv`. It gets the same denial as the tool
-result. Load `skill_view("hermes-tenuo:tenuo-scope")` to mint a warrant
-for a cron job, a `delegate_task` child, or a gateway session.
+## Keep using the Hermes you know
 
-## Scoping arguments
+Hands adds a local workspace to your existing remote Hermes. Your laptop connects
+outward, so it needs no incoming port or SSH server. You approve the connection
+locally and can switch the conversation back to server tools when you're done.
 
-Each `--allow` names a tool and, optionally, constraints on its arguments.
-A tool with no constraints is allowed with any arguments.
+Hermes also supports SSH terminal backends. Hands is useful when you want to
+connect a laptop temporarily, choose the folder locally, and attach it to one
+conversation. Browser and MCP tools stay on the server.
 
-| Syntax | Meaning | Example |
-|---|---|---|
-| `tool` | any arguments | `--allow web_search` |
-| `tool:arg=/path` | argument must be that path or under it (traversal-safe) | `--allow read_file:path=/data` |
-| `tool:arg=glob*` | argument must match the glob | `--allow web_search:query=acme*` |
-| `tool:arg=domain:host\|*.host` | an http(s) URL on those hosts; literal private and metadata addresses are denied | `--allow browser_navigate:url=domain:docs.python.org` |
-| `tool:arg=a\|b\|c` | argument must be one of the choices | `--allow git:action=status\|diff\|log` |
-| `tool:arg=MIN..MAX` | argument must be a number in that range, inclusive | `--allow checkout:amount=0..4000` |
-| `tool:arg=value` | argument must match exactly | `--allow write_file:mode=w` |
-| `tool:arg=*` | that argument may be anything | `--allow memory:action=*` |
-| `tool:a=..,b=..` | several constraints on one tool | `--allow write_file:path=/tmp/out,mode=w` |
+For read-only work, use `/hands setup read`. If a task needs network access,
+choose `/hands setup online` explicitly. Linux online shares also require
+Landlock ABI 6. Secret redaction is best effort; exclude files that must not be
+sent to Hermes or its model.
 
-A range only matches numbers: an amount sent as the string `"40.00"` is
-denied, so declare such arguments as numbers in the tool schema. Give both
-ends; `0..4000` also rules out negative amounts. Only a complete numeric
-`MIN..MAX` value is treated as a range, so values such as
-`release..candidate` continue to be exact strings. Tenuo ranges use
-IEEE-754 numbers; the CLI rejects non-finite bounds and values outside the
-safe integer range (`-9007199254740991` to `9007199254740991`).
+## More
 
-`domain:` checks one URL. A list argument, such as `web_extract`'s
-`urls`, does not match and is denied, so limit `web_extract` by leaving it
-off the warrant and allowing `browser_navigate` on the domains you want.
-`UrlSafe` makes the authorization decision in Tenuo core. It is stateless and
-does not resolve DNS, so the URL-fetching layer must also validate and pin
-resolved addresses to prevent DNS rebinding to a private destination.
+- [Hands settings, platform requirements and troubleshooting](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine)
+- [Warrants, tool authorization, delegation and advanced configuration](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes)
+- [Changelog](https://github.com/tenuo-ai/hermes-tenuo/blob/main/CHANGELOG.md)
 
-Any argument the warrant does not name is unconstrained for that tool. The
-`--ttl` flag takes `30m`, `1h`, `7d`, and so on (default `24h`).
-
-A number range is `--allow checkout:amount=0..4000` (both ends, inclusive).
-For a case-insensitive path, or anything else the flag cannot express, mint
-in Python:
-
-```python
-import base64, os
-from tenuo import SigningKey, Warrant, Subpath, Pattern
-
-control_key = SigningKey.generate()   # keep private; its public key is trusted_root
-agent_key = SigningKey.generate()     # export its secret as TENUO_SIGNING_KEY
-
-warrant = (
-    Warrant.mint_builder()
-    .holder(agent_key.public_key)
-    .capability("read_file", path=Subpath("/data", case_sensitive=False))
-    .capability("web_search", query=Pattern("acme*"))
-    .ttl(3600)
-    .mint(control_key)
-)
-
-path = os.path.expanduser("~/.hermes/tenuo/warrant")
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w") as f:
-    f.write(base64.b64encode(warrant.to_bytes()).decode())
-```
-
-Point `warrant:` at that file. Set `trusted_root` to the base64 of
-`control_key.public_key.to_bytes()` and `TENUO_SIGNING_KEY` to the base64 of
-`agent_key.secret_key_bytes()`.
-
-## What it unlocks
-
-| Scenario | What you do | What you get |
-|---|---|---|
-| **Cron and scheduled agents** | Mint with `--ttl` matching the job window | The job cannot keep acting after it should be done, even if it is still running |
-| **Subagents via `delegate_task`** | Grant from the parent (`grant_builder`) | The child hop is verified as a chain; a researcher cannot suddenly `write_file` |
-| **Multi-user gateways** | Call `guard.set_session_warrant(session_id, warrant)` when a session starts | That user's tools follow that warrant until the session ends. Tool calls from inside `execute_code` still follow the config warrant |
-| **Kanban workers** | `hermes-tenuo mint --task <id> --allow ...` | Writes `~/.hermes/tenuo/warrants/<id>.warrant` for the current holder; a denial auto-blocks the task on the board |
-| **Fleet rollout** | Pin `warrant`, `trusted_root`, `on_denial` in managed scope | Users cannot loosen them from `~/.hermes/config.yaml` |
-
-Runnable versions of the first three live in
-[`examples/`](https://github.com/tenuo-ai/hermes-tenuo/tree/main/examples).
-
-## See what your agent actually calls
-
-Every decision is appended to a local JSONL audit log, on by default at
-`~/.hermes/tenuo/audit.jsonl` (profile-aware under `HERMES_HOME`). No account
-needed.
-
-```bash
-hermes-tenuo audit --last 20          # one line per tool call
-hermes-tenuo audit --denied           # only what the warrant blocked
-hermes-tenuo audit --json | jq ...    # raw records
-```
-
-```text
-2026-09-12 10:00:00  ALLOW  read_file  path=/data/q3.md
-2026-09-12 10:00:01  DENY   terminal  command=ls  — Tool 'terminal' is not authorized
-```
-
-Not sure what to allow yet? Set `on_denial: log`. Every call is still
-checked and recorded, but nothing is blocked. Run the agent, read the denied
-lines, tighten the warrant, then remove the line (the default is `block`).
-
-```yaml
-plugins:
-  entries:
-    hermes-tenuo:
-      warrant: ~/.hermes/tenuo/warrant
-      trusted_root: <base64>
-      on_denial: log
-```
-
-## How it works
-
-| Hermes hook | What hermes-tenuo does there |
-|---|---|
-| `pre_tool_call` | Verifies the tool name and arguments against the session's warrant. On denial, returns `{"action": "block", "message": ...}`; the handler never runs. |
-| `post_tool_call` | Adds timing to the recorded decision and writes the audit record. |
-| `subagent_start` | Hands the `child_warrant` to the new child session. |
-| `on_session_end` | Clears any per-session warrant set with `guard.set_session_warrant()`, so gateway users never share one. |
-
-The decision itself runs in Tenuo's Rust core: signature, expiry, holder
-proof-of-possession, and every argument constraint. The plugin holds only the
-issuer's **public** key. It never sees the key that minted the warrant.
-
-Denials are returned to the model as the tool result, so the agent can
-explain what it was not allowed to do. Raise the `hermes_tenuo` logger level
-to see the same lines as an operator.
-
-## Coverage
-
-Hermes asks hermes-tenuo before each agent-loop tool handler runs
-(`pre_tool_call`). The coverage below describes current upstream Hermes
-`main`, exercised by the **Upstream Hermes** badge. Hermes 0.20 and later can
-load the plugin, but older releases may not route tool calls made inside
-`execute_code` through this hook. On an older or unverified build, do not
-grant `execute_code` to an agent or session whose isolation depends on
-hermes-tenuo.
-
-On current Hermes `main`, that includes every tool call in the agent loop,
-the tools Hermes handles before its registry (`todo`, `memory`,
-`session_search`, `delegate_task`), and tool calls an `execute_code` script
-makes through Hermes, such as `read_file` or `web_search`. A caller that passes
-`skip_pre_tool_call_hook=True` has already been through this check.
-
-Those `execute_code` calls are checked against the warrant in your config
-(`TENUO_WARRANT`, or `plugins.entries.hermes-tenuo.warrant`). Hermes does
-not send the gateway session id with them, so a warrant you attached with
-`set_session_warrant` is not the one applied. On a gateway, leave
-`execute_code` off a session warrant when that session must stay narrower
-than the config warrant.
-
-Two things stay outside this check:
-
-- Another plugin calling `ctx.dispatch_tool()`. That goes straight to
-  `registry.dispatch()` and skips the hook. Only install plugins you trust
-  alongside hermes-tenuo. A registry-level hook that closes this gap is
-  proposed upstream in
-  [hermes-agent#32719](https://github.com/NousResearch/hermes-agent/pull/32719).
-  When Hermes provides it, hermes-tenuo uses it automatically.
-- What an `execute_code` script runs on its own, such as
-  `subprocess.run(...)`. Use a container backend (Docker, Modal, Daytona)
-  for that.
-
-## CLI
-
-```bash
-hermes-tenuo demo        # local allow/deny transcript (no Hermes process)
-hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--task ID] [--output full|yaml|env]
-hermes-tenuo status      # what the plugin will load from config and env
-hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
-hermes-tenuo doctor      # end-to-end install check
-hermes-tenuo audit [--last N] [--denied] [--json] [--path FILE]
-```
-
-After a catalog install these commands are not on your path. Prefix each
-one with `uvx `.
-
-`uvx hermes-tenuo doctor` checks the config, warrant validity and expiry, and
-that the signing key matches the warrant holder. Export
-`TENUO_SIGNING_KEY` in that shell first, because `uvx` does not load
-`~/.hermes/.env`. It does not report the enforcement path. Confirm Hermes
-loaded the plugin with `hermes plugins doctor hermes-tenuo`. Run both after
-every install.
-
-## Configuration reference
-
-All keys live under `plugins.entries.hermes-tenuo`. Each has an environment
-variable equivalent.
-
-| Key | Env | Meaning |
-|---|---|---|
-| `warrant` | `TENUO_WARRANT` | Base64 warrant, or a path to a file containing one. Required for enforcement. |
-| `trusted_root` | `TENUO_TRUSTED_ROOT` | Base64 public key of the issuer. Warrants signed by anything else are rejected. |
-| `signing_key_env` | | Name of the env var holding the agent's Ed25519 secret key. Default `TENUO_SIGNING_KEY`. |
-| `child_warrant` | `TENUO_CHILD_WARRANT` | Warrant handed to sessions spawned by `delegate_task`. |
-| `on_denial` | | `block` (default) or `log`. |
-| `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
-| `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
-
-Keep secret key material in env vars or a secrets manager, never in
-`config.yaml`.
-
-## Things to know
-
-- **Enabled but unconfigured is a no-op.** Without a `warrant`, the plugin
-  loads, logs a warning, and enforces nothing. `doctor` fails that check.
-- **Multiplexed profiles.** Under `gateway.multiplex_profiles`, `TENUO_*`
-  values are read through Hermes `get_secret`, so put each profile's keys in
-  that profile's `.env`. A secondary profile does not inherit the launch
-  profile's credentials.
-- **Rotate by re-minting.** The control key is not saved by `mint`. To change
-  scope, mint a new warrant and replace the config values; the old warrant
-  stops being accepted when you change `trusted_root`, or when its TTL ends.
-
-## Managed scope (fleet and multi-user)
-
-Hermes overlays a root-owned `/etc/hermes/config.yaml` on every user's
-config. hermes-tenuo reads its keys through the same loader, so an
-administrator can pin the warrant and trust anchor for the whole fleet:
-
-```yaml
-# /etc/hermes/config.yaml  (root-owned)
-plugins:
-  entries:
-    hermes-tenuo:
-      warrant: /etc/hermes/tenuo/fleet.warrant
-      trusted_root: <base64>
-      on_denial: block
-```
-
-Pin `warrant`, `trusted_root`, and `on_denial`. Leave `signing_key_env` to
-the environment. Override the managed directory with `HERMES_MANAGED_DIR` for
-containers or non-standard layouts.
-
-## Connecting a control plane (optional)
-
-Everything above runs from files and environment variables on one machine.
-That is the right shape for one developer and a handful of agents. Once you
-run a fleet of Hermes agents, cron jobs, and gateway users, the hard part
-stops being the check itself and becomes operating the authority around it:
-who may mint production warrants, how keys rotate, how a bad warrant is
-pulled back before its TTL ends, and where you look when something was
-denied at 3 a.m. A Tenuo control plane takes that over.
-
-When `TENUO_CONNECT_TOKEN` is set, the Tenuo SDK inside this plugin connects
-on its own and every allow and deny decision from every Hermes agent streams
-there, with nothing else to configure. On top of that stream the control
-plane gives you:
-
-- **Revocation before expiry.** Pull a warrant, a key, or an agent the moment
-  something looks wrong instead of waiting for the TTL. Revocation lists are
-  published to every verifier.
-- **Central issuance and rotation.** Mint per-job warrants from policy rather
-  than by hand, and rotate root and holder keys on a schedule without
-  touching each agent's environment.
-- **Human approval gates.** Route calls to sensitive tools to a person, so
-  the agent can proceed only with a signed approval.
-- **One searchable audit trail.** Signed receipts from every agent, session,
-  and profile in one place, instead of one `audit.jsonl` per machine.
-
-Tenuo Cloud is the managed version of that control plane. See
-[tenuo.ai](https://tenuo.ai) for access, or the Tenuo repo for running your
-own.
-
-## License
-
-Apache-2.0
+Hands ships in **hermes-tenuo**, the Tenuo plugin for Hermes Agent.
+[Apache-2.0 license](https://github.com/tenuo-ai/hermes-tenuo/blob/main/LICENSE).

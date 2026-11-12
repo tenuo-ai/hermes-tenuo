@@ -67,6 +67,18 @@ def _call(
     return result
 
 
+
+def _start_of_a_second() -> None:
+    """Wait, if needed, so the one-second warrant below is not minted late in a second.
+
+    A warrant's expiry is a whole second. Minted at x.95 it would last 50 ms, and the
+    calls meant to show what it allows could find it already expired.
+    """
+    late = time.time() % 1
+    if late > 0.3:
+        time.sleep(1.02 - late)
+
+
 def render_demo() -> str:
     lines: list[str] = [
         "A nightly job gets a permission slip: read /data/reports,",
@@ -79,6 +91,7 @@ def render_demo() -> str:
 
     control = SigningKey.generate()
     cron_key = SigningKey.generate()
+    _start_of_a_second()
     cron_warrant = (
         Warrant.mint_builder()
         .holder(cron_key.public_key)

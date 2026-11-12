@@ -19,21 +19,77 @@ class WarrantLoadError(ValueError):
     """A warrant is configured but cannot be decoded — never degrade to passthrough."""
 
 
+def build_ingress_only_guard(ctx: Any, ingress: Any) -> "PluginGuard":
+    """A guard for an install with no tool-call warrant but protected A2A ingress: inbound A2A
+    turns run only on their verified grant; every other turn passes through as before."""
+    from hermes_tenuo._config import get_audit_log_path
+
+    audit_callback = None
+    audit_path = get_audit_log_path(ctx)
+    if audit_path is not None:
+        from hermes_tenuo.audit import LocalAuditLog
+        audit_callback = LocalAuditLog(audit_path)
+    guard = HermesGuard(
+        audit_callback=audit_callback,
+        # Binding an A2A grant must not make unrelated local sessions warrant-required.
+        require_session_warrant=False,
+        ingress=ingress,
+    )
+    return PluginGuard(guard)
+
+
 def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
     """Read config and build the guard. Returns None if not configured.
 
     Raises WarrantLoadError when a warrant IS configured but unloadable.
     """
     from hermes_tenuo._config import (
+        get_access_block,
         get_audit_log_path,
         get_child_warrant_raw,
+        get_delegation_plan_path,
         get_on_denial,
         get_require_session_warrant,
         get_signing_key,
+        get_signing_key_raw,
         get_trusted_roots,
         load_warrant,
         resolve_warrant_text,
     )
+
+    # Role-based access: the plugin mints one warrant per role from config and
+    # resolves each gateway turn to its sender's role. It needs a signing key to
+    # mint and present those warrants (its public key becomes a trusted root).
+    # Every failure below raises WarrantLoadError so register() installs block-all
+    # rather than losing enforcement to an escaped exception.
+    access_policy = None
+    access_block = get_access_block(ctx)
+    if access_block is not None:
+        from hermes_tenuo.access import AccessConfigError, build_access_policy
+
+        access_key = get_signing_key(ctx)
+        if access_key is None:
+            if get_signing_key_raw(ctx):
+                # Configured but undecodable: fail closed, never provision a different key.
+                raise WarrantLoadError(
+                    "the configured signing key (signing_key_env / TENUO_SIGNING_KEY) could not be "
+                    "loaded — every tool call is blocked until it is fixed"
+                )
+            # Absent: provision one under $HERMES_HOME/tenuo so access needs no key management.
+            from hermes_tenuo.access import access_key_path, load_or_create_signing_key
+            try:
+                access_key = load_or_create_signing_key()
+            except OSError as exc:
+                raise WarrantLoadError(
+                    f"could not provision an access signing key ({exc}) — every tool call is blocked"
+                ) from exc
+            logger.info("hermes-tenuo: access signing key auto-provisioned at %s", access_key_path())
+        try:
+            access_policy = build_access_policy(
+                access_block, control_key=access_key, holder=access_key.public_key, signing_key=access_key,
+            )
+        except (AccessConfigError, ValueError, TypeError) as exc:
+            raise WarrantLoadError(f"{exc} — every tool call is blocked until access is fixed") from exc
 
     try:
         warrant_raw, source = resolve_warrant_text(ctx)
@@ -47,20 +103,27 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             f"TENUO_WARRANT cannot be read ({exc}) — "
             "every tool call is blocked until the warrant is fixed"
         ) from exc
-    if not warrant_raw:
+    if warrant_raw:
+        warrant = load_warrant(warrant_raw)
+        if warrant is None:
+            raise WarrantLoadError(
+                "TENUO_WARRANT is set but could not be loaded — "
+                "every tool call is blocked until the warrant is fixed"
+            )
+    elif access_policy is not None and source == "none":
+        # Access mode supplies authority through the per-role warrants; a static
+        # warrant is optional (it would only cover non-gateway, local turns). Only
+        # a genuinely unconfigured static warrant is allowed to be empty here — a
+        # kanban worker with no staged warrant, or an empty warrant file, still
+        # fails closed below.
+        warrant = None
+    elif source == "none" or source.startswith("kanban:"):
         # Not configured, or a kanban worker with no staged task warrant
-        # (register() blocks that case). Anything else is an empty warrant.
-        if source == "none" or source.startswith("kanban:"):
-            return None
+        # (register() blocks that case).
+        return None
+    else:
         raise WarrantLoadError(
             f"TENUO_WARRANT is set but empty ({source}) — "
-            "every tool call is blocked until the warrant is fixed"
-        )
-
-    warrant = load_warrant(warrant_raw)
-    if warrant is None:
-        raise WarrantLoadError(
-            "TENUO_WARRANT is set but could not be loaded — "
             "every tool call is blocked until the warrant is fixed"
         )
     try:
@@ -81,8 +144,28 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "TENUO_CHILD_WARRANT is set but could not be loaded — "
             "every tool call is blocked until the warrant is fixed"
         )
+    delegation_plan = None
+    plan_path = get_delegation_plan_path(ctx)
+    if plan_path is not None:
+        from hermes_tenuo.delegation import DelegationPlanError, load_plan
+
+        try:
+            delegation_plan = load_plan(plan_path)
+        except DelegationPlanError as exc:
+            raise WarrantLoadError(
+                f"{exc} — every tool call is blocked until the plan is fixed"
+            ) from exc
+    if child_warrant is not None and delegation_plan is not None:
+        raise WarrantLoadError(
+            "child_warrant and delegation_plan are mutually exclusive — "
+            "every tool call is blocked until one is removed"
+        )
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
+    if access_policy is not None:
+        # The role warrants are issued by the gateway's own signing key; trust it
+        # so the guard accepts them. Harmless if already listed.
+        trusted_roots = list(trusted_roots or []) + [access_key.public_key]
     on_denial = get_on_denial(ctx)
 
     audit_callback = None
@@ -100,6 +183,8 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         on_denial=on_denial,
         audit_callback=audit_callback,
         require_session_warrant=get_require_session_warrant(ctx),
+        delegation_plan=delegation_plan,
+        access_policy=access_policy,
     )
 
     return PluginGuard(guard)
@@ -110,6 +195,10 @@ class PluginGuard:
 
     def __init__(self, guard: HermesGuard):
         self._guard = guard
+
+    def attach_ingress(self, ingress: Any) -> None:
+        """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
+        self._guard._ingress = ingress
 
     @property
     def has_warrant(self) -> bool:
@@ -124,16 +213,70 @@ class PluginGuard:
         tool_call_id: str = "",
         **kwargs: Any,
     ) -> Optional[dict]:
-        result = self._guard.pre_tool_call(
-            tool_name=tool_name,
-            args=args or {},
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-        )
+        try:
+            result = self._guard.pre_tool_call(
+                tool_name=tool_name,
+                args=args or {},
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
+            block = self._internal_error_block(tool_name, "authorization check", exc)
+            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            return block
+
+        if result is not None and not isinstance(result, dict):
+            block = self._internal_error_block(
+                tool_name,
+                "authorization check",
+                TypeError(f"unexpected result type {type(result).__name__}"),
+            )
+            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            return block
+
         if result and result.get("action") == "block":
-            self._auto_block_kanban_task(tool_name, result.get("message", ""))
+            try:
+                self._auto_block_kanban_task(tool_name, result.get("message", ""))
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must not undo a denial
+                # Preserve the original block. Kanban state is secondary to the
+                # authorization decision and can be repaired independently.
+                logger.error(
+                    "hermes-tenuo: denial bookkeeping failed for %s (%s); call remains blocked",
+                    tool_name,
+                    type(exc).__name__,
+                )
         return result  # None = allow, {"action": "block", "message": "..."} = block
+
+    def _record_block(
+        self, tool_name: str, args: dict, reason: str, session_id: str, task_id: str, tool_call_id: str,
+    ) -> None:
+        """Best effort: keep the audit log from showing this blocked call as allowed."""
+        try:
+            # Attribute a sessionless call the way the post hook will, so the
+            # two records share a session and the decision can be found again.
+            session_id, _ = self._guard._attribute_session(session_id, task_id)
+            self._guard._emit_audit(tool_name, args, False, reason, session_id, task_id, tool_call_id)
+            self._guard._remember_decision(
+                tool_call_id, False, reason, (tool_name, args, session_id, task_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - recording must not undo the denial
+            logger.error("hermes-tenuo: could not record the denial for %s (%s)", tool_name, type(exc).__name__)
+
+    @staticmethod
+    def _internal_error_block(tool_name: str, stage: str, exc: Exception) -> dict:
+        """Turn an internal enforcement failure into a non-sensitive denial."""
+        error_type = type(exc).__name__
+        logger.error(
+            "hermes-tenuo: %s failed for %s (%s); blocking",
+            stage,
+            tool_name,
+            error_type,
+        )
+        return {
+            "action": "block",
+            "message": f"tenuo: {stage} failed ({error_type}); call blocked",
+        }
 
     @staticmethod
     def _auto_block_kanban_task(tool_name: str, deny_message: str) -> None:
@@ -175,6 +318,8 @@ class PluginGuard:
             session_id=session_id,
             tool_call_id=tool_call_id,
             duration_ms=duration_ms,
+            status=str(kwargs.get("status") or ""),
+            error_type=str(kwargs.get("error_type") or ""),
         )
 
     def on_session_start_hook(
@@ -203,9 +348,14 @@ class PluginGuard:
         child_session_id: str = "",
         **kwargs: Any,
     ) -> None:
+        goal = kwargs.get("child_goal")
+        # Hermes runs the child under its subagent id as the task id.
+        task_id = kwargs.get("child_subagent_id")
         self._guard.on_subagent_start(
             parent_session_id=parent_session_id or None,
             child_session_id=child_session_id or None,
+            child_goal=goal if isinstance(goal, str) else None,
+            child_task_id=str(task_id) if task_id else None,
         )
 
     # ------------------------------------------------------------------

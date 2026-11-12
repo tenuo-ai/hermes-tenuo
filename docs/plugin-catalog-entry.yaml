@@ -1,14 +1,31 @@
 # Entry for the Hermes plugin catalog (NousResearch/hermes-agent, plugin-catalog/).
 # Submit as a PR adding this file as plugin-catalog/hermes-tenuo.yaml.
 # The sha below is a placeholder on purpose: fill it at submission time with
-#   git rev-parse v0.1.0
+#   git rev-parse <release-tag>
 # so this file never drifts from the tag. Their rules: exact 40-hex sha, pinned
-# commit at least two weeks old, submitted by the repo owner, capabilities must
+# submitted by the repo owner or major contributor, capabilities must
 # match what register() registers at that commit.
 name: hermes-tenuo
+title: Tenuo
+version: 0.4.0
+category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
-sha: "0000000000000000000000000000000000000000"   # placeholder: git rev-parse v0.1.0
-description: Per-call authorization for Hermes tool calls. Each call is checked against a signed, expiring warrant, arguments included, before the handler runs.
+sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
+description: >-
+  Signed, expiring tool permissions and local workspaces for Hermes Agent.
+  Tenuo warrants control which tools and arguments each task can use, including
+  delegated agents. Hands connects a folder on your Mac or Linux machine to an
+  existing Hermes conversation while memory and skills stay on the server.
+  Use either feature independently or together. Hands is off until configured;
+  its optional HTTP listener accepts outbound device connections. Internet is off
+  by default. Commands and results travel to the Hermes server and its model;
+  use HTTPS or a private network. Browser/MCP tools do not move. Unsandboxed and
+  broader-read modes require explicit device flags. Authorization decisions are
+  written to a local audit log, including tool names and arguments for Hermes calls.
+  If TENUO_CONNECT_TOKEN or TENUO_CONTROL_PLANE_URL enables the optional Tenuo
+  control plane, authorization events may be sent there. The optional MCP CLI
+  connects to configured upstream servers and keeps a local argument-free audit.
+  Experimental A2A ingress is disabled unless explicitly configured.
 maintainer: tenuo-ai
 tier: community
 requires_hermes: ">=0.20"
@@ -22,7 +39,10 @@ capabilities:
     - on_session_start
     - on_session_end
     - subagent_start
-  provides_middleware: []
+    - pre_llm_call
+    - pre_gateway_dispatch
+  provides_middleware: [tool_execution]
   requires_env:
     - TENUO_WARRANT
     - TENUO_SIGNING_KEY
+    - TENUO_TRUSTED_ROOT

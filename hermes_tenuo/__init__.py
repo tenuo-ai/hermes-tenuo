@@ -1,4 +1,4 @@
-"""hermes-tenuo: Tenuo authorization plugin for Hermes Agent.
+"""hermes-tenuo: Signed, expiring tool permissions and local workspaces for Hermes Agent.
 
 Hermes calls ``register(ctx)`` at startup. See ``hermes-tenuo demo``
 for a transcript with no Hermes process.
@@ -88,10 +88,11 @@ def _register_block_all(ctx: Any, deny_msg: str) -> None:
 
             _tr.set_enforcement_fn(_block_all_fn)
             logger.info("hermes-tenuo: block-all registered via ToolRegistry (%s)", deny_msg)
-            return
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry unavailable for block-all (%s), falling back to hook", exc)
 
+    # Inline tools (memory, todo, session_search) run before registry dispatch,
+    # so they need this hook even when registry enforcement is available.
     def _block_all_hook(tool_name: str = "", **kwargs: Any) -> dict:
         return {"action": "block", "message": deny_msg}
 
@@ -102,8 +103,16 @@ def _register_block_all(ctx: Any, deny_msg: str) -> None:
 def register(ctx: Any) -> None:
     """Called by Hermes plugin loader at startup."""
     _register_skills(ctx)
-    from hermes_tenuo._guard import WarrantLoadError, build_plugin_guard
+    try:
+        # Hands is its own feature: it works with or without an enforcement warrant.
+        from hermes_tenuo import hands
+        hands_started = hands.register(ctx)
+        logger.info("hermes-tenuo: Hands %s", "running" if hands_started else "off")
+    except Exception as exc:
+        logger.warning("hermes-tenuo: Hands did not start (%s)", exc)
+    from hermes_tenuo._guard import WarrantLoadError, build_ingress_only_guard, build_plugin_guard
 
+    ingress = _register_a2a_ingress(ctx)
     try:
         guard = build_plugin_guard(ctx)
     except WarrantLoadError as exc:
@@ -111,7 +120,18 @@ def register(ctx: Any) -> None:
         logger.error("hermes-tenuo: %s — registering block-all enforcement", exc)
         _register_block_all(ctx, f"hermes-tenuo: {exc}")
         return
+    if guard is None and ingress is not None:
+        from hermes_tenuo._config import get_require_warrant
+        from hermes_tenuo.kanban import current_task_id
+        if not get_require_warrant(ctx) and not current_task_id():
+            _register_guard_hooks(ctx, build_ingress_only_guard(ctx, ingress))
+            logger.info("hermes-tenuo: protected A2A ingress active; other turns are not enforced")
+            return
     if guard is None:
+        from hermes_tenuo._config import get_require_warrant
+        if get_require_warrant(ctx):
+            _register_block_all(ctx, "hermes-tenuo: require_warrant is enabled but no warrant is configured")
+            return
         from hermes_tenuo.kanban import current_task_id
         kanban_task = current_task_id()
         if kanban_task:
@@ -128,13 +148,50 @@ def register(ctx: Any) -> None:
             )
         else:
             logger.warning(
-                "hermes-tenuo: plugin loaded but no warrant is set — "
-                "tool calls are NOT enforced. Set TENUO_WARRANT (or warrant: in "
+                "hermes-tenuo: no tool-call authorization warrant is set — "
+                "general tool-call authorization is off; Hands device grants are independent. Set TENUO_WARRANT (or warrant: in "
                 "config) to enforce. Run `hermes-tenuo doctor` to verify."
             )
             _register_passthrough_hooks(ctx)
         return
 
+    if ingress is not None:
+        guard.attach_ingress(ingress)
+    _register_guard_hooks(ctx, guard)
+    logger.info("hermes-tenuo: active (enforcing)")
+
+
+def _register_a2a_ingress(ctx: Any) -> Any:
+    """Protected A2A ingress, when ``a2a_ingress`` is configured. A configured but unusable block
+    drops every inbound A2A message rather than letting it through unprotected."""
+    try:
+        from hermes_tenuo.a2a_ingress import load_ingress
+        ingress = load_ingress(ctx)
+    except Exception as exc:
+        logger.error("hermes-tenuo: a2a_ingress is configured but unusable (%s); "
+                     "every inbound A2A message is dropped", exc)
+
+        def _drop_a2a(event: Any = None, **_kw: Any) -> Any:
+            source = getattr(event, "source", None)
+            platform = getattr(getattr(source, "platform", None), "value", getattr(source, "platform", ""))
+            if str(platform) == "a2a":
+                return {"action": "skip", "reason": "tenuo: a2a_ingress is misconfigured"}
+            return None
+
+        ctx.register_hook("pre_gateway_dispatch", _drop_a2a)
+        return None
+    if ingress is None:
+        ctx.register_hook("pre_gateway_dispatch", _passthrough_hook)  # declared; inert when off
+    else:
+        ctx.register_hook("pre_gateway_dispatch", ingress.pre_gateway_dispatch)
+        from hermes_tenuo.a2a_ingress import public_key_b64
+        logger.info("hermes-tenuo: protected A2A ingress on; this agent's A2A key is %s",
+                    public_key_b64(ingress.own_key))
+    return ingress
+
+
+def _register_guard_hooks(ctx: Any, guard: Any) -> None:
+    """Register an enforcing guard on every tool path."""
     # Primary enforcement: register directly with ToolRegistry for universal
     # coverage including execute_code sandbox (tenuo-ai/hermes-agent fork).
     # Falls back gracefully to the pre_tool_call hook on upstream Hermes.
@@ -180,5 +237,3 @@ def register(ctx: Any) -> None:
     ctx.register_hook("on_session_start", guard.on_session_start_hook)
     ctx.register_hook("on_session_end", guard.on_session_end_hook)
     ctx.register_hook("subagent_start", guard.on_subagent_start_hook)
-
-    logger.info("hermes-tenuo: active (enforcing)")

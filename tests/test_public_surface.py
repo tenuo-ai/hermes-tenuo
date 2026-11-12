@@ -70,7 +70,8 @@ def test_package_and_plugin_versions_agree():
     plugin = (ROOT / "plugin.yaml").read_text()
     py_ver = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
     yaml_ver = re.search(r"^version:\s*(.+)$", plugin, re.M).group(1).strip()
-    assert py_ver == yaml_ver == "0.1.3"
+    from hermes_tenuo._version import __version__
+    assert py_ver == yaml_ver == __version__ == "0.4.0"
 
 
 def test_readme_keeps_listing_strategy_out():
@@ -80,3 +81,17 @@ def test_readme_keeps_listing_strategy_out():
     assert "plugin-catalog" not in text
     assert "catalog-entry" not in text
     assert "submission" not in text
+
+
+def test_extras_can_be_locked_on_python_3_14():
+    """Hermes locks plugin dependencies for Python 3.14 with every extra included, so an
+    extra that cannot install there fails `hermes plugins install` for everyone.
+    tenuo-cloud has no 3.14 build yet; until it does, the cloud extra must not apply there."""
+    import re
+
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    cloud = re.search(r"^cloud = \[(.*?)^\]", text, re.S | re.M).group(1)
+    requirements = re.findall(r'^\s*"([^"]+)"', cloud, re.M)
+    assert requirements
+    for requirement in requirements:
+        assert "python_version < '3.14'" in requirement, requirement
