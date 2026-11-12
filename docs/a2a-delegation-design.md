@@ -12,8 +12,8 @@ The design had to satisfy five requirements:
 
 1. A authenticates a fresh request. B receives an attenuated grant **held by B**, with B's own key,
    proof of possession and the complete chain. A cannot act as B, and B's key never leaves B. The
-   request is bound to the destination, task, scope, peer identity and freshness, and replays are
-   refused.
+   request is bound to the destination, task, scope, peer identity and freshness. Replays are
+   refused while B remains running; see the restart limitation under Residual risks.
 2. A plugin-only A2A ingress hook sees trusted sender metadata before execution. It rejects absent or
    malformed grants, failing closed, and binds the grant to the exact session.
 3. An unauthorized task never reaches model or tool execution and cannot switch context. It never
@@ -23,8 +23,8 @@ The design had to satisfy five requirements:
 
 ## Result
 
-All five are met on the receiving side. The seam is plugin-only (`pre_gateway_dispatch`), with three
-constraints that upstream changes would remove.
+The receiving boundary works within the constraints and residual risks below, including the restart
+replay window. The seam is plugin-only (`pre_gateway_dispatch`).
 - Live: **12/12** checks against a real Hermes gateway.
 - Unit tests: `tests/test_a2a_ingress.py`.
 
@@ -66,6 +66,45 @@ Code:
 
 Ingress is off unless `plugins.entries.hermes-tenuo.a2a_ingress.enabled` is true. An install without it
 registers the hook as a no-op.
+
+### Receiver configuration for the lab
+
+After `./run.sh init > init.json`, add this plugin configuration to `b-home/config.yaml`, alongside
+the receiver's Hermes model and A2A platform settings:
+
+```yaml
+plugins:
+  enabled: [hermes-tenuo]
+  entries:
+    hermes-tenuo:
+      a2a_ingress:
+        enabled: true
+        peers:
+          agent-a: "<init.json field agent-a>"
+          agent-m: "<init.json field agent-m>"
+        trusted_roots: ["<init.json field root>"]
+```
+
+Replace the placeholders with the base64 public keys from `init.json`. The peer names must match
+the transport identities in `A2A_PEER_TOKENS`; the `root` field is the operator's public trust anchor,
+not a sender key. Write the `peer_tokens` field to the lab's `peer_tokens` file, which `run.sh b`
+loads into `A2A_PEER_TOKENS`. Treat that file and `init.json` as credentials and keep them private.
+Both peers are included only to reproduce the isolated lab's cross-peer negative tests. Outside
+this lab, configure one sending peer per receiver, as described under Constraints.
+
+B creates its private holder key at `$HERMES_HOME/tenuo/a2a.key` on first startup. Derive its public
+key inside B and write only that public value to the lab's `b_key.pub` for the sender:
+
+```sh
+./run.sh hermes tools enable d0_home --platform a2a
+./run.sh model && ./run.sh b
+docker exec d0-hermes-b /opt/hermes/.venv/bin/python -c \
+  'from hermes_tenuo.a2a_ingress import load_or_create_a2a_key, public_key_b64; print(public_key_b64(load_or_create_a2a_key()))' > b_key.pub
+```
+
+The image must provide Python at the path used by `run.sh`. Never copy `a2a.key` to the sender:
+it contains B's private key, whereas `b_key.pub` contains only the base64 public key used as the
+grant's holder and audience.
 
 ## Evidence
 
@@ -186,7 +225,11 @@ and omits optional arguments it doesn't need to limit.
 ## Residual risks
 
 - **State is in memory only.** Grants, nonces and context ownership are lost on restart. An in-flight
-  task then runs no tools.
+  task then runs no tools because its grant is gone. However, B's holder key persists: a captured
+  signed request can be admitted again with a new A2A message ID after restart while its timestamp
+  and grant remain valid (the request freshness window is five minutes, with clock-skew tolerance).
+  This can repeat tool side effects. Replay protection does not survive restarts in this version;
+  persisting nonce and context admission state is required to remove this limitation.
 - **No revocation list yet.** A grant stays valid until it expires, so keep grant lifetimes short.
 - **Refusals look like success to the sender.** A dropped A2A message immediately returns
   `TASK_STATE_COMPLETED` with empty text. A resend with the same `messageId` waits for
