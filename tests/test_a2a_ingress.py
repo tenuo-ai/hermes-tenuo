@@ -321,6 +321,8 @@ def _register(monkeypatch, entry):
     import hermes_tenuo
 
     monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: entry)
+    monkeypatch.setenv("A2A_PEER_TOKENS", "agent-a:example-token")
+    monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
     ctx = _Ctx()
     hermes_tenuo.register(ctx)
     return ctx
@@ -476,13 +478,10 @@ def _admit_grant(keys, w_a, ingress, grant, ctx="ctx-1"):
 
 
 def test_ingress_decisions_go_to_the_shared_audit_log(monkeypatch, keys, w_a, tmp_path):
-    import hermes_tenuo
     log = tmp_path / "audit.jsonl"
-    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: {
+    ctx = _register(monkeypatch, {
         "audit_log": str(log), "a2a_ingress": {"enabled": True, "peers": {"agent-a": public_key_b64(keys.a)},
                                                 "trusted_roots": [public_key_b64(keys.root)]}})
-    ctx = _Ctx()
-    hermes_tenuo.register(ctx)
     (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
     dispatch(_event("no delegation here"))
     row = json.loads(log.read_text().splitlines()[-1])

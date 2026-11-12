@@ -23,7 +23,7 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
 ## Set up the receiving agent (B)
 
 1. Show its key: `hermes-tenuo a2a key`.
-2. Enable Hermes's A2A platform for the profile and give each sending agent its own token:
+2. Enable Hermes's A2A platform for the profile and give its one sending agent a named token:
 
    ```yaml
    platforms:
@@ -33,8 +33,8 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
    ```
 
    In the profile's `.env`: `A2A_PEER_TOKENS=agent-a:<token>`, `A2A_TRUSTED_PEERS=agent-a`, and
-   `A2A_HOST=0.0.0.0` only if other machines must reach it.
-3. Pin each sender and trust the operator root that issues their warrants:
+   `A2A_HOST=0.0.0.0` only if other machines must reach it. Leave `A2A_BEARER_TOKEN` unset.
+3. Pin that sender and trust the operator root that issues its warrants:
 
    ```yaml
    plugins:
@@ -48,6 +48,12 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
    ```
 
 4. Run `hermes-tenuo a2a check`, then restart the gateway.
+
+Use one receiver per sending agent until [upstream #146669](https://github.com/NousResearch/hermes-agent/issues/146669)
+is fixed. Hermes serves `ListTasks` and `GetTask` before the plugin's dispatch hook and shares
+those reads among authenticated peers. Protected ingress requires one named token identity
+matching the sole pinned peer. A configuration mismatch blocks inbound message dispatch.
+Use a dedicated receiver and keep that token private.
 
 Every inbound A2A message without a valid delegation is dropped before it reaches the agent. Keep
 `hermes-tenuo` the only plugin using `pre_gateway_dispatch` on this agent.
@@ -79,8 +85,8 @@ Enable the `tenuo` toolset for the platforms where the agent should delegate
 
 | Rule | Meaning |
 |---|---|
-| `{"equals": v}` | exactly `v` |
-| `{"one_of": [a, b]}` | one of these |
+| `{"equals": v}` | exactly this string or number |
+| `{"one_of": [a, b]}` | one of these strings or numbers |
 | `{"range": [lo, hi]}` | a number in this range |
 | `{"pattern": "light.*"}` | a glob |
 | `{"regex": "^…$"}` | a regular expression |

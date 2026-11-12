@@ -462,7 +462,7 @@ class A2AIngress:
             except IngressRefused as refused:
                 self._record("refused", peer, context_id, str(refused))
                 return {"action": "skip", "reason": f"tenuo: {refused}"}
-            self._record("admitted", peer, context_id, ",".join(grant.tools))
+            self._record("admitted", peer, context_id, ",".join(grant.tools), grant=grant)
             return {"action": "rewrite", "text": _framing(peer) + task}
         except Exception as exc:  # fail closed
             logger.error("hermes-tenuo: A2A ingress error, message dropped: %s", exc, exc_info=True)
@@ -477,7 +477,8 @@ class A2AIngress:
     def grant_for(self, peer: str, context_id: str) -> Optional[VerifiedGrant]:
         return self.registry.get(peer, context_id)
 
-    def _record(self, outcome: str, peer: str, context_id: str, detail: str) -> None:
+    def _record(self, outcome: str, peer: str, context_id: str, detail: str,
+                *, grant: Optional[VerifiedGrant] = None) -> None:
         logger.info("hermes-tenuo: A2A ingress %s peer=%s context=%s %s", outcome, peer, context_id, detail)
         if self._audit is not None:
             try:
@@ -487,7 +488,10 @@ class A2AIngress:
                 self._audit({"timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                              "tool": "a2a_ingress", "decision": "ALLOW" if outcome == "admitted" else "DENY",
                              "reason": detail if outcome != "admitted" else "", "peer": peer,
-                             "context": context_id, "granted_tools": detail if outcome == "admitted" else "",
+                             "context": context_id, "context_id": context_id,
+                             "warrant_id": str(grant.warrant.id) if grant else "",
+                             "parent_warrant_ids": [str(warrant.id) for warrant in grant.chain] if grant else [],
+                             "granted_tools": detail if outcome == "admitted" else "",
                              "event": "a2a_ingress", "outcome": outcome, "detail": detail, "ts": time.time()})
             except Exception:
                 logger.debug("hermes-tenuo: A2A audit write failed", exc_info=True)
@@ -527,13 +531,32 @@ def load_or_create_a2a_key() -> Any:
         os.close(lock_fd)
 
 
-def load_ingress(ctx: Any) -> Optional[A2AIngress]:
+def _check_peer_isolation(peers, read_env):
+    """Hermes task reads are shared among authenticated callers until #146669."""
+    if (read_env("A2A_BEARER_TOKEN") or "").strip():
+        raise ValueError("Unset A2A_BEARER_TOKEN for protected A2A. Use a named peer token instead.")
+    raw = read_env("A2A_PEER_TOKENS") or ""
+    names = set()
+    for item in raw.split(","):
+        if not item.strip():
+            continue
+        name, separator, token = item.partition(":")
+        if not separator or not name.strip() or not token.strip():
+            raise ValueError("A2A_PEER_TOKENS needs entries in name:token format.")
+        names.add(name.strip())
+    if len(names) != 1:
+        raise ValueError("A2A_PEER_TOKENS must name exactly one sender identity for protected A2A.")
+    if names != set(peers):
+        raise ValueError("The A2A_PEER_TOKENS identity must match the sole entry in a2a_ingress.peers.")
+
+
+def load_ingress(ctx: Any, *, read_env=None) -> Optional[A2AIngress]:
     """Build the ingress from ``a2a_ingress`` in the plugin config, or None when it is off.
 
     ``a2a_ingress: {enabled: true, peers: {<peer name>: <public key b64>}, trusted_roots: [<b64>]}``.
     The receiver's own key is created on first use under ``$HERMES_HOME/tenuo/a2a.key``. A
     configured but unusable block raises ValueError, so the caller can fail closed."""
-    from hermes_tenuo._config import _get_plugin_entry
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry
     from tenuo import PublicKey
 
     block = _get_plugin_entry(ctx).get("a2a_ingress")
@@ -550,6 +573,7 @@ def load_ingress(ctx: Any) -> Optional[A2AIngress]:
     roots = block.get("trusted_roots") or []
     if not isinstance(peers, dict) or not peers or not isinstance(roots, list) or not roots:
         raise ValueError("a2a_ingress needs at least one pinned peer and one trusted root")
+    _check_peer_isolation(peers, read_env if read_env is not None else _env_secret)
     for name, key in peers.items():
         PublicKey.from_bytes(base64.b64decode(str(key)))  # raises on a bad key
     trusted = [PublicKey.from_bytes(base64.b64decode(str(r))) for r in roots]

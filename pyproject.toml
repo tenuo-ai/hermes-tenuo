@@ -25,6 +25,7 @@ classifiers = [
 ]
 dependencies = [
     "path-jail>=0.3,<0.4",
+    "python-dotenv>=1,<2",
     "tenuo>=0.3.6,<0.4",
 ]
 

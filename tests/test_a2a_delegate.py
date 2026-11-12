@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -79,7 +80,7 @@ class Peer2:
 
     def call(self, tool, args, session="sess-b"):
         self.ingress.current_turn = lambda: self.turn
-        return self.guard.pre_tool_call(tool, args, session_id=session, tool_call_id=f"{tool}{args}")
+        return self.guard.pre_tool_call(tool, args, session_id=session, tool_call_id=uuid.uuid4().hex)
 
 
 @pytest.fixture()
@@ -100,6 +101,8 @@ def test_rules_use_the_guests_vocabulary():
                              "d": {"pattern": "x*"}, "e": {"regex": "^x$"}, "f": {"any": True},
                              "*": {"any": True}}})
     assert set(spec["t"]) == {"a", "b", "c", "d", "e", "f", "_allow_unknown"}
+    assert spec["t"]["a"].satisfies(1) and not spec["t"]["a"].satisfies(True)
+    assert spec["t"]["b"].satisfies(2) and not spec["t"]["b"].satisfies("2")
     with pytest.raises(DelegationError):
         constraint_for({"maybe": 1})
     with pytest.raises(DelegationError):

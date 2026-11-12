@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import sys
 from pathlib import Path
 from typing import Any, List
@@ -30,13 +31,20 @@ def cmd_key(_args: Any) -> int:
 
 def cmd_check(_args: Any) -> int:
     """Offline readiness check. Exit 1 when something configured cannot be used."""
+    from dotenv import dotenv_values
+
     from hermes_tenuo.a2a_delegate import load_sender_config
     from hermes_tenuo.a2a_ingress import IngressRefused, load_ingress, public_key_b64
+    from hermes_tenuo._home import hermes_home
 
     problems: List[str] = []
     ingress = None
+    profile_env = {}
     try:
-        ingress = load_ingress(None)
+        profile_env = {key: value for key, value in dotenv_values(
+            hermes_home() / ".env", encoding="utf-8-sig",
+        ).items() if value is not None}
+        ingress = load_ingress(None, read_env=lambda name: profile_env.get(name, os.environ.get(name)))
     except Exception as exc:
         problems.append(f"a2a_ingress: {exc} (every inbound A2A message would be dropped)")
     if ingress is not None:
@@ -48,7 +56,7 @@ def cmd_check(_args: Any) -> int:
             print(f"  revocation list: {'none' if srl is None else f'version {srl.version}, {len(srl.revoked_ids)} revoked'}")
         except IngressRefused as refused:
             problems.append(f"a2a_ingress: {refused} (every delegation is refused until it is fixed)")
-        print("  Hermes side: enable platforms.a2a, set A2A_PEER_TOKENS with these peer names, and keep this\n"
+        print("  Hermes side: enable platforms.a2a, use one named sender, and keep this\n"
               "  plugin the only pre_gateway_dispatch plugin on this agent.")
     elif not problems:
         print("Receiving: off (no a2a_ingress block).")
@@ -58,11 +66,9 @@ def cmd_check(_args: Any) -> int:
     except Exception as exc:
         problems.append(f"a2a_delegation: {exc}")
     if sender is not None:
-        import os
-
         print(f"Delegating: on. Peers: {', '.join(sorted(sender.peers))}")
         for peer in sender.peers.values():
-            token = "set" if os.environ.get(peer.token_env) else f"{peer.token_env} not in this environment"
+            token = "set" if profile_env.get(peer.token_env, os.environ.get(peer.token_env)) else f"{peer.token_env} not in this environment"
             print(f"  {peer.name}: {peer.url} (token {token})")
         print("  The session must hold a warrant that allows tenuo_delegate and covers what it delegates.")
     elif not any(p.startswith("a2a_delegation") for p in problems):
@@ -99,7 +105,6 @@ def cmd_revoke(args: Any) -> int:
 
 def _write_bytes(path: Path, data: bytes) -> None:
     """Raw bytes (the format the MCP wrapper reads as revocations.srl), atomically and 0600."""
-    import os
     import tempfile
 
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)

@@ -93,15 +93,21 @@ def load_sender_config(ctx: Any) -> Optional[SenderConfig]:
 
 def constraint_for(rule: Any) -> Any:
     """One Tenuo constraint from a JSON rule."""
-    from tenuo import Exact, OneOf, Pattern, Range, Regex, Wildcard
+    from tenuo import AnyOf, Exact, OneOf, Pattern, Range, Regex, Wildcard
 
     if not isinstance(rule, dict) or len(rule) != 1:
         raise DelegationError(f"a rule must have exactly one kind, got {rule!r}")
     kind, value = next(iter(rule.items()))
     if kind == "equals":
-        return Exact(value)
+        if isinstance(value, str):
+            return Exact(value)
+        if type(value) in (int, float) and abs(value) <= 2**53 - 1:
+            return Range(value, value)
+        raise DelegationError("equals needs a string or a finite number in the safe numeric range")
     if kind == "one_of" and isinstance(value, list) and value:
-        return OneOf(list(value))
+        if all(isinstance(item, str) for item in value):
+            return OneOf(value)
+        return AnyOf([constraint_for({"equals": item}) for item in value])
     if kind == "range" and isinstance(value, list) and len(value) == 2:
         return Range(value[0], value[1])
     if kind == "pattern" and isinstance(value, str):
@@ -284,10 +290,13 @@ def register(ctx: Any, get_guard: Any) -> bool:
         try:
             if not available():
                 raise DelegationError("delegation is not configured on this agent")
-            chain, key = get_guard().delegation_authority(_current_session_id())
+            guard = get_guard()
+            session_id = _current_session_id()
+            chain, key = guard.delegation_authority(session_id)
             result = delegate(config=config, chain=chain, key=key, peer=args.get("peer", ""),
                               task=args.get("task", ""), tools=args.get("tools"),
                               ttl_seconds=args.get("ttl_seconds", DEFAULT_TTL))
+            guard.record_delegation(session_id, chain, result)
             logger.info("hermes-tenuo: delegated to %s (%s): %s", result["peer"], result["context_id"], result["state"])
             return json.dumps({"ok": True, **result})
         except DelegationError as exc:

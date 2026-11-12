@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from types import SimpleNamespace
 
+import pytest
 from tenuo import SignedRevocationList, SigningKey
 
 from hermes_tenuo import a2a_cli
@@ -28,6 +29,8 @@ def _configure(tmp_path, monkeypatch, *, srl_path=None):
         trusted_roots: ["{_pub(root)}"]{srl_line}
 """)
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
+    (home / ".env").write_text("A2A_PEER_TOKENS=agent-a:example-token\n")
     return root
 
 
@@ -70,6 +73,35 @@ def test_check_reports_an_unusable_ingress_block(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_HOME", str(home))
     assert a2a_cli.cmd_check(None) == 1
     assert "every inbound A2A message would be dropped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("env", "message"), [
+    ("A2A_BEARER_TOKEN=shared\nA2A_PEER_TOKENS=agent-a:example-token", "Unset A2A_BEARER_TOKEN"),
+    ("A2A_PEER_TOKENS=agent-a:example-token,agent-b:second-token", "exactly one sender identity"),
+    ("A2A_PEER_TOKENS=agent-b:example-token", "must match the sole entry"),
+    ("A2A_PEER_TOKENS=agent-a:", "name:token format"),
+    ("A2A_PEER_TOKENS=", "exactly one sender identity"),
+])
+def test_check_refuses_unsafe_receiver_authentication(tmp_path, monkeypatch, capsys, env, message):
+    _configure(tmp_path, monkeypatch)
+    (tmp_path / "hermes-home" / ".env").write_text(env)
+    assert a2a_cli.cmd_check(None) == 1
+    error = capsys.readouterr().err
+    assert message in error and "example-token" not in error and "second-token" not in error
+
+
+def test_misconfigured_receiver_drops_a2a_dispatch(tmp_path, monkeypatch):
+    from hermes_tenuo import _register_a2a_ingress
+    from hermes_tenuo import _config
+
+    _configure(tmp_path, monkeypatch)
+    env = {"A2A_PEER_TOKENS": "agent-a:example-token,agent-b:second-token"}
+    monkeypatch.setattr(_config, "_env_secret", env.get)
+    hooks = {}
+    assert _register_a2a_ingress(SimpleNamespace(register_hook=hooks.__setitem__)) is None
+    hook = hooks["pre_gateway_dispatch"]
+    assert hook(SimpleNamespace(source=SimpleNamespace(platform="a2a")))["action"] == "skip"
+    assert hook(SimpleNamespace(source=SimpleNamespace(platform="telegram"))) is None
 
 
 def test_revocation_list_bytes_are_read_raw_or_as_base64():

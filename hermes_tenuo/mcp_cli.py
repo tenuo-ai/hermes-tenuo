@@ -41,7 +41,9 @@ def add_parser(subparsers):
     call.add_argument("--holder-key", type=Path, required=True, help="Leaf holder's private key file")
 
     audit = commands.add_parser("audit", help="View correlated decisions and outcomes across tools")
-    audit.add_argument("workspaces", type=Path, nargs="+", help="Wrapper workspaces to read together")
+    audit.add_argument("workspaces", type=Path, nargs="*", help="Wrapper workspaces to read together")
+    audit.add_argument("--hermes-log", type=Path, action="append", default=[],
+                       help="Hermes audit.jsonl to include (repeatable)")
     audit.add_argument("--warrant", help="Show this warrant and its descendants")
     audit.add_argument("--denied", action="store_true", help="Show only denied calls")
     audit.add_argument("--json", action="store_true", help="Emit JSON lines for other tools")
@@ -70,16 +72,31 @@ def _cases(path):
 
 
 def _audit(args):
+    if not args.workspaces and not args.hermes_log:
+        raise ValueError("Supply a wrapper workspace or one or more --hermes-log files")
     records = []
     for workspace in dict.fromkeys(path.expanduser().resolve() for path in args.workspaces):
         if not (workspace / "workspace.json").is_file():
             raise ValueError(f"No wrapper workspace at {workspace}")
         for record in read_audit_log(workspace / "audit.jsonl", denied_only=args.denied):
-            if args.warrant and args.warrant not in [
-                record.get("warrant_id"), *record.get("parent_warrant_ids", []),
-            ]:
-                continue
-            records.append({**record, "workspace": str(workspace)})
+            records.append({**record, "workspace": str(workspace), "source": str(workspace)})
+    hermes_fields = (
+        "timestamp", "decision", "tool", "tool_call_id", "session_id", "task_id", "duration_ms",
+        "warrant_id", "parent_warrant_ids", "outcome", "peer", "context_id",
+    )
+    for path in dict.fromkeys(path.expanduser().resolve() for path in args.hermes_log):
+        if not path.is_file():
+            raise ValueError(f"No Hermes audit log at {path}")
+        for record in read_audit_log(path, denied_only=args.denied):
+            # Older Hermes logs can include arguments and constraint failure text.
+            # Keep the combined view free of those values.
+            row = {key: record[key] for key in hermes_fields if key in record}
+            row["outcome"] = row.get("outcome") or "Hermes guard decision"
+            records.append({**row, "source": str(path)})
+    if args.warrant:
+        records = [row for row in records if args.warrant in [
+            row.get("warrant_id"), *(row.get("parent_warrant_ids") or []),
+        ]]
     records.sort(key=lambda record: record["timestamp"])
     if args.json:
         for record in records:
@@ -87,11 +104,11 @@ def _audit(args):
     elif not records:
         print("No matching calls. Run mcp check or mcp call to see decisions here.")
     else:
-        multiple = len(set(record["workspace"] for record in records)) > 1
+        multiple = len({record["source"] for record in records}) > 1
         for record in records:
             reason = f" ({record['reason'].replace('_', ' ')})" if record.get("reason") else ""
             warrant = f" | warrant {record['warrant_id']}" if record.get("warrant_id") else ""
-            source = f" | {record['workspace']}" if multiple else ""
+            source = f" | {record['source']}" if multiple else ""
             print(f"{record['timestamp']}  {record['decision']:5} {record['tool'] or 'unknown tool'}"
                   f" | {record['outcome']}{reason}{warrant}{source}")
     return 0

@@ -47,18 +47,23 @@ verifies and is stripped from the forwarded arguments.
 - `mcp config` names the server `tenuo_mcp`: the name `tenuo` collides with hermes-tenuo's own toolset in
   Hermes and hid the wrapped tools in testing.
 
-## Findings for the MCP track
+## Review updates in #84
 
-1. **Names Hermes rewrites.** Wrapper aliases may contain `-` or `.` (from server names), and Hermes
-   shortens tool names over 64 characters. A proof is then signed over a name the wrapper does not
-   expose, and the call is refused. Either restrict aliases to `[A-Za-z0-9_]` and warn on long names at
-   `wrap`, or expose the Hermes name too.
-2. **Revocation rollback across processes.** Tenuo's `Authorizer` refuses an older list within one
-   process, but a new `mcp serve` process (one per client connection) accepts any validly signed
-   `revocations.srl` on disk, including an older one that un-revokes grants. Persist the highest version
-   accepted in the workspace and refuse lower ones, as the A2A receiver now does. Requires write access
-   to the workspace, so this is integrity hardening, not a remote bypass.
-3. **Rule vocabulary.** `mcp check` builds `Exact`/`CEL` constraints from example arguments; accepting the
+- Hermes's scoped tool registry identifies the actual wrapper server. The plugin resolves the
+  registered name against the wrapper's discovery data, including rewritten or shortened names.
+  An ambiguous or unavailable mapping blocks the call.
+- The MCP wrapper persists the accepted signed list's version and digest in the workspace. It
+  refuses a rollback, a different list at the same version, or a missing list after acceptance.
+- The sender records the child grant ID. Receiver and wrapper decisions carry the same lineage.
+  `mcp audit --hermes-log` combines the agent and wrapper logs by warrant ID. The integration test
+  also presents a valid proof for an out-of-scope call directly to the wrapper and checks the denial
+  and backend state.
+- Protected A2A ingress requires one named sender per receiver until [upstream #146669](https://github.com/NousResearch/hermes-agent/issues/146669)
+  isolates task reads by peer. `a2a check` reports the same configuration requirements.
+
+## Follow-ups
+
+1. **Rule vocabulary.** `mcp check` builds `Exact`/`CEL` constraints from example arguments. Accepting the
    `tenuo_delegate` rule JSON would let one grant description serve both.
-4. **One revoke command.** Fold `hermes-tenuo a2a revoke` and the wrapper's revocation file into a
+2. **One revoke command.** Fold `hermes-tenuo a2a revoke` and the wrapper's revocation file into a
    single `hermes-tenuo revoke`.
