@@ -227,10 +227,15 @@ def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str
     if not shared or _locate(roots, shared, 0, "") is not None:
         problems.append(".git leads to settings in a folder that cannot be locked")
         return []
-    hooks = os.path.join(shared, "hooks")
+    _outside_hooks(roots, os.path.join(shared, "hooks"), problems)
+    return [os.path.join(shared, "config"), os.path.join(gitdir, "config.worktree")]
+
+
+def _outside_hooks(roots: List[Tuple[str, int, str]], hooks: str, problems: List[str]) -> None:
+    """Outside hook locations must not be redirectable or aliased from writable paths."""
     try:
         if _through_a_root(roots, hooks):
-            problems.append("the external repository's default hooks traverse a writable folder")
+            problems.append("external hooks traverse a writable folder")
         else:
             # Individual hook symlinks may reference project scripts (documented),
             # but a regular hook must not have an unprotected writable hard-link alias.
@@ -242,8 +247,7 @@ def _pointed(roots: List[Tuple[str, int, str]], problems: List[str]) -> List[str
                 if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
                     problems.append(f"external hook {hook} has a second name (a hard link)")
     except OSError:
-        problems.append("the external repository's default hooks cannot be inspected")
-    return [os.path.join(shared, "config"), os.path.join(gitdir, "config.worktree")]
+        problems.append("external hooks cannot be inspected")
 
 
 def _logical_lines(text: str) -> List[str]:
@@ -500,6 +504,13 @@ def _scan(folder: str, also: Sequence[str], read: Optional[Dict[str, list]]) -> 
                     target = _locate(roots, value, 0, "")
                     if target is not None and target not in hook_folders:
                         hook_folders.append(target)   # "." is the folder itself
+                    elif target is None and read is not None:
+                        outside = _full(value, roots[0][0])
+                        issues: List[str] = []
+                        if outside:
+                            _outside_hooks(roots, outside, issues)
+                        for issue in issues:
+                            found[f"{issue} ({_UNCHECKED})"] = "unchecked"
                 elif _runs(section, sub, key, value):
                     found[name] = _digest(found.get(name, "") + value)
         budget = [_HOOK_BYTES]

@@ -520,3 +520,21 @@ def test_shared_worktree_external_default_hooks_are_checked(folder, tmp_path, la
         (hooks / "pre-commit").write_text("#!/bin/sh\n")
         os.link(hooks / "pre-commit", worktree / "alias")
     assert any("hook" in p for p in _sources(worktree, tmp_path)[1])
+
+
+
+@pytest.mark.parametrize("layout", ["directory-link", "hook-hard-link"])
+def test_explicit_external_hooks_are_checked(folder, tmp_path, layout):
+    outside = tmp_path / "outside-hooks"
+    outside.mkdir()
+    if layout == "directory-link":
+        (folder / "bridge").symlink_to(outside, target_is_directory=True)
+        alias = tmp_path / "alias-hooks"
+        alias.symlink_to(folder / "bridge", target_is_directory=True)
+    else:
+        (outside / "pre-commit").write_text("#!/bin/sh\n")
+        os.link(outside / "pre-commit", folder / "alias")
+        alias = outside
+    with (folder / ".git" / "config").open("a") as stream:
+        stream.write(f"[core]\nhooksPath = {alias}\n")
+    assert any("hook" in p for p in _sources(folder, tmp_path)[1])
