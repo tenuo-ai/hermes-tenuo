@@ -5,6 +5,7 @@
 """
 
 import base64
+import os
 import json
 import secrets
 import sys
@@ -17,7 +18,6 @@ from tenuo import Exact, OneOf, SigningKey, Warrant, Wildcard
 from hermes_tenuo.a2a_ingress import build_envelope, grant_to, public_key_b64, send_message_request
 
 LAB = Path("/lab/sender")
-import os
 B_URL = os.environ.get("B_URL", "http://d0-hermes-b:9900/")
 B_KEY = os.environ.get("B_KEY_FILE", "/lab/b_key.pub")
 
