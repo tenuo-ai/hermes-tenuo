@@ -1113,11 +1113,13 @@ class HermesGuard:
             return self._block(tool_name, args, unattributed, session_id, task_id, tool_call_id)
         refusal = self._bind_ingress_grant(session_id, task_id)
         if refusal is not None:
-            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
+            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id,
+                               lineage=self._ingress_audit_lineage(session_id))
         warrant, signing_key = self._resolve_warrant(session_id)
         refusal = self._bound_ingress_revocation(session_id)
         if refusal is not None:
-            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
+            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id,
+                               lineage=self._ingress_audit_lineage(session_id))
         if self._access_policy is not None:
             from hermes_tenuo.access import current_sender, subagent_attribution_lookup
             lookup = subagent_attribution_lookup()
@@ -1213,6 +1215,19 @@ class HermesGuard:
                 self._bind_session(session_id, grant.warrant, ingress.own_key, list(grant.chain))
             self._ingress_roots[session_id] = list(ingress.trusted_roots)
         return None
+
+    def _ingress_audit_lineage(self, session_id: str) -> Tuple[str, ...]:
+        """Only attribute refusals to already verified ingress authority."""
+        with self._session_lock:
+            entry = self._session_warrants.get(session_id)
+            if session_id in self._ingress_roots and entry is not None and _marker_reason(entry[0]) is None:
+                return tuple(str(w.id) for w in [*self._session_warrant_chains.get(session_id, []), entry[0]])
+        if self._ingress is not None:
+            turn = self._ingress.current_turn()
+            grant = self._ingress.grant_for(*turn) if turn is not None else None
+            if grant is not None:
+                return tuple(str(w.id) for w in [*grant.chain, grant.warrant])
+        return ()
 
     def _bound_ingress_revocation(self, session_id: str) -> Optional[str]:
         """Check after warrant resolution, which can attach a staged child on older Hermes."""

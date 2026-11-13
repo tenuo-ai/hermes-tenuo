@@ -640,3 +640,34 @@ def test_unchanged_revocation_floor_is_not_rewritten(keys, tmp_path, monkeypatch
     _write_srl(path, _srl(keys, [], version=2))
     assert ingress.revocations().version == 2
     assert save.call_count == 2
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_revocation_denial_audit_retains_verified_lineage(keys, w_a, tmp_path, bound):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = _grant(keys, w_a)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard = _guard(keys, ingress)
+    records = []
+    guard._audit_callback = records.append
+    turn = ("agent-a", "ctx-1")
+    if bound:
+        assert _call(guard, ingress, turn, "light_get", {}, "session") is None
+        turn = None  # no gateway context on the later call
+    _write_srl(path, _srl(keys, [grant.id], version=2))
+    assert _call(guard, ingress, turn, "light_get", {}, "session")["action"] == "block"
+    assert records[-1].decision == "DENY"
+    assert records[-1].warrant_id == str(grant.id)
+    assert records[-1].parent_warrant_ids == (str(w_a.id),)
+
+
+def test_ingress_replay_denial_audit_retains_verified_context_lineage(keys, w_a):
+    records = []
+    ingress = _ingress(keys, audit=records.append)
+    envelope = _envelope(keys, w_a)
+    event = _event(_event_text(envelope))
+    assert ingress.pre_gateway_dispatch(event)["action"] == "rewrite"
+    assert ingress.pre_gateway_dispatch(event)["action"] == "skip"
+    assert records[-1]["warrant_id"] == records[0]["warrant_id"]
+    assert records[-1]["parent_warrant_ids"] == [str(w_a.id)]

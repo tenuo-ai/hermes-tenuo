@@ -494,7 +494,8 @@ class A2AIngress:
             try:
                 grant, task = self.admit(peer, context_id, str(getattr(event, "text", "") or ""))
             except IngressRefused as refused:
-                self._record("refused", peer, context_id, str(refused))
+                self._record("refused", peer, context_id, str(refused),
+                             grant=self.registry.get(peer, context_id))
                 return {"action": "skip", "reason": f"tenuo: {refused}"}
             self._record("admitted", peer, context_id, ",".join(grant.tools), grant=grant)
             return {"action": "rewrite", "text": _framing(peer) + task}
