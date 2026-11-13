@@ -156,3 +156,40 @@ def test_the_guard_authorizes_the_tool_arguments_not_the_proof_carrier(monkeypat
     # Elsewhere _tenuo stays an ordinary, unnamed argument.
     other = HermesGuard(warrant=w, signing_key=holder, trusted_roots=[root.public_key])
     assert other.pre_tool_call(name, {"value": "x", CARRIER: {}}, session_id="s")["action"] == "block"
+
+
+@pytest.mark.parametrize("adapter", [False, True])
+def test_task_only_mcp_call_proves_child_authority_and_refuses_ambiguous_tasks(monkeypatch, adapter):
+    from tenuo import Authorizer, Exact
+    from tenuo.mcp import MCPVerifier
+    from hermes_tenuo._guard import PluginGuard
+    from hermes_tenuo.a2a_ingress import grant_to
+
+    root, parent_key, child_key = (SigningKey.generate() for _ in range(3))
+    parent = (Warrant.mint_builder().holder(parent_key.public_key)
+              .capability("first__write", {"value": Wildcard()}).ttl(600).mint(root))
+    child = grant_to(parent_key, [parent], child_key.public_key, {"first__write": {"value": Exact("child")}}, 120)
+    guard = HermesGuard(warrant=parent, signing_key=parent_key, trusted_roots=[root.public_key])
+    guard.set_session_warrant("child", child, child_key, parent_warrant=[parent])
+    guard._remember_task("child-task", "child")
+    monkeypatch.setattr("hermes_tenuo.mcp_proofs._session_id", lambda: "")
+    middleware = make_middleware(_resolve_test_tool, lambda: PluginGuard(guard) if adapter else guard)
+    forwarded = []
+    middleware(tool_name=HERMES_NAME, args={"value": "child", CARRIER: "forged"},
+               task_id="child-task", next_call=forwarded.append)
+    proof = forwarded[-1][CARRIER]
+    verifier = MCPVerifier(authorizer=Authorizer(trusted_roots=[root.public_key]))
+    assert verifier.verify("first__write", {"value": "child"}, meta={"tenuo": proof}).allowed
+    assert not verifier.verify("first__write", {"value": "parent-only"}, meta={"tenuo": proof}).allowed
+    # Sign an out-of-scope value too: the wrapper must still see the child's restricted warrant.
+    middleware(tool_name=HERMES_NAME, args={"value": "parent-only"},
+               task_id="child-task", next_call=forwarded.append)
+    assert not verifier.verify("first__write", {"value": "parent-only"},
+                               meta={"tenuo": forwarded[-1][CARRIER]}).allowed
+    for task in ("unknown", "child-task"):
+        if task == "child-task":
+            guard._remember_task(task, "another-child")
+        before = len(forwarded)
+        response = middleware(tool_name=HERMES_NAME, args={"value": "child"}, task_id=task,
+                              next_call=forwarded.append)
+        assert "refused" in json.loads(response)["error"] and len(forwarded) == before

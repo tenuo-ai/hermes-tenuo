@@ -94,7 +94,13 @@ def make_middleware(resolve, get_guard):
             return next_call(args)
         args.pop(CARRIER, None)
         guard = get_guard()
-        meta = guard.call_meta(session_id or _session_id(), target, args) if guard is not None else None
+        try:
+            attributed = guard.delegation_session(session_id or _session_id(), str(_kw.get("task_id") or "")) if guard else ""
+            meta = guard.call_meta(attributed, target, args) if guard is not None else None
+        except Exception as exc:
+            # Hermes can bypass middleware that raises. A proof-attribution failure must refuse here.
+            logger.warning("hermes-tenuo: could not select MCP proof authority (%s)", type(exc).__name__)
+            return json.dumps({"error": "Cannot attribute this MCP call to its authority; call refused."})
         if meta is None:
             logger.info("hermes-tenuo: no authority to prove for %s; the wrapper will refuse it", tool_name)
             return next_call(args)

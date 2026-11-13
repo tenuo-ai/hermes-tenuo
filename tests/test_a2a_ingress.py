@@ -549,3 +549,34 @@ def test_revocation_floor_without_digest_requires_a_newer_signed_list(keys, tmp_
         ingress.revocations()
     _write_srl(path, _srl(keys, [], version=5))
     assert ingress.revocations().version == 5
+
+
+@pytest.mark.parametrize("revoked", ["child", "grant", "sender", None])
+@pytest.mark.parametrize("lifecycle_hook", [False, True])
+def test_child_inherits_ingress_provenance_before_its_first_contextless_call(keys, tmp_path, revoked, lifecycle_hook):
+    w_a = (Warrant.mint_builder().holder(keys.a.public_key).capability("delegate_task")
+           .capability("light_get").ttl(3600).mint(keys.root))
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = grant_to(keys.a, [w_a], keys.b.public_key, {"delegate_task": {}, "light_get": {}}, 300)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard = HermesGuard(ingress=ingress, trusted_roots=[keys.root.public_key], on_denial="log")
+    ingress.current_turn = lambda: ("agent-a", "ctx-1")
+    assert guard.pre_tool_call("delegate_task", {"goal": "read", "toolsets": ["light_get"]},
+                               session_id="parent", tool_call_id="spawn") is None
+    # Provenance is captured when staging, even if the parent's entry changes before attachment.
+    guard._ingress_roots.pop("parent")
+    ingress.current_turn = lambda: None
+    child = guard._planned_children["parent"][0].warrant
+    if lifecycle_hook:
+        guard.on_subagent_start("parent", "child", child_goal="read", child_task_id="child-task")
+    if revoked:
+        target = {"child": child, "grant": grant, "sender": w_a}[revoked]
+        _write_srl(path, _srl(keys, [target.id], version=2))
+        result = guard.pre_tool_call("light_get", {}, session_id="child", task_id="child-task")
+        assert result["action"] == "block" and "revoked" in result["message"]
+        assert guard.delegation_authority("child") == ([], None)
+    else:
+        assert guard.pre_tool_call("light_get", {}, session_id="child", task_id="child-task") is None
+        # Log-only mode must not override a descendant's restrictions without gateway context.
+        assert guard.pre_tool_call("door_unlock", {}, task_id="child-task")["action"] == "block"

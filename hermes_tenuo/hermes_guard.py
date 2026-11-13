@@ -139,6 +139,7 @@ class _ChildGrant:
     key: Any                # the child's own signing key
     goal: Optional[str]     # the task goal, matched against subagent_start
     invocation_id: str = ""  # originating delegate_task tool_call_id
+    ingress_roots: Optional[List[Any]] = None  # provenance captured before the child has a session
 
 
 def _toolset_list(value: Any) -> Optional[List[str]]:
@@ -451,6 +452,7 @@ class HermesGuard:
     ) -> None:
         """Give *session_id* its own warrant. Caller holds ``_session_lock``."""
         self._session_warrants[session_id] = (warrant, signing_key)
+        self._ingress_roots.pop(session_id, None)
         self._uses_session_warrants = True
         self._denied_sessions.pop(session_id, None)
         self._child_sessions.pop(session_id, None)
@@ -464,6 +466,7 @@ class HermesGuard:
     def _deny_session(self, session_id: str, marker: Any) -> None:
         """Replace *session_id*'s warrant with a no-authority marker. Caller holds ``_session_lock``."""
         self._session_warrants[session_id] = (marker, None)
+        self._ingress_roots.pop(session_id, None)
         self._uses_session_warrants = True
         self._session_warrant_chains.pop(session_id, None)
         self._child_sessions.pop(session_id, None)
@@ -841,6 +844,10 @@ class HermesGuard:
                     "action": "block",
                     "message": "tenuo: delegation rejected: an outstanding invocation has ambiguous child goals",
                 }
+            with self._session_lock:
+                roots = self._ingress_roots.get(parent_session_id)
+                for grant in grants:
+                    grant.ingress_roots = list(roots) if roots is not None else None
             pending.extend(grants)
         return None
 
@@ -921,6 +928,8 @@ class HermesGuard:
                 else:
                     self._child_sessions[session_id] = None  # back of the rotation
             self._bind_session(child_session_id, grant.warrant, grant.key, grant.chain)
+            if grant.ingress_roots is not None:
+                self._ingress_roots[child_session_id] = list(grant.ingress_roots)
             self._child_sessions[child_session_id] = None
 
     # ------------------------------------------------------------------
@@ -1106,6 +1115,9 @@ class HermesGuard:
         if refusal is not None:
             return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
         warrant, signing_key = self._resolve_warrant(session_id)
+        refusal = self._bound_ingress_revocation(session_id)
+        if refusal is not None:
+            return self._block(tool_name, args, refusal, session_id, task_id, tool_call_id)
         if self._access_policy is not None:
             from hermes_tenuo.access import current_sender, subagent_attribution_lookup
             lookup = subagent_attribution_lookup()
@@ -1170,14 +1182,6 @@ class HermesGuard:
             return None
         turn = ingress.current_turn()
         if turn is None:
-            # Continuations can lose gateway context after the ingress-bound session is known.
-            with self._session_lock:
-                entry = self._session_warrants.get(session_id)
-                if session_id in self._ingress_roots and entry is not None and _marker_reason(entry[0]) is None:
-                    chain = self._session_warrant_chains.get(session_id, [])
-                    revoked = ingress.is_revoked(None, [*chain, entry[0]])
-                    if revoked is not None:
-                        return f"tenuo: {revoked}; tool call blocked"
             return None
         grant = ingress.grant_for(*turn)
         if grant is None:
@@ -1196,9 +1200,6 @@ class HermesGuard:
                 # A child must keep its own key and narrower grant. Only the ingress
                 # grant itself or a verified descendant belongs to this A2A turn.
                 chain = self._session_warrant_chains.get(session_id, [])
-                revoked = ingress.is_revoked(grant, [*chain, entry[0]])
-                if revoked is not None:
-                    return f"tenuo: {revoked}; tool call blocked"
                 if entry[0] is not grant.warrant and not any(
                         str(w.id) == str(grant.warrant.id) for w in chain):
                     return "tenuo: this session's warrant does not descend from the A2A grant"
@@ -1212,6 +1213,17 @@ class HermesGuard:
                 self._bind_session(session_id, grant.warrant, ingress.own_key, list(grant.chain))
             self._ingress_roots[session_id] = list(ingress.trusted_roots)
         return None
+
+    def _bound_ingress_revocation(self, session_id: str) -> Optional[str]:
+        """Check after warrant resolution, which can attach a staged child on older Hermes."""
+        with self._session_lock:
+            entry = self._session_warrants.get(session_id)
+            if (self._ingress is None or session_id not in self._ingress_roots
+                    or entry is None or _marker_reason(entry[0]) is not None):
+                return None
+            chain = list(self._session_warrant_chains.get(session_id, [])) + [entry[0]]
+        revoked = self._ingress.is_revoked(None, chain)
+        return f"tenuo: {revoked}; tool call blocked" if revoked is not None else None
 
     def _without_mcp_carrier(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """For a call to a Tenuo-wrapped MCP server, the arguments without the proof carrier
@@ -1232,6 +1244,14 @@ class HermesGuard:
             pass  # Discovery can change before the post hook. Keep the carrier out of audit.
         return {k: v for k, v in args.items() if k != CARRIER}
 
+    def delegation_session(self, session_id: str, task_id: str) -> str:
+        """Resolve dispatch attribution before selecting authority for a signed outbound call."""
+        resolved, reason = self._attribute_session(session_id, task_id)
+        if reason:
+            from hermes_tenuo.a2a_delegate import DelegationError
+            raise DelegationError(reason)
+        return resolved
+
     def delegation_authority(self, session_id: str) -> Tuple[List[Any], Optional[Any]]:
         """This session's own authority for delegating onward: (chain root-first ending with its
         warrant, its signing key), or ([], None) when it holds none. A delegated A2A turn delegates
@@ -1239,6 +1259,8 @@ class HermesGuard:
         if self._bind_ingress_grant(session_id) is not None:
             return [], None
         warrant, key = self._resolve_warrant(session_id)
+        if self._bound_ingress_revocation(session_id) is not None:
+            return [], None
         if warrant is None or key is None or _marker_reason(warrant) is not None:
             return [], None
         return self._chain_for(session_id) + [warrant], key
@@ -1404,7 +1426,8 @@ class HermesGuard:
                 delegated_in = session_id in self._ingress_roots
             # A delegated A2A grant is always enforced: log-only mode never lets it through.
             if (self._on_denial == "log" and not grant_rejected and not delegated_in
-                    and not _is_delegation_spawn(tool_name, args)):
+                    and not _is_delegation_spawn(tool_name, args)
+                    and tool_name.removeprefix("tool:") != "tenuo_delegate"):
                 logger.warning("hermes-tenuo [BLOCKED-LOG] %s: %s", tool_name, reason)
                 return None, False
             return {"action": "block", "message": reason}, False

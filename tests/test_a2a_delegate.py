@@ -351,3 +351,17 @@ def test_sessionless_handler_uses_child_authority_and_refuses_unknown_tasks(k, w
     guard._remember_task("child-task", "another-child")
     result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, task_id="child-task"))
     assert not result["ok"] and "does not identify one session" in result["error"]
+
+
+@pytest.mark.parametrize("tool", ["tenuo_delegate", "tool:tenuo_delegate"])
+@pytest.mark.parametrize("has_capability", [False, True])
+def test_log_only_mode_cannot_allow_denied_remote_delegation(k, tool, has_capability):
+    builder = Warrant.mint_builder().holder(k.a.public_key).capability("ha_get_state")
+    if has_capability:
+        builder = builder.capability("tenuo_delegate", {"peer": Exact("allowed")})
+    warrant = builder.ttl(600).mint(k.root)
+    guard = HermesGuard(warrant=warrant, signing_key=k.a, trusted_roots=[k.root.public_key], on_denial="log")
+    result = guard.pre_tool_call(tool, {"peer": "forbidden"}, session_id="parent")
+    assert result["action"] == "block"
+    if has_capability:
+        assert guard.pre_tool_call(tool, {"peer": "allowed"}, session_id="parent") is None
