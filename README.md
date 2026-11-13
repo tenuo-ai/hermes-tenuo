@@ -34,7 +34,7 @@ After expiry: DENY read_file path=/data/reports/q3.csv
 **See the checks run locally—no Hermes process or model API key needed:**
 
 ```sh
-uvx hermes-tenuo==0.4.0 demo
+uvx hermes-tenuo==0.4.1 demo
 ```
 
 **Apply it to your Hermes:** [install and configure Tenuo](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#install-into-hermes),
@@ -42,7 +42,7 @@ mint a warrant for the task, and run `hermes-tenuo doctor` to check the configur
 For example, this grants only `web_search` for one hour:
 
 ```sh
-uvx hermes-tenuo==0.4.0 mint --ttl 1h --allow web_search
+uvx hermes-tenuo==0.4.1 mint --ttl 1h --allow web_search
 ```
 
 The command prints the configuration and signing-key instructions. Apply them
@@ -117,7 +117,7 @@ your chat. An existing HTTPS endpoint works too; the guide covers both.
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed:
 
 ```sh
-uvx hermes-tenuo==0.4.0 hands demo
+uvx hermes-tenuo==0.4.1 hands demo
 ```
 
 Follow the printed `cd` command.

@@ -84,7 +84,7 @@ be available inside that container; otherwise use the HTTPS proxy route.
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if `uvx` is not available, then run:
 
 ```sh
-uvx hermes-tenuo==0.4.0 hands demo
+uvx hermes-tenuo==0.4.1 hands demo
 ```
 
 The command names the release, so the laptop runs the same version as the server plugin.

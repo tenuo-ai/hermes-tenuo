@@ -7,7 +7,7 @@
 # match what register() registers at that commit.
 name: hermes-tenuo
 title: Tenuo
-version: 0.4.0
+version: 0.4.1
 category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
@@ -25,7 +25,10 @@ description: >-
   If TENUO_CONNECT_TOKEN or TENUO_CONTROL_PLANE_URL enables the optional Tenuo
   control plane, authorization events may be sent there. The optional MCP CLI
   connects to configured upstream servers and keeps a local argument-free audit.
-  Experimental A2A ingress is disabled unless explicitly configured.
+  Delegation between Hermes agents is a preview and off until configured: the
+  tenuo_delegate tool sends a task and a signed grant to a peer agent you pair,
+  and the A2A receiver drops messages without a valid delegation. With
+  mcp_proofs set, calls to the named wrapped MCP servers carry a signed proof.
 maintainer: tenuo-ai
 tier: community
 requires_hermes: ">=0.20"

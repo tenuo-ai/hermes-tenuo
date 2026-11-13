@@ -11,7 +11,7 @@ audit view. It runs without a model or a Hermes process.
 Install the optional extra in your Python environment:
 
 ```sh
-python -m pip install 'hermes-tenuo[mcp]==0.4.0'
+python -m pip install 'hermes-tenuo[mcp]==0.4.1'
 ```
 
 Then use the JSON or YAML file that already contains
