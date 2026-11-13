@@ -17,6 +17,9 @@ Main additions since 0.4.0, each off until configured:
 - Pair a machine from a direct message on chat platforms: `/hands setup` no longer prints
   the pairing line in a group, channel or thread.
 - The plugin now needs `python-dotenv`; `hermes plugins enable` installs it.
+- If you enabled `a2a_ingress` on 0.4.0: a receiver now takes one named sender. With more
+  than one entry in `peers` or `A2A_PEER_TOKENS`, or with `A2A_BEARER_TOKEN` set, every
+  inbound A2A message is dropped until that is fixed. Run `hermes-tenuo a2a check`.
 
 ### Delegation between Hermes agents (preview)
 
