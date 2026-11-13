@@ -2,6 +2,16 @@
 
 ## 0.4.1 - 2026-11-13
 
+Main additions since 0.4.0, each off until configured:
+
+- **Delegation between Hermes agents (preview):** a new `tenuo_delegate` tool, a hardened
+  A2A receiver with signed revocation lists, and `hermes-tenuo a2a` commands.
+- **Signed calls to wrapped MCP servers:** calls to configured Tenuo-wrapped MCP servers
+  carry the session's authority.
+- **Hands in shared chats:** pairing moves to a direct message, refused calls are not run,
+  and only the owner switches a shared conversation.
+- **Pinned Hands commands:** the laptop command names the plugin's version.
+
 ### Upgrading from 0.4.0
 
 - Pair a machine from a direct message on chat platforms: `/hands setup` no longer prints
@@ -10,10 +20,19 @@
 
 ### Delegation between Hermes agents (preview)
 
-- `tenuo_delegate` hands one bounded task to a paired Hermes over A2A. The receiver holds a
-  signed, short-lived grant for the tools and argument values named, checked before its
-  model sees the task and at every tool call. Calls to Tenuo-wrapped MCP servers carry the
-  session's authority. See `docs/a2a-delegation.md`.
+- `tenuo_delegate(peer, task, tools, ttl_seconds)` sends one bounded task to a paired
+  Hermes over A2A. It is offered only when `a2a_delegation.peers` is configured and the
+  session holds an enforcing warrant. The grant is a child of that warrant, held by the
+  peer's pinned key, for the tools and argument values named.
+- The receiver (`a2a_ingress`) verifies the whole chain before its model sees the task and
+  at every tool call, and can read a signed revocation list (`revocation_list`). An inbound
+  A2A message without a valid delegation is dropped.
+- `hermes-tenuo a2a key`, `a2a check` and `a2a revoke` show the pairing key, check the
+  setup and revoke a grant or a sender's warrant.
+- With `mcp_proofs.servers` set, calls to those Tenuo-wrapped MCP servers are signed with
+  the session's chain, so a delegated task is verified again at the wrapper. This registers
+  a `tool_execution` middleware.
+- Guide: `docs/a2a-delegation.md`; design and limits: `docs/a2a-delegation-design.md`.
 
 ### CLI
 

@@ -27,7 +27,7 @@ provides_hooks:
   - subagent_start
   - pre_llm_call
   - pre_gateway_dispatch
-# Registered only when Hands is configured (hands.listen).
+# Registered only when Hands (hands.listen) or mcp_proofs.servers is configured.
 provides_middleware:
   - tool_execution
 requires_env:
