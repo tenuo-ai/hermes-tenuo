@@ -467,3 +467,49 @@ def test_remote_delegation_capability_keeps_child_delegatable(keys, planned, rem
     assert "delegate_task" not in chain[-1].tools
     remote = grant_to(key, chain, SigningKey.generate().public_key, {"web_search": {}}, 60)
     Authorizer(trusted_roots=[root.public_key]).verify_chain([*chain, remote])
+
+
+@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_mcp_toolsets_use_warrant_names_for_child_grants(keys, monkeypatch, planned, ambiguous):
+    import sys
+    from types import SimpleNamespace
+    from hermes_tenuo.delegation import parse_plan
+    from hermes_tenuo.mcp_proofs import MCPMappingError
+
+    root, agent = keys
+    parent = (Warrant.mint_builder().holder(agent.public_key).capability("first__write")
+              .capability("unrelated").capability("delegate_task").ttl(3600).mint(root))
+    name = "mcp__tenuo_mcp__first__write"
+    monkeypatch.setitem(sys.modules, "toolsets", SimpleNamespace(
+        resolve_toolset=lambda ts: [name] if ts == "tenuo_mcp" else []))
+
+    def resolve(tool):
+        if tool == name:
+            if ambiguous:
+                raise MCPMappingError("ambiguous MCP name")
+            return "first__write"
+        return None
+
+    kwargs = {}
+    if planned:
+        kwargs["delegation_plan"] = parse_plan({
+            "version": 1,
+            "root": {"tools": {"first__write": {}, "unrelated": {}, "delegate_task": {}}},
+            "levels": [{"role": "writer", "ttl_seconds": 600,
+                        "tools": {"first__write": {}, "unrelated": {}}}],
+        })
+    guard = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key],
+                         **kwargs)
+    guard._mcp_resolver = resolve
+    result = guard.pre_tool_call("delegate_task", {"goal": "write", "toolsets": ["tenuo_mcp"]},
+                                 session_id="parent")
+    if ambiguous:
+        assert result["action"] == "block"
+    else:
+        assert result is None
+        guard.on_subagent_start("parent", "child", child_goal="write")
+        child, _ = guard._resolve_warrant("child")
+        assert set(child.tools) == {"first__write"}
+        assert guard.pre_tool_call(name, {}, session_id="child") is None
+        assert guard.pre_tool_call("unrelated", {}, session_id="child")["action"] == "block"

@@ -626,6 +626,9 @@ class HermesGuard:
                 bare = t.removeprefix("tool:")
                 if bare == ts or bare.startswith(ts + "_"):
                     wanted.add(bare)
+        if self._mcp_resolver is not None:
+            wanted = {self._mcp_resolver(name) or name for name in wanted}
+        wanted = {name.removeprefix("tool:") for name in wanted}
         return {t for t in tools if t.removeprefix("tool:") in wanted}
 
     def _child_warrant_grants(self, parent_warrant: Any) -> Tuple[Dict[str, Dict[str, Any]], int]:
