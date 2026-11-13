@@ -128,3 +128,22 @@ def test_sender_readiness_requires_each_peer_token(tmp_path, monkeypatch, capsys
     assert "example-token" not in output.out + output.err
     if not token:
         assert "PEER_TEST_TOKEN" in output.err
+
+
+def test_concurrent_revocations_preserve_all_ids_and_increase_version(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = SigningKey.generate()
+    key_file = tmp_path / "root.key"
+    key_file.write_text(base64.b64encode(root.secret_key_bytes()).decode())
+    srl = tmp_path / "revocations.srl"
+
+    def revoke(i):
+        return a2a_cli.cmd_revoke(SimpleNamespace(
+            ids=[f"tnu_wrt_{i}"], root_key=str(key_file), list=str(srl)))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(revoke, range(8))) == [0] * 8
+    loaded = SignedRevocationList.from_bytes(srl.read_bytes())
+    assert loaded.version == 8
+    assert set(loaded.revoked_ids) == {f"tnu_wrt_{i}" for i in range(8)}

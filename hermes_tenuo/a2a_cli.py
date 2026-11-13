@@ -86,20 +86,23 @@ def cmd_revoke(args: Any) -> int:
 
     root = SigningKey.from_bytes(base64.b64decode(Path(args.root_key).read_text().strip()))
     target = Path(args.list)
-    ids = set(args.ids)
-    version = 1
-    if target.exists():
-        from hermes_tenuo.a2a_ingress import srl_bytes
+    from hermes_tenuo.a2a_ingress import _JsonState
 
-        current = SignedRevocationList.from_bytes(srl_bytes(target.read_bytes()))
-        ids |= set(current.revoked_ids)
-        version = current.version + 1
-    builder = SignedRevocationList.builder()
-    for warrant_id in sorted(ids):
-        builder = builder.revoke(warrant_id)
-    srl = builder.version(version).build(root)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _write_bytes(target, srl.to_bytes())
+    with _JsonState(target).locked():
+        ids = set(args.ids)
+        version = 1
+        if target.exists():
+            from hermes_tenuo.a2a_ingress import srl_bytes
+
+            current = SignedRevocationList.from_bytes(srl_bytes(target.read_bytes()))
+            ids |= set(current.revoked_ids)
+            version = current.version + 1
+        builder = SignedRevocationList.builder()
+        for warrant_id in sorted(ids):
+            builder = builder.revoke(warrant_id)
+        srl = builder.version(version).build(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes(target, srl.to_bytes())
     print(f"Revocation list version {version}: {len(ids)} revoked. Copy {target} to each receiving agent's "
           "a2a_ingress.revocation_list path; it is re-read on change.")
     return 0

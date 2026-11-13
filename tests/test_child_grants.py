@@ -438,3 +438,32 @@ def test_log_only_denial_does_not_create_delegation_authority(keys):
     assert not g._planned_children
     g.on_subagent_start('p', 'c', child_goal='r')
     assert not _allowed(g, 'read_file', {'path': '/data/file'}, 'c')
+
+
+@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize("remote_tool", ["tenuo_delegate", "tool:tenuo_delegate"])
+def test_remote_delegation_capability_keeps_child_delegatable(keys, planned, remote_tool):
+    from tenuo import Authorizer
+    from hermes_tenuo.a2a_ingress import grant_to
+    from hermes_tenuo.delegation import parse_plan
+
+    root, agent = keys
+    tools = {"web_search": {}, remote_tool: {}}
+    parent = (Warrant.mint_builder().holder(agent.public_key)
+              .capability("web_search").capability(remote_tool).capability("delegate_task")
+              .ttl(3600).mint(root))
+    kwargs = {}
+    if planned:
+        kwargs["delegation_plan"] = parse_plan({
+            "version": 1, "root": {"tools": {**tools, "delegate_task": {}}},
+            "levels": [{"role": "remote-worker", "ttl_seconds": 600, "tools": tools}],
+        })
+    else:
+        kwargs["child_warrant"] = (Warrant.mint_builder().holder(agent.public_key)
+                                  .capability("web_search").capability(remote_tool).ttl(600).mint(root))
+    guard = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key], **kwargs)
+    _delegate(guard, {"goal": "research"}, [("child", "research")])
+    chain, key = guard.delegation_authority("child")
+    assert "delegate_task" not in chain[-1].tools
+    remote = grant_to(key, chain, SigningKey.generate().public_key, {"web_search": {}}, 60)
+    Authorizer(trusted_roots=[root.public_key]).verify_chain([*chain, remote])

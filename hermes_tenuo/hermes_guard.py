@@ -724,8 +724,8 @@ class HermesGuard:
                 # This is an atomic cap in the signed delegation operation. It
                 # cannot accidentally request a lifetime beyond the parent.
                 builder.with_ttl_capped_to_parent(ttl)
-                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
-                    # The child can't delegate, so its grant can't be delegated either.
+                if not {"delegate_task", "tenuo_delegate"} & {t.removeprefix("tool:") for t in keep}:
+                    # No local or remote delegation capability remains.
                     builder.terminal()
                 child = builder.delegate(parent_key)
                 logger.info(
@@ -797,8 +797,8 @@ class HermesGuard:
                         builder.with_capability(tool, tool_args)
                 builder.with_holder(child_key.public_key)
                 builder.with_ttl_capped_to_parent(level.ttl_seconds)
-                if "delegate_task" not in {t.removeprefix("tool:") for t in keep}:
-                    # The child can't delegate, so its grant can't be delegated either.
+                if not {"delegate_task", "tenuo_delegate"} & {t.removeprefix("tool:") for t in keep}:
+                    # No local or remote delegation capability remains.
                     builder.terminal()
                 planned.append(_ChildGrant(builder.delegate(parent_key), chain, child_key, goal, invocation_id))
         except Exception as exc:
