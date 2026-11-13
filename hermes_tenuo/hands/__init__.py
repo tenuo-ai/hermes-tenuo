@@ -31,9 +31,6 @@ def register(ctx: Any) -> bool:
     ctx.register_hook("pre_llm_call", chat.before_turn)
     ctx.register_command("hands", chat.command, description="Connect a folder on your own machine",
                          args_hint="setup [read|edit|online] | invite | verify | on [name] | off | status | revoke <name>")
-    prompt = getattr(ctx, "register_system_prompt_section", None)
-    if prompt is not None:
-        prompt("hands", chat.CONTEXT)
     config = settings(ctx)
     listen = str(config.get("listen") or "").strip()
     if not listen:
@@ -42,12 +39,14 @@ def register(ctx: Any) -> bool:
     if register_provider is None:
         logger.warning("hermes-tenuo hands: this Hermes version has no terminal backend plugins; Hands is off")
         return False
-    from hermes_tenuo.hands import chat
     from hermes_tenuo.hands.hub import start_hub
     hub = start_hub(listen, str(config.get("url") or ""))
     if hub is None:
         return False
     hub.joined = chat.joined
+    prompt = getattr(ctx, "register_system_prompt_section", None)
+    if prompt is not None:
+        prompt("hands", chat.CONTEXT)  # only once Hands is on: other installs carry no Hands text
     from hermes_tenuo.hands.backend import HandsProvider
     register_provider(HandsProvider())
     register_middleware = getattr(ctx, "register_middleware", None)

@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any, Dict
 
+from hermes_tenuo._version import __version__
 from hermes_tenuo.hands import wire
 from hermes_tenuo.hands.hub import HandsUnavailable, get_hub
 
@@ -304,7 +305,7 @@ def command(raw_args: str = "") -> str:
             line = hub.invite(asking, _conversation())
             local = any(h in hub.public_url for h in ("//127.0.0.1", "//localhost", "//[::1]"))
             return ("On your machine, in the folder you want to work in, run:\n\n"
-                    f"  uvx hermes-tenuo hands up {shlex.quote(line)} --dir . --for 1h{flags}\n\n"
+                    f"  uvx hermes-tenuo=={__version__} hands up {shlex.quote(line)} --dir . --for 1h{flags}\n\n"
                     "Keep this terminal open. Preflight runs before pairing. "
                     "If uvx is missing, install uv from https://docs.astral.sh/uv/getting-started/installation/.\n"
                     "The line works once and for 10 minutes. "

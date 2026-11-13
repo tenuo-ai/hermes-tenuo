@@ -19,6 +19,12 @@
   the shared chat.
 - While a shared conversation uses someone's machine, only that person can switch it with
   `/hands on` or `/hands off`, until the machine's time is over or it is revoked.
+- The command `/hands setup` prints, the reconnect command and the `uvx` commands in the
+  docs name the plugin's version (`uvx hermes-tenuo==<version> ...`), so the laptop runs the
+  same release as the server.
+- The Hands system-prompt section is added only when Hands is on (`hands.listen` set and the
+  listener started). `plugin.yaml` declares the `tool_execution` middleware.
+- A large answer's spill file keeps the name Hermes gives it.
 
 ## 0.4.0 - 2026-11-12
 

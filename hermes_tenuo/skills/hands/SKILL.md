@@ -27,7 +27,7 @@ If a result says the outcome is unknown, inspect the device/project before retry
 
 The laptop prints a reconnect command with the same folder, permissions and duration, without the consumed invite. Running it locally grants a fresh time window. Expired invites require a new `/hands setup` command. For connection errors, check the laptop's preflight output, `hands.url`, proxy route, sandbox availability, and whether the correct Hermes gateway/profile was restarted. Never silently fall back to executing on the server.
 
-For a first trial, `uvx hermes-tenuo hands demo` on the laptop creates a disposable Python project with one intentionally failing test and prints instructions. No pairing, network access or model is required to create it.
+For a first trial, `uvx hermes-tenuo==0.4.0 hands demo` on the laptop creates a disposable Python project with one intentionally failing test and prints instructions. No pairing, network access or model is required to create it.
 
 The local `hands up --preview` flag shows the sharing policy without connecting.
 Personal exclusions are enforced on the device for terminal and file tools.

@@ -9,7 +9,6 @@ from __future__ import annotations
 import collections
 import contextvars
 import re
-import secrets
 import threading
 from typing import Any, Dict, Optional
 
@@ -27,6 +26,8 @@ NAME = "hands"
 _CALL: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar("hands_call", default=None)
 # How Hermes marks a result it timed out, with or without output before it.
 _TIMED_OUT = re.compile(r"\n?\[Command timed out after [^\]\n]*s\]\Z")
+# The objects recent answers were collected for, kept so that no two alive share an id.
+_ANSWERS: "collections.deque[object]" = collections.deque(maxlen=256)
 _UNKNOWN = ("hands: no confirmed result arrived before the wait ended. "
             "The command may have run, or still be running on the device: "
             "check before running it again\n")
@@ -37,13 +38,13 @@ def _from_answer(reply: tuple, bounded_capture: bool, proc: Any = None) -> dict:
     text, code = str(reply[0]), reply[1]
     try:
         from tools.environments.base_output import _finalize_wait_result, _new_output_collector
-        collector = _new_output_collector(proc, bool(bounded_capture))
-        # Hermes names a spill file by the second and the process, and a collector that
-        # finds its file taken keeps nothing. This one gets a name of its own, so the
-        # whole answer stays recoverable beside whatever Hermes collected first.
-        spill = getattr(collector, "_spill_path", None)
-        if spill is not None:
-            collector._spill_path = spill.with_name(f"{spill.stem}-answer-{secrets.token_hex(4)}{spill.suffix}")
+        # Hermes names a spill file by the second, the process and the object it collects
+        # for, and a collector that finds its file taken keeps nothing. The answer is
+        # collected for an object of its own, so it stays recoverable beside whatever
+        # Hermes collected first for the same process.
+        own = object()
+        _ANSWERS.append(own)
+        collector = _new_output_collector(own, bool(bounded_capture))
         collector.append(text)
         return _finalize_wait_result(collector, collector.render(), code)
     except Exception:  # noqa: BLE001 - a Hermes without these helpers

@@ -539,8 +539,10 @@ def test_an_answer_is_rebuilt_once_when_the_outer_deadline_answers_first(monkeyp
     assert result["returncode"] == code and result["output"].rstrip().endswith("END"), result["output"][-60:]
     time.sleep(2.5)                  # the wait Hermes gave up on finishes and settles too
     assert len(built) == 1, len(built)
-    spills = [name for name in os.listdir(tmp_path / "cache" / "terminal-output") if "-answer-" in name]
-    assert len(spills) == 1 and result["full_output_path"].endswith(spills[0]), spills
+    # The one answer's spill, under the name Hermes gives it, is the one the result names.
+    assert result["full_output_path"] == built[0]["full_output_path"], (result, built)
+    assert os.path.dirname(result["full_output_path"]) == str(tmp_path / "cache" / "terminal-output")
+    assert os.path.getsize(result["full_output_path"]) >= len(big)
 
 
 def test_two_rebuilt_answers_in_one_second_each_keep_their_spill(monkeypatch, tmp_path):

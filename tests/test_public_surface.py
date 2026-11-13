@@ -74,6 +74,28 @@ def test_package_and_plugin_versions_agree():
     assert py_ver == yaml_ver == __version__ == "0.4.0"
 
 
+def test_every_uvx_command_in_the_docs_names_this_version():
+    """A copied command runs this release, not whatever is newest on the index."""
+    import re
+    from hermes_tenuo._version import __version__
+    pages = [ROOT / "README.md", ROOT / "docs" / "hands-first-session.md", ROOT / "docs" / "reference.md",
+             ROOT / "docs" / "mcp-wrapper.md", ROOT / "docs" / "walkthrough.md",
+             *sorted((ROOT / "hermes_tenuo" / "skills").rglob("*.md"))]
+    for page in pages:
+        for line in page.read_text().splitlines():
+            for found in re.findall(r"uvx\s+(?:--\S+\s+)*hermes-tenuo\S*", line):
+                assert found.endswith("hermes-tenuo==" + __version__), (page.name, line.strip())
+
+
+def test_the_manifest_declares_the_middleware_hands_registers():
+    import yaml
+    manifest = yaml.safe_load((ROOT / "plugin.yaml").read_text())
+    entry = yaml.safe_load((ROOT / "docs" / "plugin-catalog-entry.yaml").read_text())
+    assert manifest["provides_middleware"] == entry["capabilities"]["provides_middleware"] == ["tool_execution"]
+    registered = (ROOT / "hermes_tenuo" / "hands" / "__init__.py").read_text()
+    assert 'register_middleware("tool_execution"' in registered
+
+
 def test_readme_keeps_listing_strategy_out():
     # Installing from the public catalog is fine; notes about the listing
     # itself (the entry file, submission) stay out of the README.
