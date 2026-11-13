@@ -555,6 +555,30 @@ def test_two_rebuilt_answers_in_one_second_each_keep_their_spill(monkeypatch, tm
     assert first["output_total_chars"] == second["output_total_chars"] == len(big)
 
 
+def test_a_burst_of_rebuilt_answers_each_keep_their_spill(monkeypatch, tmp_path):
+    import os
+    from hermes_tenuo.hands import backend
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    big, proc = "b" * 60_000, object()
+    results = [backend._from_answer((big, 0), True, proc) for _ in range(600)]   # well past any short memory
+    paths = [r.get("full_output_path") for r in results]
+    assert all(paths) and len(set(paths)) == len(paths)
+    assert all(os.path.getsize(path) >= len(big) for path in paths)
+
+
+def test_an_answers_spill_name_is_never_its_process_own(monkeypatch):
+    from hermes_tenuo.hands import backend
+    monkeypatch.setattr(backend, "_NAMED", backend.collections.deque())
+    proc = object()
+    low = [id(backend._stand_in(proc)) & 0xFFFF for _ in range(1500)]
+    assert len(set(low)) == len(low) and id(proc) & 0xFFFF not in low
+    # Names are free again once their second is well past.
+    clock = backend.time.monotonic()
+    monkeypatch.setattr(backend.time, "monotonic", lambda: clock + 10)
+    backend._stand_in(proc)
+    assert len(backend._NAMED) == 1
+
+
 def test_a_timeout_the_device_confirms_stays_a_timeout(monkeypatch, tmp_path):
     env = _environment(monkeypatch, tmp_path, _after(1.2, ("hands: stopped after 1 seconds\n", 124)))
     result = env.execute("sleep 9", timeout=1)
