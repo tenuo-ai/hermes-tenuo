@@ -27,6 +27,9 @@ provides_hooks:
   - subagent_start
   - pre_llm_call
   - pre_gateway_dispatch
+# Registered only when Hands is configured (hands.listen).
+provides_middleware:
+  - tool_execution
 requires_env:
   - name: TENUO_WARRANT
     description: "Base64-encoded warrant or path to a .warrant file. Required to activate enforcement (or set plugins.entries.hermes-tenuo.warrant)."

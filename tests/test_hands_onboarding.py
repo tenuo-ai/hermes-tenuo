@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_tenuo._version import __version__
 from hermes_tenuo.hands import chat, device, sandbox
 from tests import test_hands as shared
 from tests.test_hands import up, sandboxed
@@ -25,7 +26,30 @@ def test_setup_is_registered_without_a_listener(monkeypatch):
     monkeypatch.setattr(chat, 'get_hub', lambda: None)
     assert hands.register(ctx) is False
     assert 'Hands is off' in commands['hands']('setup')
-    assert 'hands' in prompts
+    assert 'hands' not in prompts        # an install with Hands off carries no Hands instructions
+
+
+def test_the_hands_prompt_is_added_once_hands_is_on(monkeypatch):
+    import types
+    from hermes_tenuo import hands
+    from hermes_tenuo.hands import hub as hub_module
+    prompts, order = {}, []
+    backend = types.ModuleType('hermes_tenuo.hands.backend')
+    backend.HandsProvider = lambda: 'provider'
+    monkeypatch.setitem(sys.modules, 'hermes_tenuo.hands.backend', backend)
+    monkeypatch.setattr(hub_module, 'start_hub', lambda listen, url: order.append('hub') or SimpleNamespace(joined=None))
+    monkeypatch.setattr(hands, 'settings', lambda _: {'listen': '127.0.0.1:0'})
+    monkeypatch.setattr(chat, 'can_switch', False)
+    ctx = SimpleNamespace(register_hook=lambda *a: None, register_command=lambda *a, **kw: None,
+                          register_terminal_environment_provider=lambda provider: None,
+                          register_system_prompt_section=lambda name, text: (order.append('prompt'),
+                                                                             prompts.update({name: text})))
+    assert hands.register(ctx) is True
+    assert prompts == {'hands': chat.CONTEXT} and order == ['hub', 'prompt']
+    # A listener that could not start leaves the prompt out as well.
+    prompts.clear()
+    monkeypatch.setattr(hub_module, 'start_hub', lambda listen, url: None)
+    assert hands.register(ctx) is False and not prompts
 
 
 @pytest.mark.parametrize('choice, flag', [('read', '--read-only'), ('edit', None), ('online', '--network')])
@@ -35,7 +59,8 @@ def test_setup_presets_produce_local_commands_without_pairing(hub, monkeypatch, 
     monkeypatch.setattr(chat, '_conversation', lambda: 'origin')
     response = chat.command('setup ' + choice)
     argv = shlex.split(next(line.strip() for line in response.splitlines() if line.startswith('  uvx')))
-    assert argv[:4] == ['uvx', 'hermes-tenuo', 'hands', 'up']
+    # The laptop runs the version the server plugin is, not whatever is newest.
+    assert argv[:4] == ['uvx', 'hermes-tenuo==' + __version__, 'hands', 'up']
     assert argv[argv.index('--for') + 1] == '1h'
     if flag:
         assert flag in argv

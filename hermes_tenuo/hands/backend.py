@@ -9,8 +9,8 @@ from __future__ import annotations
 import collections
 import contextvars
 import re
-import secrets
 import threading
+import time
 from typing import Any, Dict, Optional
 
 from agent.terminal_env_provider import TerminalEnvironmentProvider
@@ -27,6 +27,32 @@ NAME = "hands"
 _CALL: "contextvars.ContextVar[Optional[Dict[str, Any]]]" = contextvars.ContextVar("hands_call", default=None)
 # How Hermes marks a result it timed out, with or without output before it.
 _TIMED_OUT = re.compile(r"\n?\[Command timed out after [^\]\n]*s\]\Z")
+# Hermes names a spill file by the second, this process and the low 16 bits of the id of
+# the object it collects for. These are the low bits recent answers were collected under,
+# with when: no two answers inside one naming second get the same.
+_NAMED: "collections.deque[tuple]" = collections.deque()
+_NAMED_LOCK = threading.Lock()
+_NAMED_SECONDS = 3.0  # longer than a second on either side of now
+
+
+def _stand_in(proc: Any) -> object:
+    """An object to collect an answer for, whose spill name is not the one Hermes gave
+    *proc*'s own collector nor one a recent answer has."""
+    now = time.monotonic()
+    with _NAMED_LOCK:
+        while _NAMED and now - _NAMED[0][0] > _NAMED_SECONDS:
+            _NAMED.popleft()
+        taken = {low for _, low in _NAMED}
+        if proc is not None:
+            taken.add(id(proc) & 0xFFFF)
+        passed_over = []  # held until one fits, so the same address is not offered again
+        for _ in range(4096):
+            own = object()
+            if id(own) & 0xFFFF not in taken:
+                break
+            passed_over.append(own)
+        _NAMED.append((now, id(own) & 0xFFFF))
+        return own
 _UNKNOWN = ("hands: no confirmed result arrived before the wait ended. "
             "The command may have run, or still be running on the device: "
             "check before running it again\n")
@@ -37,13 +63,11 @@ def _from_answer(reply: tuple, bounded_capture: bool, proc: Any = None) -> dict:
     text, code = str(reply[0]), reply[1]
     try:
         from tools.environments.base_output import _finalize_wait_result, _new_output_collector
-        collector = _new_output_collector(proc, bool(bounded_capture))
-        # Hermes names a spill file by the second and the process, and a collector that
-        # finds its file taken keeps nothing. This one gets a name of its own, so the
-        # whole answer stays recoverable beside whatever Hermes collected first.
-        spill = getattr(collector, "_spill_path", None)
-        if spill is not None:
-            collector._spill_path = spill.with_name(f"{spill.stem}-answer-{secrets.token_hex(4)}{spill.suffix}")
+        # A collector that finds its spill file taken keeps nothing. The answer is collected
+        # for an object of its own, so it stays recoverable beside whatever Hermes collected
+        # first for the same process, and beside other answers of the same second.
+        own = _stand_in(proc)
+        collector = _new_output_collector(own, bool(bounded_capture))
         collector.append(text)
         return _finalize_wait_result(collector, collector.render(), code)
     except Exception:  # noqa: BLE001 - a Hermes without these helpers

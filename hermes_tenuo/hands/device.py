@@ -28,6 +28,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from hermes_tenuo._version import __version__
 from hermes_tenuo.hands import gitwatch, sandbox, wire
 from hermes_tenuo.hands.paths import workspace
 from hermes_tenuo.hands.privacy import Redactor, exclusions, policy_file
@@ -1295,7 +1296,7 @@ class Device:
         args = ["env", f"TENUO_HANDS_HOME={self.state}", f"XDG_CONFIG_HOME={self.config_home}"]
         if self.ssl_cert_file:
             args.append(f"SSL_CERT_FILE={self.ssl_cert_file}")
-        args.extend(["uvx", "hermes-tenuo", "hands", "up", "--dir", self.folder,
+        args.extend(["uvx", f"hermes-tenuo=={__version__}", "hands", "up", "--dir", self.folder,
                      "--for", f"{self.ttl_seconds}s", "--name", self.name])
         for enabled, flag in ((self.read_only, "--read-only"), (self.network, "--network"),
                               (self.read_home, "--read-home"), (self.allow_unsandboxed, "--no-sandbox"),

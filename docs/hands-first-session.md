@@ -84,11 +84,10 @@ be available inside that container; otherwise use the HTTPS proxy route.
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if `uvx` is not available, then run:
 
 ```sh
-uvx --refresh hermes-tenuo --version
-uvx hermes-tenuo hands demo
+uvx hermes-tenuo==0.4.0 hands demo
 ```
 
-The version command refreshes any older cached CLI; check that it reports 0.4.0 or newer.
+The command names the release, so the laptop runs the same version as the server plugin.
 The demo prints a new temporary folder and a `cd` command. Run that command locally. Nothing has been paired yet and no existing project was changed.
 
 ## 4. Choose permissions and connect

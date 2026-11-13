@@ -539,8 +539,10 @@ def test_an_answer_is_rebuilt_once_when_the_outer_deadline_answers_first(monkeyp
     assert result["returncode"] == code and result["output"].rstrip().endswith("END"), result["output"][-60:]
     time.sleep(2.5)                  # the wait Hermes gave up on finishes and settles too
     assert len(built) == 1, len(built)
-    spills = [name for name in os.listdir(tmp_path / "cache" / "terminal-output") if "-answer-" in name]
-    assert len(spills) == 1 and result["full_output_path"].endswith(spills[0]), spills
+    # The one answer's spill, under the name Hermes gives it, is the one the result names.
+    assert result["full_output_path"] == built[0]["full_output_path"], (result, built)
+    assert os.path.dirname(result["full_output_path"]) == str(tmp_path / "cache" / "terminal-output")
+    assert os.path.getsize(result["full_output_path"]) >= len(big)
 
 
 def test_two_rebuilt_answers_in_one_second_each_keep_their_spill(monkeypatch, tmp_path):
@@ -551,6 +553,30 @@ def test_two_rebuilt_answers_in_one_second_each_keep_their_spill(monkeypatch, tm
     second = _from_answer((big, 0), True, proc)                 # same process, same second
     assert first["full_output_path"] != second["full_output_path"]
     assert first["output_total_chars"] == second["output_total_chars"] == len(big)
+
+
+def test_a_burst_of_rebuilt_answers_each_keep_their_spill(monkeypatch, tmp_path):
+    import os
+    from hermes_tenuo.hands import backend
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    big, proc = "b" * 60_000, object()
+    results = [backend._from_answer((big, 0), True, proc) for _ in range(600)]   # well past any short memory
+    paths = [r.get("full_output_path") for r in results]
+    assert all(paths) and len(set(paths)) == len(paths)
+    assert all(os.path.getsize(path) >= len(big) for path in paths)
+
+
+def test_an_answers_spill_name_is_never_its_process_own(monkeypatch):
+    from hermes_tenuo.hands import backend
+    monkeypatch.setattr(backend, "_NAMED", backend.collections.deque())
+    proc = object()
+    low = [id(backend._stand_in(proc)) & 0xFFFF for _ in range(1500)]
+    assert len(set(low)) == len(low) and id(proc) & 0xFFFF not in low
+    # Names are free again once their second is well past.
+    clock = backend.time.monotonic()
+    monkeypatch.setattr(backend.time, "monotonic", lambda: clock + 10)
+    backend._stand_in(proc)
+    assert len(backend._NAMED) == 1
 
 
 def test_a_timeout_the_device_confirms_stays_a_timeout(monkeypatch, tmp_path):
