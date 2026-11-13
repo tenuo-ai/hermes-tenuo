@@ -193,3 +193,43 @@ def test_task_only_mcp_call_proves_child_authority_and_refuses_ambiguous_tasks(m
         response = middleware(tool_name=HERMES_NAME, args={"value": "child"}, task_id=task,
                               next_call=forwarded.append)
         assert "refused" in json.loads(response)["error"] and len(forwarded) == before
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_mcp_before_pre_tool_hook_never_binds_parent_ingress_grant_to_child(monkeypatch, bound):
+    from tenuo import Authorizer, Exact
+    from tenuo.mcp import MCPVerifier
+    from hermes_tenuo.a2a_ingress import A2AIngress, VerifiedGrant, grant_to
+    import time
+
+    root, sender, receiver, child_key = (SigningKey.generate() for _ in range(4))
+    parent = (Warrant.mint_builder().holder(sender.public_key)
+              .capability("first__write", {"value": Wildcard()}).ttl(600).mint(root))
+    incoming = grant_to(sender, [parent], receiver.public_key,
+                        {"first__write": {"value": Wildcard()}}, 300)
+    ingress = A2AIngress(own_key=receiver, peers={"sender": public_key_b64(sender)},
+                        trusted_roots=[root.public_key])
+    ingress.registry.bind(VerifiedGrant("sender", "context", incoming, [parent], time.time() + 300,
+                                        ("first__write",)))
+    ingress.current_turn = lambda: ("sender", "context")
+    guard = HermesGuard(ingress=ingress)
+    monkeypatch.setattr("hermes_tenuo.access.subagent_attribution_lookup",
+                        lambda: lambda task: {"parent_session_id": "parent"} if task == "child-task" else None)
+    if bound:
+        child = grant_to(receiver, [parent, incoming], child_key.public_key,
+                         {"first__write": {"value": Exact("child")}}, 60)
+        guard.set_session_warrant("child", child, child_key, parent_warrant=[parent, incoming])
+    middleware = make_middleware(_resolve_test_tool, lambda: guard)
+    forwarded = []
+    result = middleware(tool_name=HERMES_NAME, args={"value": "parent-only"}, session_id="child",
+                        task_id="child-task", next_call=forwarded.append)
+    if bound:
+        verifier = MCPVerifier(authorizer=Authorizer(trusted_roots=[root.public_key]))
+        assert not verifier.verify("first__write", {"value": "parent-only"},
+                                   meta={"tenuo": forwarded[-1][CARRIER]}).allowed
+    else:
+        assert "refused" in json.loads(result)["error"]
+        assert not forwarded
+        assert "child" not in guard._session_warrants
+        assert guard.pre_tool_call("first__write", {"value": "parent-only"},
+                                   session_id="child", task_id="child-task")["action"] == "block"

@@ -1262,6 +1262,8 @@ class HermesGuard:
     def delegation_session(self, session_id: str, task_id: str) -> str:
         """Resolve dispatch attribution before selecting authority for a signed outbound call."""
         resolved, reason = self._attribute_session(session_id, task_id)
+        if reason is None:
+            reason = self._bind_ingress_grant(resolved, task_id)
         if reason:
             from hermes_tenuo.a2a_delegate import DelegationError
             raise DelegationError(reason)
