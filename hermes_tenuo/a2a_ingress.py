@@ -257,8 +257,9 @@ def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str
     # B holds the grant: only B's key can present it.
     if public_key_b64(leaf.authorized_holder) != own:
         raise IngressRefused("the grant is not held by this agent")
-    # The sender's warrant (W_A) is held by the key pinned for the authenticated peer.
-    if public_key_b64(parents[-1].authorized_holder) != pinned:
+    # A local child signs with its own key. Its verified ancestry must include authority
+    # held by the authenticated peer's pinned key; an unrelated trusted-root grant is insufficient.
+    if not any(public_key_b64(w.authorized_holder) == pinned for w in parents):
         raise IngressRefused("the grant was not issued by the authenticated peer")
     # Root trust, linkage, depth, expiry and monotonic narrowing for the whole chain.
     try:

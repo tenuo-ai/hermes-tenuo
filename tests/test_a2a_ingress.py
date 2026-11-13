@@ -671,3 +671,24 @@ def test_ingress_replay_denial_audit_retains_verified_context_lineage(keys, w_a)
     assert ingress.pre_gateway_dispatch(event)["action"] == "skip"
     assert records[-1]["warrant_id"] == records[0]["warrant_id"]
     assert records[-1]["parent_warrant_ids"] == [str(w_a.id)]
+
+
+def test_local_child_sender_is_verified_through_pinned_peer_ancestry(keys, w_a):
+    import tenuo_core
+
+    child_key = SigningKey.generate()
+    child = grant_to(keys.a, [w_a], child_key.public_key, {"light_get": {}}, 200)
+    grant = grant_to(child_key, [w_a, child], keys.b.public_key, {"light_get": {}}, 100)
+    envelope = _envelope(keys, w_a, grant=grant, sender=child_key, chain=[w_a, child])
+    verified = _verify(keys, envelope)
+    assert [w.id for w in verified.chain] == [w_a.id, child.id]
+    assert verified.tools == ("light_get",)
+    # The child cannot add a sibling capability held only by its parent.
+    with pytest.raises(Exception):
+        grant_to(child_key, [w_a, child], keys.b.public_key, {"door_unlock": {}}, 100)
+    # A substituted ancestry cannot use a real child's proof to claim peer membership.
+    unrelated = (Warrant.mint_builder().holder(keys.mallory.public_key)
+                 .capability("light_get").ttl(300).mint(keys.root))
+    envelope["grant"] = tenuo_core.encode_warrant_stack([unrelated, child, grant])
+    with pytest.raises(IngressRefused):
+        _verify(keys, envelope)

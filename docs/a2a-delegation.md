@@ -14,8 +14,9 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
 ```
 
 - The grant is a child of the warrant A's session already holds, so A can only delegate what it has.
-- Only B's key can use it. A signs the request; B checks that the authenticated peer's pinned key
-  signed it, for B, for this conversation, for this exact task text, once.
+- Only B's key can use it. A or its delegated child signs the request. B verifies that the signer's
+  warrant descends from authority held by the authenticated peer's pinned key, and that the request
+  is for B, for this conversation, for this exact task text, once.
 - B verifies the whole chain to a root it trusts, and refuses anything revoked.
 - A delegated turn can delegate onward, but only within its own grant; the next agent verifies the
   whole chain back to the root.
