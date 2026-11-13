@@ -196,6 +196,25 @@ class PluginGuard:
     def __init__(self, guard: HermesGuard):
         self._guard = guard
 
+    def delegation_session(self, session_id: str, task_id: str) -> str:
+        """Resolve dispatch attribution before selecting or auditing delegation authority."""
+        return self._guard.delegation_session(session_id, task_id)
+
+    def delegation_authority(self, session_id: str):
+        """This session's chain and key for ``tenuo_delegate`` (hermes_tenuo.a2a_delegate)."""
+        return self._guard.delegation_authority(session_id)
+
+    def call_meta(self, session_id: str, tool_name: str, args: dict):
+        """MCP ``_meta`` with this session's proof for one call (see HermesGuard.call_meta)."""
+        return self._guard.call_meta(session_id, tool_name, args)
+
+    def record_delegation(self, session_id: str, chain: list, result: dict) -> None:
+        self._guard.record_delegation(session_id, chain, result)
+
+    def attach_mcp_resolver(self, resolve) -> None:
+        """Authorize wrapped MCP tools under the wrapper's names (hermes_tenuo.mcp_proofs)."""
+        self._guard._mcp_resolver = resolve
+
     def attach_ingress(self, ingress: Any) -> None:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress

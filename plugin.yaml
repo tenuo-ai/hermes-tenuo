@@ -13,9 +13,12 @@ kind: standalone
 # `hermes plugins enable` installs these into the Hermes runtime, after consent.
 python_dependencies:
   - "path-jail>=0.3,<0.4"
+  - "python-dotenv>=1,<2"
   - "tenuo>=0.3.7,<0.4"
 requires_hermes: ">=0.20"
 tags: [authorization, warrants, hands, remote, workspace, sandbox, tenuo]
+provides_tools:
+  - tenuo_delegate
 provides_hooks:
   - pre_tool_call
   - post_tool_call

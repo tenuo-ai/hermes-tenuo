@@ -90,6 +90,16 @@ call ID, parent warrant IDs, and the trusted root and holder fingerprints on
 allowed calls. IDs in denial records are the IDs presented by the caller.
 The local audit excludes arguments, tool responses, credentials, and signatures.
 
+For a delegated Hermes task, include each agent's local Tenuo audit file with
+`--hermes-log`. Copy the files locally first when the agents run on separate
+machines. Use the grant ID returned by `tenuo_delegate` to see the sender's
+record, the receiver's decisions, and the wrapper's upstream outcomes.
+
+```sh
+hermes-tenuo mcp audit ./wrapped-mcp --hermes-log ./sender.jsonl \
+  --hermes-log ./receiver.jsonl --warrant tnu_wrt_EXAMPLE
+```
+
 ## Use an existing issuer or client
 
 Create a workspace with `--trust-root issuer.pub` to use an existing issuer and
@@ -98,7 +108,9 @@ such as `files__write_file`. If an issuer is trusted by multiple independent
 workspaces, give their servers distinct names so a grant cannot name two
 different destinations. Install a binary Tenuo signed revocation list as
 `revocations.srl` in the workspace to enforce its revocations. The verifier
-reloads updates on calls and rejects an unreadable or invalid list.
+reloads updates on calls. After accepting a list it requires that exact list
+or a newer signed version, including after a restart. Keep the revocation
+database with the workspace when moving or restoring it.
 
 ```sh
 hermes-tenuo mcp call ./wrapped-mcp files__write_file \
@@ -111,6 +123,29 @@ the stdio launch entry for another client. That client must send Tenuo warrant
 and proof-of-possession metadata with each call. Standard MCP discovery still
 works without authority. A regular MCP client without Tenuo metadata will be
 denied when it calls a tool.
+
+## Call wrapped tools from Hermes
+
+Add the wrapper to the agent's `mcp_servers` under the name `mcp config` prints (`tenuo_mcp`), and
+let `hermes-tenuo` sign those calls:
+
+```yaml
+plugins:
+  entries:
+    hermes-tenuo:
+      mcp_proofs:
+        servers: [tenuo_mcp]
+```
+
+For each call to a wrapped tool, `hermes-tenuo` adds the session's warrant chain and a proof signed with
+its key, so the agent needs an enforcing warrant that names the wrapper's tools (`files__write_file`).
+The local guard authorizes the call under that same name. On a task delegated from another Hermes
+([A2A delegation](a2a-delegation.md)), the proof carries the delegated chain, and the wrapper verifies
+it to the operator root: create the workspace with `--trust-root` set to that root.
+Use the original names from `hermes-tenuo mcp tools` in warrants. The plugin maps
+Hermes's registered names back to discovered wrapper names, including names
+that Hermes rewrites or shortens. If two names collide, exclude one or rename
+it and reload MCP discovery.
 
 The wrapper covers direct tool calls. Resources, prompts, interactive
 continuations, legacy SSE, and OAuth setup are outside this workflow. The

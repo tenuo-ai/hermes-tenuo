@@ -438,3 +438,78 @@ def test_log_only_denial_does_not_create_delegation_authority(keys):
     assert not g._planned_children
     g.on_subagent_start('p', 'c', child_goal='r')
     assert not _allowed(g, 'read_file', {'path': '/data/file'}, 'c')
+
+
+@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize("remote_tool", ["tenuo_delegate", "tool:tenuo_delegate"])
+def test_remote_delegation_capability_keeps_child_delegatable(keys, planned, remote_tool):
+    from tenuo import Authorizer
+    from hermes_tenuo.a2a_ingress import grant_to
+    from hermes_tenuo.delegation import parse_plan
+
+    root, agent = keys
+    tools = {"web_search": {}, remote_tool: {}}
+    parent = (Warrant.mint_builder().holder(agent.public_key)
+              .capability("web_search").capability(remote_tool).capability("delegate_task")
+              .ttl(3600).mint(root))
+    kwargs = {}
+    if planned:
+        kwargs["delegation_plan"] = parse_plan({
+            "version": 1, "root": {"tools": {**tools, "delegate_task": {}}},
+            "levels": [{"role": "remote-worker", "ttl_seconds": 600, "tools": tools}],
+        })
+    else:
+        kwargs["child_warrant"] = (Warrant.mint_builder().holder(agent.public_key)
+                                  .capability("web_search").capability(remote_tool).ttl(600).mint(root))
+    guard = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key], **kwargs)
+    _delegate(guard, {"goal": "research"}, [("child", "research")])
+    chain, key = guard.delegation_authority("child")
+    assert "delegate_task" not in chain[-1].tools
+    remote = grant_to(key, chain, SigningKey.generate().public_key, {"web_search": {}}, 60)
+    Authorizer(trusted_roots=[root.public_key]).verify_chain([*chain, remote])
+
+
+@pytest.mark.parametrize("planned", [False, True])
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_mcp_toolsets_use_warrant_names_for_child_grants(keys, monkeypatch, planned, ambiguous):
+    import sys
+    from types import SimpleNamespace
+    from hermes_tenuo.delegation import parse_plan
+    from hermes_tenuo.mcp_proofs import MCPMappingError
+
+    root, agent = keys
+    parent = (Warrant.mint_builder().holder(agent.public_key).capability("first__write")
+              .capability("unrelated").capability("delegate_task").ttl(3600).mint(root))
+    name = "mcp__tenuo_mcp__first__write"
+    monkeypatch.setitem(sys.modules, "toolsets", SimpleNamespace(
+        resolve_toolset=lambda ts: [name] if ts == "tenuo_mcp" else []))
+
+    def resolve(tool):
+        if tool == name:
+            if ambiguous:
+                raise MCPMappingError("ambiguous MCP name")
+            return "first__write"
+        return None
+
+    kwargs = {}
+    if planned:
+        kwargs["delegation_plan"] = parse_plan({
+            "version": 1,
+            "root": {"tools": {"first__write": {}, "unrelated": {}, "delegate_task": {}}},
+            "levels": [{"role": "writer", "ttl_seconds": 600,
+                        "tools": {"first__write": {}, "unrelated": {}}}],
+        })
+    guard = HermesGuard(warrant=parent, signing_key=agent, trusted_roots=[root.public_key],
+                         **kwargs)
+    guard._mcp_resolver = resolve
+    result = guard.pre_tool_call("delegate_task", {"goal": "write", "toolsets": ["tenuo_mcp"]},
+                                 session_id="parent")
+    if ambiguous:
+        assert result["action"] == "block"
+    else:
+        assert result is None
+        guard.on_subagent_start("parent", "child", child_goal="write")
+        child, _ = guard._resolve_warrant("child")
+        assert set(child.tools) == {"first__write"}
+        assert guard.pre_tool_call(name, {}, session_id="child") is None
+        assert guard.pre_tool_call("unrelated", {}, session_id="child")["action"] == "block"

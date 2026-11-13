@@ -156,6 +156,13 @@ choose `/hands setup online` explicitly. Linux online shares also require
 Landlock ABI 6. Secret redaction is best effort; exclude files that must not be
 sent to Hermes or its model.
 
+## Delegate between Hermes agents (preview)
+
+One Hermes can hand a bounded task to another over native A2A with `tenuo_delegate`. The receiver
+gets a signed, short-lived grant held by its own key, covering only the tools and argument values you
+name, and checks it before its model sees the task and at every tool call.
+[Set up two agents →](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/a2a-delegation.md)
+
 ## More
 
 - [Hands settings, platform requirements and troubleshooting](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine)

@@ -1,6 +1,6 @@
 # A2A delegation: design and evidence
 
-Updated 2026-11-12. Status: **experimental, opt-in.**
+Updated 2026-11-12. Status: **preview.** Setup: [a2a-delegation.md](a2a-delegation.md).
 
 ## Question
 
@@ -12,8 +12,8 @@ The design had to satisfy five requirements:
 
 1. A authenticates a fresh request. B receives an attenuated grant **held by B**, with B's own key,
    proof of possession and the complete chain. A cannot act as B, and B's key never leaves B. The
-   request is bound to the destination, task, scope, peer identity and freshness. Replays are
-   refused while B remains running; see the restart limitation under Residual risks.
+   request is bound to the destination, task, scope, peer identity and freshness, and replays are
+   refused.
 2. A plugin-only A2A ingress hook sees trusted sender metadata before execution. It rejects absent or
    malformed grants, failing closed, and binds the grant to the exact session.
 3. An unauthorized task never reaches model or tool execution and cannot switch context. It never
@@ -23,8 +23,8 @@ The design had to satisfy five requirements:
 
 ## Result
 
-The receiving boundary works within the constraints and residual risks below, including the restart
-replay window. The seam is plugin-only (`pre_gateway_dispatch`).
+The receiving boundary works within the constraints and residual risks below. The seam is
+plugin-only (`pre_gateway_dispatch`).
 - Live: **12/12** checks against a real Hermes gateway.
 - Unit tests: `tests/test_a2a_ingress.py`.
 
@@ -67,7 +67,11 @@ Code:
 Ingress is off unless `plugins.entries.hermes-tenuo.a2a_ingress.enabled` is true. An install without it
 registers the hook as a no-op.
 
-### Receiver configuration for the lab
+### Receiver configuration for the historical lab
+
+The two-peer matrix below records the earlier receiver implementation. Reproduce it from commit
+`786517fcb94526cf37934d10f848c63211dd448e`; the current receiver deliberately refuses two peers.
+For current single-peer deployment and the two-agent lab, follow [the setup guide](a2a-delegation.md).
 
 After `./run.sh init > init.json`, add this plugin configuration to `b-home/config.yaml`, alongside
 the receiver's Hermes model and A2A platform settings:
@@ -218,19 +222,14 @@ and omits optional arguments it doesn't need to limit.
    later `skip`. If the hook invocation itself raises, Hermes also dispatches the message, failing
    open. Our hook never raises. B's operator must not load another dispatch plugin until upstream
    changes this.
-4. **Use one receiver per sending agent.** Hermes serves `ListTasks` and `GetTask` without scoping
-   them by peer, before any plugin hook runs, so one authenticated peer can read another's task replies.
-   Configure a single trusted peer per receiver until upstream fixes this.
+4. **One sending agent per receiver.** Hermes serves `ListTasks` and `GetTask` without scoping them
+   by peer, before any plugin hook runs, so one authenticated peer can read another's task replies.
+   Protected ingress therefore requires a single named sender until upstream fixes this.
 
 ## Residual risks
 
-- **State is in memory only.** Grants, nonces and context ownership are lost on restart. An in-flight
-  task then runs no tools because its grant is gone. However, B's holder key persists: a captured
-  signed request can be admitted again with a new A2A message ID after restart while its timestamp
-  and grant remain valid (the request freshness window is five minutes, with clock-skew tolerance).
-  This can repeat tool side effects. Replay protection does not survive restarts in this version;
-  persisting nonce and context admission state is required to remove this limitation.
-- **No revocation list yet.** A grant stays valid until it expires, so keep grant lifetimes short.
+- **State across restarts:** nonces and context ownership persist, but grants don't, so an in-flight
+  task runs no tools after a restart.
 - **Refusals look like success to the sender.** A dropped A2A message immediately returns
   `TASK_STATE_COMPLETED` with empty text. A resend with the same `messageId` waits for
   `A2A_REPLY_TIMEOUT` and then fails. Enforcement is unaffected, but the sender can't tell why.

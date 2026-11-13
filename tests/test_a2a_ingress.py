@@ -321,6 +321,8 @@ def _register(monkeypatch, entry):
     import hermes_tenuo
 
     monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: entry)
+    monkeypatch.setenv("A2A_PEER_TOKENS", "agent-a:example-token")
+    monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
     ctx = _Ctx()
     hermes_tenuo.register(ctx)
     return ctx
@@ -390,3 +392,303 @@ def test_malformed_ingress_config_fails_closed(monkeypatch, block):
     (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
     assert dispatch(_event("anything"))["action"] == "skip"
     assert dispatch(_event("hello", platform="telegram")) is None
+# --- revocation and state that survives a restart ------------------------------
+
+
+def _srl(keys, ids, version=1, signer=None):
+    from tenuo import SignedRevocationList
+
+    builder = SignedRevocationList.builder()
+    for warrant_id in ids:
+        builder = builder.revoke(str(warrant_id))
+    return builder.version(version).build(signer or keys.root)
+
+
+def _write_srl(path, srl):
+    import base64 as b64
+
+    path.write_text(b64.b64encode(srl.to_bytes()).decode())
+
+
+def _with_srl(keys, tmp_path):
+    path = tmp_path / "srl.b64"
+    return path, _ingress(keys, revocation_list=path)
+
+
+def test_revoking_a_grant_stops_its_task_mid_run(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = _grant(keys, w_a)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard, turn = _guard(keys, ingress), ("agent-a", "ctx-1")
+    args = {"entity_id": "light.guest_room"}
+    assert _call(guard, ingress, turn, "light_set", args, "s1") is None
+    _write_srl(path, _srl(keys, [grant.id], version=2))
+    blocked = _call(guard, ingress, turn, "light_set", args, "s1")
+    assert blocked["action"] == "block" and "revoked" in blocked["message"]
+
+
+def test_revoking_the_senders_warrant_revokes_everything_it_delegated(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, [w_a.id]))
+    result = ingress.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "not trusted" in result["reason"]
+
+
+@pytest.mark.parametrize("bad", ["forged", "garbage"])
+def test_an_unusable_revocation_list_refuses_every_delegation(keys, w_a, tmp_path, bad):
+    path, ingress = _with_srl(keys, tmp_path)
+    if bad == "forged":
+        _write_srl(path, _srl(keys, [], signer=keys.mallory))
+    else:
+        path.write_text("not a revocation list")
+    result = ingress.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "revocation list cannot be used" in result["reason"]
+
+
+def test_an_older_revocation_list_cannot_undo_a_revocation(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    grant = _grant(keys, w_a)
+    _write_srl(path, _srl(keys, [], version=1))
+    _admit_grant(keys, w_a, ingress, grant)
+    _write_srl(path, _srl(keys, [grant.id], version=5))
+    assert ingress.is_revoked(ingress.grant_for("agent-a", "ctx-1"))
+    _write_srl(path, _srl(keys, [], version=2))  # rolled back
+    assert ingress.is_revoked(ingress.grant_for("agent-a", "ctx-1"))
+
+
+def test_replay_and_context_ownership_survive_a_restart(keys, w_a, tmp_path):
+    envelope = _envelope(keys, w_a)
+    first = _ingress(keys, state_dir=tmp_path)
+    assert first.pre_gateway_dispatch(_event(_event_text(envelope)))["action"] == "rewrite"
+    restarted = _ingress(keys, state_dir=tmp_path)
+    assert restarted.grant_for("agent-a", "ctx-1") is None  # the in-flight grant is not kept
+    replay = restarted.pre_gateway_dispatch(_event(_event_text(envelope)))
+    assert replay["action"] == "skip" and "already carried" in replay["reason"]
+    # The same request into a fresh context is still refused: its nonce was spent.
+    nonces = NonceStore(path=tmp_path / "a2a_nonces.json")
+    with pytest.raises(IngressRefused, match="already used"):
+        _verify(keys, envelope, nonces=nonces)
+    assert oct((tmp_path / "a2a_nonces.json").stat().st_mode & 0o777) == "0o600"
+
+
+def _admit_grant(keys, w_a, ingress, grant, ctx="ctx-1"):
+    envelope = _envelope(keys, w_a, grant=grant, ctx=ctx)
+    assert ingress.pre_gateway_dispatch(_event(_event_text(envelope), ctx=ctx))["action"] == "rewrite"
+
+
+def test_ingress_decisions_go_to_the_shared_audit_log(monkeypatch, keys, w_a, tmp_path):
+    log = tmp_path / "audit.jsonl"
+    ctx = _register(monkeypatch, {
+        "audit_log": str(log), "a2a_ingress": {"enabled": True, "peers": {"agent-a": public_key_b64(keys.a)},
+                                                "trusted_roots": [public_key_b64(keys.root)]}})
+    (dispatch,) = ctx.hooks["pre_gateway_dispatch"]
+    dispatch(_event("no delegation here"))
+    row = json.loads(log.read_text().splitlines()[-1])
+    assert row["tool"] == "a2a_ingress" and row["decision"] == "DENY" and row["peer"] == "agent-a"
+
+
+def test_a_restarted_receiver_still_refuses_an_older_revocation_list(keys, w_a, tmp_path):
+    path = tmp_path / "srl.b64"
+    _write_srl(path, _srl(keys, [w_a.id], version=4))
+    first = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    assert first.revocations().version == 4
+    _write_srl(path, _srl(keys, [], version=2))  # rolled back while the receiver was down
+    restarted = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    result = restarted.pre_gateway_dispatch(_event(_event_text(_envelope(keys, w_a))))
+    assert result["action"] == "skip" and "older than version 4" in result["reason"]
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_same_version_revocation_replacement_cannot_restore_authority(keys, w_a, tmp_path, restart):
+    import os
+    path = tmp_path / "srl.b64"
+    first = _srl(keys, [w_a.id], version=4)
+    _write_srl(path, first)
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    assert ingress.revocations().is_revoked(str(w_a.id))
+    stamp = path.stat()
+    _write_srl(path, _srl(keys, ["x" * len(str(w_a.id))], version=4))
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    if restart:
+        ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    with pytest.raises(IngressRefused, match="conflicts"):
+        ingress.revocations()
+    _write_srl(path, first)
+    assert ingress.revocations().is_revoked(str(w_a.id))
+    _write_srl(path, _srl(keys, [w_a.id], version=5))
+    assert ingress.revocations().version == 5
+
+
+def test_revoked_local_descendant_cannot_run_or_delegate(keys, w_a, tmp_path):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    _admit(keys, w_a, ingress, "ctx-1", "light.guest_room")
+    grant = ingress.grant_for("agent-a", "ctx-1")
+    guard = _guard(keys, ingress)
+    child_key = SigningKey.generate()
+    child = grant_to(keys.b, [w_a, grant.warrant], child_key.public_key, {"light_get": {}}, 60)
+    guard.set_session_warrant("child", child, child_key, parent_warrant=[w_a, grant.warrant])
+    turn = ("agent-a", "ctx-1")
+    assert _call(guard, ingress, turn, "light_get", {}, "child") is None
+    _write_srl(path, _srl(keys, [child.id], version=2))
+    result = _call(guard, ingress, turn, "light_get", {}, "child")
+    assert result["action"] == "block" and "revoked" in result["message"]
+    assert guard.delegation_authority("child") == ([], None)
+    assert _call(guard, ingress, None, "light_get", {}, "child")["action"] == "block"
+    assert guard.delegation_authority("child") == ([], None)
+    assert _call(guard, ingress, turn, "light_get", {}, "parent") is None
+
+
+def test_revocation_floor_without_digest_requires_a_newer_signed_list(keys, tmp_path):
+    path = tmp_path / "srl.b64"
+    (tmp_path / "a2a_revocation_version.json").write_text('{"version": 4}')
+    _write_srl(path, _srl(keys, [], version=4))
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    with pytest.raises(IngressRefused, match="publish a newer version"):
+        ingress.revocations()
+    _write_srl(path, _srl(keys, [], version=5))
+    assert ingress.revocations().version == 5
+
+
+@pytest.mark.parametrize("revoked", ["child", "grant", "sender", None])
+@pytest.mark.parametrize("lifecycle_hook", [False, True])
+def test_child_inherits_ingress_provenance_before_its_first_contextless_call(keys, tmp_path, revoked, lifecycle_hook):
+    w_a = (Warrant.mint_builder().holder(keys.a.public_key).capability("delegate_task")
+           .capability("light_get").ttl(3600).mint(keys.root))
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = grant_to(keys.a, [w_a], keys.b.public_key, {"delegate_task": {}, "light_get": {}}, 300)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard = HermesGuard(ingress=ingress, trusted_roots=[keys.root.public_key], on_denial="log")
+    ingress.current_turn = lambda: ("agent-a", "ctx-1")
+    assert guard.pre_tool_call("delegate_task", {"goal": "read", "toolsets": ["light_get"]},
+                               session_id="parent", tool_call_id="spawn") is None
+    # Provenance is captured when staging, even if the parent's entry changes before attachment.
+    guard._ingress_roots.pop("parent")
+    ingress.current_turn = lambda: None
+    child = guard._planned_children["parent"][0].warrant
+    if lifecycle_hook:
+        guard.on_subagent_start("parent", "child", child_goal="read", child_task_id="child-task")
+    if revoked:
+        target = {"child": child, "grant": grant, "sender": w_a}[revoked]
+        _write_srl(path, _srl(keys, [target.id], version=2))
+        result = guard.pre_tool_call("light_get", {}, session_id="child", task_id="child-task")
+        assert result["action"] == "block" and "revoked" in result["message"]
+        assert guard.delegation_authority("child") == ([], None)
+    else:
+        assert guard.pre_tool_call("light_get", {}, session_id="child", task_id="child-task") is None
+        # Log-only mode must not override a descendant's restrictions without gateway context.
+        assert guard.pre_tool_call("door_unlock", {}, task_id="child-task")["action"] == "block"
+
+
+def test_shared_nonce_stores_claim_once_and_preserve_other_claims(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "nonces.json"
+    stores = [NonceStore(path) for _ in range(8)]
+    now = time.time()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claimed = list(pool.map(lambda store: store.claim("shared", now), stores))
+    assert claimed.count(True) == 1
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(lambda item: item[1].claim(str(item[0]), now), enumerate(stores)))
+    restarted = NonceStore(path)
+    for nonce in ["shared", *map(str, range(8))]:
+        assert not restarted.claim(nonce, now)
+
+
+def test_shared_registries_preserve_context_ownership(keys, w_a, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from hermes_tenuo.a2a_ingress import GrantRegistry
+
+    path = tmp_path / "contexts.json"
+    registries = [GrantRegistry(path) for _ in range(8)]
+    grant = _verify(keys, _envelope(keys, w_a))
+
+    def bind(registry):
+        try:
+            registry.bind(grant)
+            return True
+        except IngressRefused:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(bind, registries)).count(True) == 1
+    for i, registry in enumerate(registries):
+        registry.bind(replace(grant, context_id=f"other-{i}"))
+    for registry in [*registries, GrantRegistry(path)]:
+        for context in ["ctx-1", *(f"other-{i}" for i in range(8))]:
+            with pytest.raises(IngressRefused, match="already carried"):
+                registry.check_context(grant.peer, context)
+            with pytest.raises(IngressRefused, match="another peer"):
+                registry.check_context("other-peer", context)
+
+
+def test_unchanged_revocation_floor_is_not_rewritten(keys, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    path = tmp_path / "srl.b64"
+    _write_srl(path, _srl(keys, [], version=1))
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    save = Mock(wraps=ingress._srl_floor.save)
+    monkeypatch.setattr(ingress._srl_floor, "save", save)
+    assert ingress.revocations().version == 1
+    assert ingress.revocations().version == 1
+    assert save.call_count == 1
+    _write_srl(path, _srl(keys, [], version=2))
+    assert ingress.revocations().version == 2
+    assert save.call_count == 2
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_revocation_denial_audit_retains_verified_lineage(keys, w_a, tmp_path, bound):
+    path, ingress = _with_srl(keys, tmp_path)
+    _write_srl(path, _srl(keys, []))
+    grant = _grant(keys, w_a)
+    _admit_grant(keys, w_a, ingress, grant)
+    guard = _guard(keys, ingress)
+    records = []
+    guard._audit_callback = records.append
+    turn = ("agent-a", "ctx-1")
+    if bound:
+        assert _call(guard, ingress, turn, "light_get", {}, "session") is None
+        turn = None  # no gateway context on the later call
+    _write_srl(path, _srl(keys, [grant.id], version=2))
+    assert _call(guard, ingress, turn, "light_get", {}, "session")["action"] == "block"
+    assert records[-1].decision == "DENY"
+    assert records[-1].warrant_id == str(grant.id)
+    assert records[-1].parent_warrant_ids == (str(w_a.id),)
+
+
+def test_ingress_replay_denial_audit_retains_verified_context_lineage(keys, w_a):
+    records = []
+    ingress = _ingress(keys, audit=records.append)
+    envelope = _envelope(keys, w_a)
+    event = _event(_event_text(envelope))
+    assert ingress.pre_gateway_dispatch(event)["action"] == "rewrite"
+    assert ingress.pre_gateway_dispatch(event)["action"] == "skip"
+    assert records[-1]["warrant_id"] == records[0]["warrant_id"]
+    assert records[-1]["parent_warrant_ids"] == [str(w_a.id)]
+
+
+def test_local_child_sender_is_verified_through_pinned_peer_ancestry(keys, w_a):
+    import tenuo_core
+
+    child_key = SigningKey.generate()
+    child = grant_to(keys.a, [w_a], child_key.public_key, {"light_get": {}}, 200)
+    grant = grant_to(child_key, [w_a, child], keys.b.public_key, {"light_get": {}}, 100)
+    envelope = _envelope(keys, w_a, grant=grant, sender=child_key, chain=[w_a, child])
+    verified = _verify(keys, envelope)
+    assert [w.id for w in verified.chain] == [w_a.id, child.id]
+    assert verified.tools == ("light_get",)
+    # The child cannot add a sibling capability held only by its parent.
+    with pytest.raises(Exception):
+        grant_to(child_key, [w_a, child], keys.b.public_key, {"door_unlock": {}}, 100)
+    # A substituted ancestry cannot use a real child's proof to claim peer membership.
+    unrelated = (Warrant.mint_builder().holder(keys.mallory.public_key)
+                 .capability("light_get").ttl(300).mint(keys.root))
+    envelope["grant"] = tenuo_core.encode_warrant_stack([unrelated, child, grant])
+    with pytest.raises(IngressRefused):
+        _verify(keys, envelope)

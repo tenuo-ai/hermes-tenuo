@@ -1110,6 +1110,9 @@ def main() -> None:
     from hermes_tenuo import mcp_cli
 
     mcp_cli.add_parser(subparsers)
+    from hermes_tenuo import a2a_cli
+    a2a_cli.add_parser(subparsers)
+
     args = parser.parse_args()
 
     if args.command == "keygen":
@@ -1128,6 +1131,8 @@ def main() -> None:
         sys.exit(cmd_hands(args))
     elif args.command == "mcp":
         sys.exit(mcp_cli.run(args))
+    elif args.command == "a2a":
+        sys.exit(a2a_cli.run(args))
     elif args.command == "demo":
         from hermes_tenuo.demo import main as cmd_demo
         sys.exit(cmd_demo())

@@ -5,6 +5,10 @@ one Hermes (B) receiving native A2A `SendMessage` tasks, a scripted model, and a
 agent A (and a second peer, M). Synthetic devices only; nothing real is touched. Keys, peer tokens
 and the operator root are generated at `init` into the lab directory, never committed.
 
+The two-peer matrix is historical: use checkout `786517fcb94526cf37934d10f848c63211dd448e`
+for the commands below. The current receiver requires a single peer; see
+[the current setup guide](../../docs/a2a-delegation.md) for deployment and `two_agent.py`.
+
 ```sh
 mkdir -p ~/a2a-d0/src && cp -r spikes/a2a-d0/* ~/a2a-d0/ && cp -r hermes_tenuo ~/a2a-d0/src/
 cd ~/a2a-d0

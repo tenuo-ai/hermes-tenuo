@@ -156,6 +156,26 @@ async def test_external_warrant_replay_revocation_and_audit_across_wrappers(tmp_
         assert revoked.meta[AUDIT_META]["reason"] == "revoked"
     assert not (tmp_path / "second.txt").exists()
 
+    # A new wrapper cannot resurrect the revoked grant with an older signed
+    # list, a different list at the same version, or a deleted list.
+    revocation_path = workspaces[1] / "revocations.srl"
+    rollback = SignedRevocationList.builder().version(0).build(issuer)
+    conflict = SignedRevocationList.builder().version(1).build(issuer)
+    for replacement in (rollback, conflict, None):
+        if replacement is None:
+            revocation_path.unlink()
+        else:
+            revocation_path.write_bytes(replacement.to_bytes())
+        async with connect_wrapper(workspaces[1]) as client:
+            blocked = await client.call_tool("second__write", arguments, meta=second_auth)
+            assert blocked.meta[AUDIT_META]["reason"] == "revocation_list_unavailable"
+    newer = SignedRevocationList.builder().version(2).revoke(warrant.id).build(issuer)
+    revocation_path.write_bytes(newer.to_bytes())
+    async with connect_wrapper(workspaces[1]) as client:
+        revoked = await client.call_tool("second__write", arguments, meta=second_auth)
+        assert revoked.meta[AUDIT_META]["reason"] == "revoked"
+    assert not (tmp_path / "second.txt").exists()
+
     lines = (await _cli("audit", *workspaces, "--warrant", warrant.id, "--json")).splitlines()
     assert {json.loads(line)["server"] for line in lines} == {"first", "second"}
 

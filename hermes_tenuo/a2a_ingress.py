@@ -31,6 +31,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,6 +44,15 @@ VERSION = 1
 MAX_CLOCK_SKEW = 60  # seconds a request may be dated in the future
 MAX_REQUEST_AGE = 300  # seconds a request stays acceptable; replay is refused within it
 MAX_ENVELOPE_CHARS = 64_000
+
+
+def srl_bytes(data: bytes) -> bytes:
+    """A revocation list file's bytes: raw (as the MCP wrapper writes revocations.srl) or base64 text."""
+    try:
+        text = data.decode("ascii").strip()
+        return base64.b64decode(text, validate=True) if text else data
+    except Exception:
+        return data
 
 
 class IngressRefused(Exception):
@@ -140,26 +150,71 @@ class VerifiedGrant:
     tools: Tuple[str, ...]
 
 
-class NonceStore:
-    """Nonces seen within the acceptance window. A nonce is refused while it could still be fresh."""
+class _JsonState:
+    """A small JSON file written atomically (0600). Unreadable state fails closed: the caller
+    refuses rather than forgetting what it had accepted."""
 
-    def __init__(self) -> None:
-        self._seen: Dict[str, float] = {}
+    def __init__(self, path: Optional[Any]) -> None:
+        self.path = path
+
+    def load(self) -> Dict[str, Any]:
+        if self.path is None or not self.path.exists():
+            return {}
+        data = json.loads(self.path.read_text())
+        return {str(k): v for k, v in dict(data).items()}
+
+    @contextmanager
+    def locked(self):
+        """Serialize state updates by receivers sharing the same state directory."""
+        if self.path is None:
+            yield
+            return
+        import fcntl
+        import os
+
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def save(self, data: Dict[str, Any]) -> None:
+        if self.path is None:
+            return
+        from hermes_tenuo.issuance import write_private_file
+
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_private_file(self.path, json.dumps(data, sort_keys=True), overwrite=True)
+
+
+class NonceStore:
+    """Nonces seen within the acceptance window. A nonce is refused while it could still be fresh,
+    also across a restart when ``path`` is set."""
+
+    def __init__(self, path: Optional[Any] = None) -> None:
+        self._file = _JsonState(path)
+        self._seen: Dict[str, float] = self._file.load()
         self._lock = threading.Lock()
 
     def claim(self, nonce: str, now: float) -> bool:
-        with self._lock:
+        with self._lock, self._file.locked():
+            if self._file.path is not None:
+                self._seen = self._file.load()
             for key in [k for k, until in self._seen.items() if until < now]:
                 del self._seen[key]
             if nonce in self._seen:
                 return False
             self._seen[nonce] = now + MAX_REQUEST_AGE + MAX_CLOCK_SKEW
+            self._file.save(self._seen)
             return True
 
 
 def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str,
                     peers: Dict[str, str], own_key: Any, trusted_roots: List[Any],
-                    nonces: NonceStore, now: Optional[float] = None) -> VerifiedGrant:
+                    nonces: NonceStore, now: Optional[float] = None,
+                    revocations: Optional[Any] = None) -> VerifiedGrant:
     """Check one envelope completely, or raise IngressRefused saying why.
 
     ``peer`` is the identity the A2A transport authenticated (never read from the body);
@@ -202,12 +257,15 @@ def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str
     # B holds the grant: only B's key can present it.
     if public_key_b64(leaf.authorized_holder) != own:
         raise IngressRefused("the grant is not held by this agent")
-    # The sender's warrant (W_A) is held by the key pinned for the authenticated peer.
-    if public_key_b64(parents[-1].authorized_holder) != pinned:
+    # A local child signs with its own key. Its verified ancestry must include authority
+    # held by the authenticated peer's pinned key; an unrelated trusted-root grant is insufficient.
+    if not any(public_key_b64(w.authorized_holder) == pinned for w in parents):
         raise IngressRefused("the grant was not issued by the authenticated peer")
     # Root trust, linkage, depth, expiry and monotonic narrowing for the whole chain.
     try:
         authorizer = Authorizer(trusted_roots=list(trusted_roots))
+        if revocations is not None:
+            authorizer.set_revocation_list(revocations)
         authorizer.verify_chain(chain)
     except Exception as exc:
         raise IngressRefused(f"the grant chain is not trusted ({type(exc).__name__})") from exc
@@ -244,17 +302,46 @@ def verify_envelope(envelope: Any, *, peer: str, task_text: str, context_id: str
 # ---------------------------------------------------------------------------
 
 
+CONTEXT_MEMORY = 30 * 86400  # how long a used context stays owned by its peer
+
+
 @dataclass
 class GrantRegistry:
     """Grants by (peer, context). A context belongs to the first peer that used it, and holds one
-    delegated task: a later task opens a new context, so a turn's grant never changes under it."""
+    delegated task: a later task opens a new context, so a turn's grant never changes under it.
+    With ``path`` set, context ownership survives a restart (grants do not: an in-flight task then
+    runs no tools)."""
 
+    path: Optional[Any] = None
     _grants: Dict[Tuple[str, str], VerifiedGrant] = field(default_factory=dict)
     _owners: Dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def __post_init__(self) -> None:
+        self._file = _JsonState(self.path)
+        self._used: Dict[str, float] = {}
+        self._reload()
+
+    def _reload(self) -> None:
+        if self.path is None:
+            return
+        owners, timestamps = {}, {}
+        now = time.time()
+        for key, used in self._file.load().items():
+            peer, _, context_id = key.partition("\x00")
+            if used + CONTEXT_MEMORY > now:
+                owners[context_id] = peer
+                timestamps[context_id] = used
+        self._owners, self._used = owners, timestamps
+
+    def _save(self) -> None:
+        now = time.time()
+        rows = {f"{peer}\x00{ctx}": self._used.get(ctx, now) for ctx, peer in self._owners.items()}
+        self._file.save(rows)
+
     def check_context(self, peer: str, context_id: str) -> None:
-        with self._lock:
+        with self._lock, self._file.locked():
+            self._reload()
             owner = self._owners.get(context_id)
         if owner is not None and owner != peer:
             raise IngressRefused("this A2A context belongs to another peer")
@@ -262,11 +349,14 @@ class GrantRegistry:
             raise IngressRefused("this A2A context already carried a delegated task; open a new context")
 
     def bind(self, grant: VerifiedGrant) -> None:
-        with self._lock:
+        with self._lock, self._file.locked():
+            self._reload()
             owner = self._owners.get(grant.context_id)
             if owner is not None:
                 raise IngressRefused("this A2A context already carried a delegated task; open a new context")
             self._owners[grant.context_id] = grant.peer
+            self._used[grant.context_id] = time.time()
+            self._save()
             self._grants[(grant.peer, grant.context_id)] = grant
 
     def get(self, peer: str, context_id: str) -> Optional[VerifiedGrant]:
@@ -297,13 +387,70 @@ class A2AIngress:
     """Receiver-side protected ingress: the dispatch hook, and the grant lookup for tool calls."""
 
     def __init__(self, *, own_key: Any, peers: Dict[str, str], trusted_roots: List[Any],
-                 audit: Optional[Any] = None) -> None:
+                 audit: Optional[Any] = None, state_dir: Optional[Any] = None,
+                 revocation_list: Optional[Any] = None) -> None:
         self.own_key = own_key
         self.peers = dict(peers)
         self.trusted_roots = list(trusted_roots)
-        self.registry = GrantRegistry()
-        self.nonces = NonceStore()
+        self.registry = GrantRegistry(path=state_dir / "a2a_contexts.json" if state_dir else None)
+        self.nonces = NonceStore(path=state_dir / "a2a_nonces.json" if state_dir else None)
         self._audit = audit
+        self._srl_path = revocation_list
+        self._srl_digest: Optional[str] = None
+        self._srl: Optional[Any] = None
+        self._srl_error: Optional[str] = None
+        self._srl_lock = threading.Lock()
+        # Highest revocation list version accepted, kept across restarts: a restarted receiver must
+        # not accept an older list that un-revokes grants.
+        self._srl_floor = _JsonState(state_dir / "a2a_revocation_version.json" if state_dir else None)
+
+    # -- revocation -----------------------------------------------------------
+
+    def revocations(self) -> Optional[Any]:
+        """The current signed revocation list, re-read when its file changes. Raises
+        IngressRefused when a configured list is missing or not signed by a trusted root."""
+        if self._srl_path is None:
+            return None
+        from tenuo import Authorizer, SignedRevocationList
+
+        with self._srl_lock, self._srl_floor.locked():
+            try:
+                raw = srl_bytes(self._srl_path.read_bytes())
+                digest = hashlib.sha256(raw).hexdigest()
+                # Read the bytes on every check: timestamps and sizes can be preserved on replacement.
+                srl = SignedRevocationList.from_bytes(raw)
+                Authorizer(trusted_roots=list(self.trusted_roots)).set_revocation_list(srl)
+                accepted = self._srl_floor.load()
+                floor = int(accepted.get("version", 0))
+                prior_digest = accepted.get("digest")
+                if self._srl is not None and int(self._srl.version) >= floor:
+                    floor, prior_digest = int(self._srl.version), self._srl_digest
+                if srl.version < floor:
+                    raise ValueError(f"version {srl.version} is older than version {floor} already accepted")
+                if srl.version == floor and (accepted or self._srl is not None) and digest != prior_digest:
+                    raise ValueError("revocation list conflicts with the accepted version; publish a newer version")
+                next_floor = {"version": int(srl.version), "digest": digest}
+                if accepted != next_floor:
+                    self._srl_floor.save(next_floor)
+                self._srl, self._srl_digest, self._srl_error = srl, digest, None
+            except Exception as exc:
+                self._srl_error = f"the revocation list cannot be used ({exc})"
+            if self._srl_error:
+                raise IngressRefused(self._srl_error)
+            return self._srl
+
+    def is_revoked(self, grant: Optional[VerifiedGrant], session_chain: Optional[List[Any]] = None) -> Optional[str]:
+        """Why the grant may no longer be used, or None. Checked at every tool call."""
+        try:
+            srl = self.revocations()
+        except IngressRefused as refused:
+            return str(refused)
+        if srl is None:
+            return None
+        for warrant in ([*grant.chain, grant.warrant] if grant is not None else []) + (session_chain or []):
+            if srl.is_revoked(str(warrant.id)):
+                return "this delegation was revoked"
+        return None
 
     # -- ingress ------------------------------------------------------------
 
@@ -329,7 +476,8 @@ class A2AIngress:
         self.registry.check_context(peer, context_id)
         grant = verify_envelope(envelope, peer=peer, task_text=task, context_id=context_id,
                                 peers=self.peers, own_key=self.own_key,
-                                trusted_roots=self.trusted_roots, nonces=self.nonces, now=now)
+                                trusted_roots=self.trusted_roots, nonces=self.nonces, now=now,
+                                revocations=self.revocations())
         self.registry.bind(grant)
         return grant, task
 
@@ -347,9 +495,10 @@ class A2AIngress:
             try:
                 grant, task = self.admit(peer, context_id, str(getattr(event, "text", "") or ""))
             except IngressRefused as refused:
-                self._record("refused", peer, context_id, str(refused))
+                self._record("refused", peer, context_id, str(refused),
+                             grant=self.registry.get(peer, context_id))
                 return {"action": "skip", "reason": f"tenuo: {refused}"}
-            self._record("admitted", peer, context_id, ",".join(grant.tools))
+            self._record("admitted", peer, context_id, ",".join(grant.tools), grant=grant)
             return {"action": "rewrite", "text": _framing(peer) + task}
         except Exception as exc:  # fail closed
             logger.error("hermes-tenuo: A2A ingress error, message dropped: %s", exc, exc_info=True)
@@ -364,12 +513,22 @@ class A2AIngress:
     def grant_for(self, peer: str, context_id: str) -> Optional[VerifiedGrant]:
         return self.registry.get(peer, context_id)
 
-    def _record(self, outcome: str, peer: str, context_id: str, detail: str) -> None:
+    def _record(self, outcome: str, peer: str, context_id: str, detail: str,
+                *, grant: Optional[VerifiedGrant] = None) -> None:
         logger.info("hermes-tenuo: A2A ingress %s peer=%s context=%s %s", outcome, peer, context_id, detail)
         if self._audit is not None:
             try:
-                self._audit({"event": "a2a_ingress", "outcome": outcome, "peer": peer,
-                             "context": context_id, "detail": detail, "ts": time.time()})
+                from datetime import datetime, timezone
+
+                # Same shape as tool decisions and the MCP wrapper's records, in the same log.
+                self._audit({"timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                             "tool": "a2a_ingress", "decision": "ALLOW" if outcome == "admitted" else "DENY",
+                             "reason": detail if outcome != "admitted" else "", "peer": peer,
+                             "context": context_id, "context_id": context_id,
+                             "warrant_id": str(grant.warrant.id) if grant else "",
+                             "parent_warrant_ids": [str(warrant.id) for warrant in grant.chain] if grant else [],
+                             "granted_tools": detail if outcome == "admitted" else "",
+                             "event": "a2a_ingress", "outcome": outcome, "detail": detail, "ts": time.time()})
             except Exception:
                 logger.debug("hermes-tenuo: A2A audit write failed", exc_info=True)
 
@@ -408,13 +567,32 @@ def load_or_create_a2a_key() -> Any:
         os.close(lock_fd)
 
 
-def load_ingress(ctx: Any) -> Optional[A2AIngress]:
+def _check_peer_isolation(peers, read_env):
+    """Hermes task reads are shared among authenticated callers until #146669."""
+    if (read_env("A2A_BEARER_TOKEN") or "").strip():
+        raise ValueError("Unset A2A_BEARER_TOKEN for protected A2A. Use a named peer token instead.")
+    raw = read_env("A2A_PEER_TOKENS") or ""
+    names = set()
+    for item in raw.split(","):
+        if not item.strip():
+            continue
+        name, separator, token = item.partition(":")
+        if not separator or not name.strip() or not token.strip():
+            raise ValueError("A2A_PEER_TOKENS needs entries in name:token format.")
+        names.add(name.strip())
+    if len(names) != 1:
+        raise ValueError("A2A_PEER_TOKENS must name exactly one sender identity for protected A2A.")
+    if names != set(peers):
+        raise ValueError("The A2A_PEER_TOKENS identity must match the sole entry in a2a_ingress.peers.")
+
+
+def load_ingress(ctx: Any, *, read_env=None) -> Optional[A2AIngress]:
     """Build the ingress from ``a2a_ingress`` in the plugin config, or None when it is off.
 
     ``a2a_ingress: {enabled: true, peers: {<peer name>: <public key b64>}, trusted_roots: [<b64>]}``.
     The receiver's own key is created on first use under ``$HERMES_HOME/tenuo/a2a.key``. A
     configured but unusable block raises ValueError, so the caller can fail closed."""
-    from hermes_tenuo._config import _get_plugin_entry
+    from hermes_tenuo._config import _env_secret, _get_plugin_entry
     from tenuo import PublicKey
 
     block = _get_plugin_entry(ctx).get("a2a_ingress")
@@ -431,11 +609,28 @@ def load_ingress(ctx: Any) -> Optional[A2AIngress]:
     roots = block.get("trusted_roots") or []
     if not isinstance(peers, dict) or not peers or not isinstance(roots, list) or not roots:
         raise ValueError("a2a_ingress needs at least one pinned peer and one trusted root")
+    _check_peer_isolation(peers, read_env if read_env is not None else _env_secret)
     for name, key in peers.items():
         PublicKey.from_bytes(base64.b64decode(str(key)))  # raises on a bad key
     trusted = [PublicKey.from_bytes(base64.b64decode(str(r))) for r in roots]
     own_key = load_or_create_a2a_key()
-    return A2AIngress(own_key=own_key, peers={str(k): str(v) for k, v in peers.items()}, trusted_roots=trusted)
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from hermes_tenuo._config import get_audit_log_path
+
+    audit = None
+    audit_path = get_audit_log_path(ctx)
+    if audit_path is not None:
+        from hermes_tenuo.audit import LocalAuditLog
+
+        log = LocalAuditLog(audit_path)
+        audit = lambda row: log(SimpleNamespace(**row))  # noqa: E731
+
+    srl = block.get("revocation_list")
+    return A2AIngress(own_key=own_key, peers={str(k): str(v) for k, v in peers.items()},
+                      trusted_roots=trusted, state_dir=a2a_key_path().parent, audit=audit,
+                      revocation_list=Path(str(srl)).expanduser() if srl else None)
 
 
 __all__ = [

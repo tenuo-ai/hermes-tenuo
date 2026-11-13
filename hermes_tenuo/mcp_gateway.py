@@ -13,13 +13,14 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from referencing import Registry
-from tenuo import Authorizer, SignedRevocationList
+from tenuo import Authorizer
 from tenuo.mcp import MCPVerifier
 from tenuo.nonce import NonceStore
 
 from hermes_tenuo.audit import LocalAuditLog
 from hermes_tenuo.issuance import read_public_key
 from hermes_tenuo.mcp_replay import WorkspaceNonces
+from hermes_tenuo.mcp_revocations import WorkspaceRevocations
 from hermes_tenuo.mcp_workspace import connect_tools, load_servers
 
 AUDIT_FILE = "audit.jsonl"
@@ -52,19 +53,7 @@ class WrappedTools:
             for name, tool in tools.items()
         }
         self.audit = LocalAuditLog(workspace / AUDIT_FILE)
-        self.revocations = workspace / "revocations.srl"
-        self._last_srl = None
-
-    def _refresh_revocations(self):
-        try:
-            raw = self.revocations.read_bytes()
-        except FileNotFoundError:
-            if self._last_srl is not None:
-                raise
-            return
-        if raw != self._last_srl:
-            self.authorizer.set_revocation_list(SignedRevocationList.from_bytes(raw))
-            self._last_srl = raw
+        self.revocations = WorkspaceRevocations(workspace, self.authorizer)
 
     async def list_tools(self, _context, _params):
         return types.ListToolsResult(tools=[tool.definition for tool in self.tools.values()])
@@ -89,11 +78,11 @@ class WrappedTools:
             self.audit(SimpleNamespace(**record))
             return _reply(record, "This wrapper supports direct tool calls without task or interactive continuations.")
         try:
-            self._refresh_revocations()
+            self.revocations.refresh()
         except Exception:
             record["reason"] = "revocation_list_unavailable"
             self.audit(SimpleNamespace(**record))
-            return _reply(record, "Could not verify the signed revocation list. Check revocations.srl and try again.")
+            return _reply(record, "Could not use the signed revocation list. Restore the accepted version or a newer signed list.")
         verdict = self.verifier.verify(
             params.name, params.arguments, meta=params.meta, input_schema=tool.definition.input_schema,
         )
