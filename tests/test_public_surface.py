@@ -71,7 +71,7 @@ def test_package_and_plugin_versions_agree():
     py_ver = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
     yaml_ver = re.search(r"^version:\s*(.+)$", plugin, re.M).group(1).strip()
     from hermes_tenuo._version import __version__
-    assert py_ver == yaml_ver == __version__ == "0.4.0"
+    assert py_ver == yaml_ver == __version__ == "0.4.1"
 
 
 def test_every_uvx_command_in_the_docs_names_this_version():

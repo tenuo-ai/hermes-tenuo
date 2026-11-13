@@ -1,5 +1,5 @@
 name: hermes-tenuo
-version: 0.4.0
+version: 0.4.1
 description: >
   Signed, expiring tool permissions and local workspaces for Hermes Agent.
   Tenuo warrants control which tools and arguments each task can use, including

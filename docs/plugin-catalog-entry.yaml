@@ -7,7 +7,7 @@
 # match what register() registers at that commit.
 name: hermes-tenuo
 title: Tenuo
-version: 0.4.0
+version: 0.4.1
 category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit

@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 - 2026-11-13
+
+### Upgrading from 0.4.0
+
+- Pair a machine from a direct message on chat platforms: `/hands setup` no longer prints
+  the pairing line in a group, channel or thread.
+- The plugin now needs `python-dotenv`; `hermes plugins enable` installs it.
+
+### Delegation between Hermes agents (preview)
+
+- `tenuo_delegate` hands one bounded task to a paired Hermes over A2A. The receiver holds a
+  signed, short-lived grant for the tools and argument values named, checked before its
+  model sees the task and at every tool call. Calls to Tenuo-wrapped MCP servers carry the
+  session's authority. See `docs/a2a-delegation.md`.
+
+### CLI
+
+- `mint --allow` accepts a URL limited to named hosts: `tool:arg=domain:host|*.host`.
 
 ### Hands
 
