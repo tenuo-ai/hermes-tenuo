@@ -365,3 +365,42 @@ def test_log_only_mode_cannot_allow_denied_remote_delegation(k, tool, has_capabi
     assert result["action"] == "block"
     if has_capability:
         assert guard.pre_tool_call(tool, {"peer": "allowed"}, session_id="parent") is None
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_authenticated_delegation_does_not_follow_redirects(status):
+    import threading
+    import urllib.error
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from hermes_tenuo.a2a_delegate import _post
+
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append((self.path, self.headers.get("Authorization")))
+            self.send_response(status)
+            self.send_header("Location", f"http://localhost:{self.server.server_port}/redirected")
+            self.end_headers()
+
+        def do_GET(self):
+            received.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{}')
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"http://127.0.0.1:{server.server_port}/", "peer-secret", {}, 2)
+        assert exc.value.code == status
+        assert received == [("/", "Bearer peer-secret")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

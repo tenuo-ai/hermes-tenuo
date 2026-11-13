@@ -157,10 +157,16 @@ def _egress_text(text: str) -> str:
         return text
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a peer credential or delegated request to a redirect target.
+        return None
+
+
 def _post(url: str, token: str, body: Dict[str, Any], timeout: int) -> Dict[str, Any]:
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {token}", "A2A-Version": "1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured peer URL
+    with urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout) as resp:  # noqa: S310 - operator-configured peer URL
         return json.loads(resp.read().decode("utf-8"))
 
 

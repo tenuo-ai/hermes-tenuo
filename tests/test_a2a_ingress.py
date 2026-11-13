@@ -580,3 +580,63 @@ def test_child_inherits_ingress_provenance_before_its_first_contextless_call(key
         assert guard.pre_tool_call("light_get", {}, session_id="child", task_id="child-task") is None
         # Log-only mode must not override a descendant's restrictions without gateway context.
         assert guard.pre_tool_call("door_unlock", {}, task_id="child-task")["action"] == "block"
+
+
+def test_shared_nonce_stores_claim_once_and_preserve_other_claims(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "nonces.json"
+    stores = [NonceStore(path) for _ in range(8)]
+    now = time.time()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claimed = list(pool.map(lambda store: store.claim("shared", now), stores))
+    assert claimed.count(True) == 1
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(lambda item: item[1].claim(str(item[0]), now), enumerate(stores)))
+    restarted = NonceStore(path)
+    for nonce in ["shared", *map(str, range(8))]:
+        assert not restarted.claim(nonce, now)
+
+
+def test_shared_registries_preserve_context_ownership(keys, w_a, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from hermes_tenuo.a2a_ingress import GrantRegistry
+
+    path = tmp_path / "contexts.json"
+    registries = [GrantRegistry(path) for _ in range(8)]
+    grant = _verify(keys, _envelope(keys, w_a))
+
+    def bind(registry):
+        try:
+            registry.bind(grant)
+            return True
+        except IngressRefused:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(bind, registries)).count(True) == 1
+    for i, registry in enumerate(registries):
+        registry.bind(replace(grant, context_id=f"other-{i}"))
+    for registry in [*registries, GrantRegistry(path)]:
+        for context in ["ctx-1", *(f"other-{i}" for i in range(8))]:
+            with pytest.raises(IngressRefused, match="already carried"):
+                registry.check_context(grant.peer, context)
+            with pytest.raises(IngressRefused, match="another peer"):
+                registry.check_context("other-peer", context)
+
+
+def test_unchanged_revocation_floor_is_not_rewritten(keys, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    path = tmp_path / "srl.b64"
+    _write_srl(path, _srl(keys, [], version=1))
+    ingress = _ingress(keys, revocation_list=path, state_dir=tmp_path)
+    save = Mock(wraps=ingress._srl_floor.save)
+    monkeypatch.setattr(ingress._srl_floor, "save", save)
+    assert ingress.revocations().version == 1
+    assert ingress.revocations().version == 1
+    assert save.call_count == 1
+    _write_srl(path, _srl(keys, [], version=2))
+    assert ingress.revocations().version == 2
+    assert save.call_count == 2

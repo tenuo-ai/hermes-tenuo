@@ -165,7 +165,7 @@ class _JsonState:
 
     @contextmanager
     def locked(self):
-        """Serialize revocation acceptance by receivers sharing the same state directory."""
+        """Serialize state updates by receivers sharing the same state directory."""
         if self.path is None:
             yield
             return
@@ -199,7 +199,9 @@ class NonceStore:
         self._lock = threading.Lock()
 
     def claim(self, nonce: str, now: float) -> bool:
-        with self._lock:
+        with self._lock, self._file.locked():
+            if self._file.path is not None:
+                self._seen = self._file.load()
             for key in [k for k, until in self._seen.items() if until < now]:
                 del self._seen[key]
             if nonce in self._seen:
@@ -317,12 +319,19 @@ class GrantRegistry:
     def __post_init__(self) -> None:
         self._file = _JsonState(self.path)
         self._used: Dict[str, float] = {}
+        self._reload()
+
+    def _reload(self) -> None:
+        if self.path is None:
+            return
+        owners, timestamps = {}, {}
         now = time.time()
         for key, used in self._file.load().items():
             peer, _, context_id = key.partition("\x00")
             if used + CONTEXT_MEMORY > now:
-                self._owners[context_id] = peer
-                self._used[context_id] = used
+                owners[context_id] = peer
+                timestamps[context_id] = used
+        self._owners, self._used = owners, timestamps
 
     def _save(self) -> None:
         now = time.time()
@@ -330,7 +339,8 @@ class GrantRegistry:
         self._file.save(rows)
 
     def check_context(self, peer: str, context_id: str) -> None:
-        with self._lock:
+        with self._lock, self._file.locked():
+            self._reload()
             owner = self._owners.get(context_id)
         if owner is not None and owner != peer:
             raise IngressRefused("this A2A context belongs to another peer")
@@ -338,14 +348,15 @@ class GrantRegistry:
             raise IngressRefused("this A2A context already carried a delegated task; open a new context")
 
     def bind(self, grant: VerifiedGrant) -> None:
-        with self._lock:
+        with self._lock, self._file.locked():
+            self._reload()
             owner = self._owners.get(grant.context_id)
             if owner is not None:
                 raise IngressRefused("this A2A context already carried a delegated task; open a new context")
             self._owners[grant.context_id] = grant.peer
             self._used[grant.context_id] = time.time()
-            self._grants[(grant.peer, grant.context_id)] = grant
             self._save()
+            self._grants[(grant.peer, grant.context_id)] = grant
 
     def get(self, peer: str, context_id: str) -> Optional[VerifiedGrant]:
         with self._lock:
@@ -417,7 +428,9 @@ class A2AIngress:
                     raise ValueError(f"version {srl.version} is older than version {floor} already accepted")
                 if srl.version == floor and (accepted or self._srl is not None) and digest != prior_digest:
                     raise ValueError("revocation list conflicts with the accepted version; publish a newer version")
-                self._srl_floor.save({"version": int(srl.version), "digest": digest})
+                next_floor = {"version": int(srl.version), "digest": digest}
+                if accepted != next_floor:
+                    self._srl_floor.save(next_floor)
                 self._srl, self._srl_digest, self._srl_error = srl, digest, None
             except Exception as exc:
                 self._srl_error = f"the revocation list cannot be used ({exc})"
