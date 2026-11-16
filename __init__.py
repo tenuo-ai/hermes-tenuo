@@ -60,11 +60,35 @@ def _blocking_register(message: str):
     return register
 
 
+def _python_files(root: Path) -> dict:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    }
+
+
+def _same_code(loaded_dir: Path) -> bool:
+    """Whether an already loaded package is byte-for-byte this checkout's code.
+
+    Hermes 0.23's package manager also installs an enabled git plugin into its
+    managed environment (``…/workspace/plugin-sources/hermes-tenuo-<hash>/``), so the
+    same code can be imported from there before this shim runs. That copy is the
+    same installation, not a second one.
+    """
+    try:
+        return _python_files(loaded_dir) == _python_files(_PKG_DIR)
+    except OSError:
+        return False
+
+
 def _load_package():
     loaded = sys.modules.get("hermes_tenuo")
     if loaded is not None:
         source = getattr(loaded, "__file__", None)
         if source and Path(source).resolve() == (_PKG_DIR / "__init__.py").resolve():
+            return loaded
+        if source and _same_code(Path(source).resolve().parent):
             return loaded
         raise InstallConflict(
             f"hermes-tenuo installation conflict: {source} is already loaded, "
