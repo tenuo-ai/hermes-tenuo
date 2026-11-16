@@ -41,7 +41,9 @@ import shlex
 import shutil
 import subprocess
 import time
+import threading
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -83,11 +85,17 @@ def load_config(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     block = entry.get("claude_code")
     if not isinstance(block, dict):
         return None
-    roots = block.get("workspaces")
+    from hermes_tenuo.claude_remote import parse_machines
+
+    roots = block.get("workspaces") or []
     if isinstance(roots, str):
         roots = [roots]
-    if not roots or not all(isinstance(r, str) and r for r in roots):
-        raise ValueError("claude_code.workspaces must list at least one folder")
+    machines = parse_machines(block.get("machines"))
+    if not all(isinstance(r, str) and r for r in roots) or not (roots or machines):
+        raise ValueError("claude_code needs workspaces (folders on this host) or machines")
+    listen = str(block.get("listen") or "")
+    if machines and not listen:
+        raise ValueError("claude_code.machines needs claude_code.listen (host:port for machines to dial)")
     commands = block.get("commands", list(DEFAULT_COMMANDS))
     if not isinstance(commands, list) or not all(isinstance(c, str) and c.strip() for c in commands):
         raise ValueError("claude_code.commands must be a list of command prefixes")
@@ -104,6 +112,10 @@ def load_config(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "tenuo_claude": str(block.get("tenuo_claude") or ""),
         "claude": str(block.get("claude") or ""),
         "model": str(block.get("model") or ""),
+        "machines": machines,
+        "listen": listen,
+        # The owner approves each grant in chat before it is signed. Off only on purpose.
+        "approval": block.get("approval", True) is not False,
     }
 
 
@@ -185,11 +197,15 @@ def choose_commands(config: Dict[str, Any], requested: Any) -> List[str]:
 
 
 def mint_grant(issuer: Any, workspace: str, commands: List[str], ttl_seconds: int,
-               *, read_only: bool = False) -> Tuple[Any, Any]:
-    """(warrant, holder key) for one run."""
+               *, read_only: bool = False, holder_public_key: Any = None) -> Tuple[Any, Any]:
+    """(warrant, holder key) for one run.
+
+    With ``holder_public_key`` (another machine's key) the warrant is held by that
+    machine and the returned holder key is None: only that machine can use it.
+    """
     from tenuo import SigningKey, Subpath, Warrant
 
-    holder = SigningKey.generate()
+    holder = None if holder_public_key is not None else SigningKey.generate()
     builder = Warrant.mint_builder()
     for cap in FILE_CAPS:
         if read_only and cap in ("write_file", "edit_file"):
@@ -197,7 +213,8 @@ def mint_grant(issuer: Any, workspace: str, commands: List[str], ttl_seconds: in
         builder = builder.capability(cap, {"path": Subpath(workspace)})
     if commands:
         builder = builder.capability(COMMAND_CAP, {"command": command_constraint(commands)})
-    warrant = builder.holder(holder.public_key).ttl(int(ttl_seconds)).mint(issuer)
+    holder_pub = holder_public_key if holder_public_key is not None else holder.public_key
+    warrant = builder.holder(holder_pub).ttl(int(ttl_seconds)).mint(issuer)
     return warrant, holder
 
 
@@ -289,49 +306,257 @@ def run_task(config: Dict[str, Any], home: Path, *, task: str, workspace: str,
 
 
 # ---------------------------------------------------------------------------
-# Tool registration
+# Requests, approval and machines
+# ---------------------------------------------------------------------------
+
+FOLDER_RE = re.compile(r"[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*")
+LOCAL = "here"
+
+
+@dataclass
+class Request:
+    id: str
+    task: str
+    machine: str            # LOCAL or a configured machine name
+    workspace: str          # local: absolute path; machine: folder under its shared root
+    commands: List[str]
+    read_only: bool
+    minutes: int
+    session_key: str = ""
+    state: str = "waiting"  # waiting → approved → done / denied / failed
+    created: float = field(default_factory=time.time)
+
+
+def build_request(config: Dict[str, Any], args: Dict[str, Any], session_key: str = "") -> Request:
+    task = args.get("task", "")
+    if not isinstance(task, str) or not task.strip():
+        raise ClaudeCodeError("task is required")
+    if len(task) > MAX_TASK_CHARS:
+        raise ClaudeCodeError(f"task is longer than {MAX_TASK_CHARS} characters")
+    try:
+        minutes = int(args.get("minutes") or DEFAULT_MINUTES)
+    except (TypeError, ValueError) as exc:
+        raise ClaudeCodeError("minutes must be a whole number") from exc
+    minutes = max(1, min(minutes, config["max_minutes"]))
+    machine = str(args.get("machine") or "").strip()
+    if not machine:
+        if config["workspaces"]:
+            machine = LOCAL
+        elif len(config["machines"]) == 1:
+            machine = next(iter(config["machines"]))
+        else:
+            raise ClaudeCodeError(f"say which machine: {', '.join(config['machines'])}")
+    if machine == LOCAL:
+        if not config["workspaces"]:
+            raise ClaudeCodeError(f"Claude Code doesn't run on this host; machines: {', '.join(config['machines'])}")
+        workspace = resolve_workspace(config, args.get("workspace", ""))
+    else:
+        if machine not in config["machines"]:
+            raise ClaudeCodeError(f"unknown machine {machine!r}; configured: {', '.join(config['machines']) or 'none'}")
+        workspace = str(args.get("workspace") or "").strip().rstrip("/")
+        if not FOLDER_RE.fullmatch(workspace) or any(p in ("..", ".") for p in workspace.split("/")):
+            raise ClaudeCodeError("workspace must be a folder name inside the machine's shared folder, "
+                                  "e.g. \"calc-demo\"")
+    return Request(id=uuid.uuid4().hex[:6], task=task.strip(), machine=machine, workspace=workspace,
+                   commands=choose_commands(config, args.get("commands")),
+                   read_only=bool(args.get("read_only")), minutes=minutes, session_key=session_key)
+
+
+def describe(request: Request) -> str:
+    """The approval card. Written by the plugin from the request itself, never by the model."""
+    where = "this Hermes host" if request.machine == LOCAL else request.machine
+    may = ["read files in that folder" if request.read_only else "read and edit files in that folder"]
+    if request.commands:
+        may.append("run " + ", ".join(request.commands))
+    task = request.task if len(request.task) <= 400 else request.task[:400] + "…"
+    return (
+        f"Claude Code request {request.id}\n"
+        f"Machine: {where}\n"
+        f"Folder: {request.workspace}\n"
+        f"May: {'; '.join(may)}\n"
+        f"Never: git push, other programs, files outside the folder, web access\n"
+        f"For: {request.minutes} min\n"
+        f"Task: {task}\n\n"
+        f"Approve or deny: /claude"
+    )
+
+
+class Requests:
+    """Pending and finished requests in this process (pending ones end with a restart)."""
+
+    def __init__(self) -> None:
+        self._items: Dict[str, Request] = {}
+        self._lock = threading.Lock()
+
+    def add(self, request: Request) -> None:
+        with self._lock:
+            self._items[request.id] = request
+
+    def waiting(self, session_key: str = "") -> List[Request]:
+        with self._lock:
+            return [r for r in self._items.values() if r.state == "waiting"
+                    and (not session_key or not r.session_key or r.session_key == session_key)]
+
+    def take(self, request_id: str, session_key: str = "") -> Optional[Request]:
+        """Move a waiting request to approved, once. None if it isn't waiting here."""
+        with self._lock:
+            request = self._items.get(request_id)
+            if request is None or request.state != "waiting":
+                return None
+            if session_key and request.session_key and request.session_key != session_key:
+                return None
+            request.state = "approved"
+            return request
+
+    def deny(self, request_id: str, session_key: str = "") -> bool:
+        with self._lock:
+            request = self._items.get(request_id)
+            if request is None or request.state != "waiting":
+                return False
+            if session_key and request.session_key and request.session_key != session_key:
+                return False
+            request.state = "denied"
+            return True
+
+
+def _summary(out: Dict[str, Any], request: Request, run_id: str) -> Dict[str, Any]:
+    return {
+        "ok": bool(out.get("ok")),
+        "request": request.id,
+        "run": run_id,
+        "machine": request.machine,
+        "workspace": request.workspace,
+        "minutes": request.minutes,
+        "allowed_commands": request.commands,
+        "read_only": request.read_only,
+        "result": out.get("result"),
+        "error": out.get("error"),
+        "denied": [{"tool": d.get("tool"), "args": d.get("args")} for d in out.get("denied") or []][:20],
+        "denied_count": len(out.get("denied") or []),
+        "allowed_count": out.get("allowed"),
+        "receipts": out.get("receipts"),
+    }
+
+
+def run_on_machine(config: Dict[str, Any], home: Path, hub: Any, request: Request,
+                   on_progress=None) -> Dict[str, Any]:
+    """Sign a grant held by the machine's key and hand the job to it; wait for the result."""
+    from tenuo import PublicKey
+    from hermes_tenuo.claude_remote import Job
+
+    machine = hub.machines[request.machine]
+    if not machine.online:
+        raise ClaudeCodeError(f"{request.machine} is not connected. On it, start: tenuo-claude worker")
+    folder = machine.root.rstrip("/") + "/" + request.workspace
+    issuer = issuer_key(home)
+    warrant, _ = mint_grant(issuer, folder, request.commands, request.minutes * 60,
+                            read_only=request.read_only,
+                            holder_public_key=PublicKey.from_bytes(base64.b64decode(machine.public_key)))
+    run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + request.id
+    run_dir = home / "hermes-tenuo" / "claude-code" / "runs" / run_id
+    run_dir.mkdir(parents=True, mode=0o700)
+    _write_private(run_dir / "warrant", warrant.to_base64())
+    payload = {"id": run_id, "task": request.task, "folder": request.workspace,
+               "warrant": warrant.to_base64(), "minutes": request.minutes,
+               "issuer": _b64(issuer.public_key.to_bytes())}
+    if config["model"]:
+        payload["model"] = config["model"]
+    job = Job(id=run_id, machine=request.machine, payload=payload, on_progress=on_progress)
+    logger.info("hermes-tenuo: claude_code request %s sent to %s (warrant %s)",
+                request.id, request.machine, warrant.id)
+    hub.submit(job)
+    out = hub.wait(job, request.minutes * 60 + 120) or {"ok": False, "error": "no result from the machine in time"}
+    (run_dir / "result.json").write_text(json.dumps(out, indent=2))
+    return _summary(out, request, run_id)
+
+
+def run_request(config: Dict[str, Any], home: Path, hub: Any, request: Request,
+                on_progress=None, runner=subprocess.run) -> Dict[str, Any]:
+    if request.machine == LOCAL:
+        out = run_task(config, home, task=request.task, workspace=request.workspace,
+                       minutes=request.minutes, commands=request.commands,
+                       read_only=request.read_only, runner=runner)
+        out["request"], out["machine"] = request.id, LOCAL
+        return out
+    return run_on_machine(config, home, hub, request, on_progress=on_progress)
+
+
+def finished_text(request: Request, out: Dict[str, Any]) -> str:
+    where = "this host" if request.machine == LOCAL else request.machine
+    lines = [f"Claude Code on {where} {'finished' if out.get('ok') else 'stopped'} (request {request.id})."]
+    if out.get("error"):
+        lines.append(f"Problem: {out['error']}")
+    lines.append(f"Checked calls: {out.get('allowed_count') or 0} allowed, {out.get('denied_count') or 0} denied.")
+    for d in (out.get("denied") or [])[:5]:
+        arg = next(iter((d.get("args") or {}).values()), "")
+        lines.append(f"Denied: {d.get('tool')} {str(arg)[:120]}")
+    receipts = out.get("receipts") or {}
+    if receipts:
+        lines.append(f"Receipt log: {receipts.get('count')} entries, chain "
+                     f"{'intact' if receipts.get('chain_ok') else 'BROKEN'}.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool and command registration
 # ---------------------------------------------------------------------------
 
 DESCRIPTION = (
-    "Hand a coding task to Claude Code, running on this machine under a narrow grant: it may "
-    "read and edit files in one workspace folder and run only git status/diff/log/show/add/"
-    "commit and test commands (never git push or other programs), for a limited time. Use it "
-    "when the owner asks for code changes in a repository. Pass on what the owner said about "
-    "scope: which commands (commands), whether it may change files (read_only) and for how "
-    "long (minutes). Blocks until Claude Code finishes. "
-    "Report its result and any denied actions to the owner."
+    "Hand a coding task to Claude Code under a narrow, expiring grant the owner approves: it may "
+    "read (and unless read_only, edit) files in one folder and run only the listed git and test "
+    "commands, never git push or other programs. Use it when the owner asks for code work in a "
+    "repository. Pass on what the owner said about scope: machine, folder (workspace), which "
+    "commands, read_only, and minutes. The owner then approves with /claude; this tool returns "
+    "at once with the request id. Don't call it again for the same task; tell the owner it is "
+    "waiting for their approval. The result arrives as a later message."
 )
 
-SCHEMA = {
-    "name": TOOL_NAME,
-    "description": DESCRIPTION,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "task": {"type": "string",
-                     "description": "What Claude Code should do, in full: the problem, the files "
-                                    "if known, and what done looks like (e.g. tests pass, change committed)."},
-            "workspace": {"type": "string",
-                          "description": "Absolute path of the repository folder to work in."},
-            "commands": {"type": "array", "items": {"type": "string"},
-                         "description": "Commands Claude Code may run, as the owner chose them, e.g. "
-                                        "[\"git diff\", \"pytest\"]. Each must be one of the allowed "
-                                        "commands or a narrower form of one. Omit for the default list; "
-                                        "[] for no commands."},
-            "read_only": {"type": "boolean",
-                          "description": "True when the owner only wants Claude Code to read and "
-                                         "report (review, explain), not change files."},
-            "minutes": {"type": "integer", "minimum": 1,
-                        "description": f"How long the grant lasts (default {DEFAULT_MINUTES})."},
+
+def schema(config: Dict[str, Any]) -> Dict[str, Any]:
+    machines = list(config["machines"]) + ([LOCAL] if config["workspaces"] else [])
+    return {
+        "name": TOOL_NAME,
+        "description": DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string",
+                         "description": "What Claude Code should do, in full: the problem, the files "
+                                        "if known, and what done looks like (e.g. tests pass, change committed)."},
+                "machine": {"type": "string", "enum": machines,
+                            "description": "Where Claude Code runs. "
+                                           + (f"'{LOCAL}' is this Hermes host; " if config["workspaces"] else "")
+                                           + "others are the owner's own machines."},
+                "workspace": {"type": "string",
+                              "description": "On a machine: the folder name inside its shared folder, e.g. "
+                                             "\"calc-demo\". On this host: the folder's absolute path."},
+                "commands": {"type": "array", "items": {"type": "string"},
+                             "description": "Commands Claude Code may run, as the owner chose them, e.g. "
+                                            "[\"git diff\", \"pytest\"]. Each must be one of: "
+                                            + ", ".join(config["commands"])
+                                            + " (or a narrower form). Omit for all of them; [] for none."},
+                "read_only": {"type": "boolean",
+                              "description": "True when the owner only wants Claude Code to read and "
+                                             "report (review, explain), not change files."},
+                "minutes": {"type": "integer", "minimum": 1, "maximum": config["max_minutes"],
+                            "description": f"How long the grant lasts (default {DEFAULT_MINUTES})."},
+            },
+            "required": ["task", "workspace"],
+            "additionalProperties": False,
         },
-        "required": ["task", "workspace"],
-        "additionalProperties": False,
-    },
-}
+    }
+
+
+def _bound_session_key() -> str:
+    try:
+        from gateway.session_context import bound_session_key
+        return str(bound_session_key() or "")
+    except Exception:
+        return ""
 
 
 def register(ctx: Any) -> bool:
-    """Register ``claude_code`` when ``claude_code`` is configured. Returns whether it is."""
+    """Register ``claude_code`` and ``/claude`` when ``claude_code`` is configured."""
     from hermes_tenuo._config import _get_plugin_entry
     from hermes_tenuo._home import hermes_home
 
@@ -342,33 +567,133 @@ def register(ctx: Any) -> bool:
         return False
     if config is None or not hasattr(ctx, "register_tool"):
         return False
+    hub = None
+    if config["machines"]:
+        from hermes_tenuo import claude_remote
+        hub = claude_remote.start(config["listen"], config["machines"])
+        if hub is None:
+            config["machines"] = {}
+            if not config["workspaces"]:
+                return False
+    requests = Requests()
 
     def available() -> bool:
-        return bool(config["tenuo_claude"] or shutil.which("tenuo-claude"))
+        return bool(config["machines"]) or bool(config["tenuo_claude"] or shutil.which("tenuo-claude"))
+
+    def execute(request: Request, post: Any = None, session_key: str = "") -> None:
+        """Run an approved request; report progress into ``post`` and the end into the chat."""
+        def progress(lines: List[str]) -> None:
+            if post is not None:
+                shown = "\n".join(lines[-8:])
+                post.edit(f"Claude Code on {request.machine} is working (request {request.id})…\n{shown}")
+        try:
+            out = run_request(config, hermes_home(), hub, request, on_progress=progress)
+            request.state = "done" if out.get("ok") else "failed"
+        except ClaudeCodeError as exc:
+            out, request.state = {"ok": False, "error": str(exc)}, "failed"
+        except Exception as exc:
+            logger.error("hermes-tenuo: claude_code request %s failed: %s", request.id, exc, exc_info=True)
+            out, request.state = {"ok": False, "error": f"failed ({type(exc).__name__})"}, "failed"
+        text = finished_text(request, out)
+        if post is not None:
+            post.edit(text)
+        # Hand the result to the agent so it can report the work in the conversation.
+        message = (f"[claude_code result for request {request.id}]\n{json.dumps(out)}\n"
+                   "Tell the owner what Claude Code did, and what was denied.")
+        try:
+            injected = ctx.inject_message(message, session_key=session_key or None) if session_key else False
+        except Exception:
+            injected = False
+        if not injected and post is None:
+            logger.warning("hermes-tenuo: claude_code result for %s could not be delivered", request.id)
 
     def handler(args: Dict[str, Any], **_kw: Any) -> str:
         try:
-            result = run_task(config, hermes_home(), task=args.get("task", ""),
-                              workspace=args.get("workspace", ""),
-                              minutes=args.get("minutes") or DEFAULT_MINUTES,
-                              commands=args.get("commands"),
-                              read_only=bool(args.get("read_only")))
-            return json.dumps(result)
+            session_key = _bound_session_key()
+            request = build_request(config, args, session_key)
+            if request.machine != LOCAL and hub is not None and not hub.machines[request.machine].online:
+                raise ClaudeCodeError(
+                    f"{request.machine} is not connected. On that machine, start `tenuo-claude worker`.")
+            if not config["approval"]:
+                request.state = "approved"
+                out = run_request(config, hermes_home(), hub, request)
+                return json.dumps(out)
+            requests.add(request)
+            card = getattr(ctx, "post_message", None)
+            posted = card(describe(request)) if card else None
+            return json.dumps({
+                "ok": True, "status": "waiting_for_approval", "request": request.id,
+                "card_shown": bool(getattr(posted, "ok", False)),
+                "note": "The owner approves or denies with /claude. Tell them it is waiting; "
+                        "don't call claude_code again for this task.",
+                **({} if getattr(posted, "ok", False) else {"card": describe(request)}),
+            })
         except ClaudeCodeError as exc:
             return json.dumps({"ok": False, "error": str(exc)})
-        except subprocess.TimeoutExpired:
-            return json.dumps({"ok": False, "error": "Claude Code did not finish in time"})
         except Exception as exc:  # never crash the agent loop
             logger.error("hermes-tenuo: claude_code failed: %s", exc, exc_info=True)
             return json.dumps({"ok": False, "error": f"claude_code failed ({type(exc).__name__})"})
 
+    def command(raw_args: str = "", session_key: str = "", **_kw: Any) -> str:
+        """``/claude`` (buttons), ``/claude approve <id>``, ``/claude deny <id>``, ``/claude status``."""
+        words = (raw_args or "").split()
+        verb = words[0].lower() if words else ""
+        if verb == "status":
+            lines = [f"{name}: {'connected, sharing ' + m.root if m.online else 'not connected'}"
+                     for name, m in (hub.machines.items() if hub else [])]
+            waiting = requests.waiting(session_key)
+            lines.append(f"Waiting for approval: {', '.join(r.id for r in waiting) or 'none'}")
+            return "\n".join(lines)
+        if verb in ("approve", "deny") and len(words) == 2:
+            choice, request_id = verb, words[1]
+        else:
+            waiting = requests.waiting(session_key)
+            if not waiting:
+                return "No Claude Code request is waiting for approval."
+            request = waiting[-1]
+            picked = ctx.ask_choice(describe(request).rsplit("\n\n", 1)[0], [
+                {"value": "approve", "label": f"Approve {request.id}"},
+                {"value": "deny", "label": f"Deny {request.id}"},
+            ]) if hasattr(ctx, "ask_choice") else None
+            if picked is None:
+                return f"Reply /claude approve {request.id} or /claude deny {request.id}."
+            choice, request_id = picked, request.id
+        if choice == "deny":
+            if not requests.deny(request_id, session_key):
+                return f"No waiting request {request_id} here."
+            if session_key:
+                try:
+                    ctx.inject_message(f"[claude_code request {request_id} was denied by the owner]",
+                                       session_key=session_key)
+                except Exception:
+                    pass
+            return f"Denied {request_id}. Nothing was signed."
+        request = requests.take(request_id, session_key)
+        if request is None:
+            return f"No waiting request {request_id} here."
+        post = None
+        if hasattr(ctx, "post_message"):
+            handle = ctx.post_message(f"Approved {request.id}. Signing the grant and starting Claude Code "
+                                      f"on {request.machine}…")
+            post = handle if getattr(handle, "ok", False) else None
+        threading.Thread(target=execute, args=(request, post, session_key),
+                         name=f"claude-code-{request.id}", daemon=True).start()
+        return "" if post is not None else f"Approved {request.id}; Claude Code is starting."
+
+    tool_schema = schema(config)
     try:
-        ctx.register_tool(TOOL_NAME, "tenuo", SCHEMA, handler, check_fn=available, description=DESCRIPTION)
+        ctx.register_tool(TOOL_NAME, "tenuo", tool_schema, handler, check_fn=available, description=DESCRIPTION)
     except TypeError:
-        ctx.register_tool(TOOL_NAME, "tenuo", SCHEMA, handler)
-    logger.info("hermes-tenuo: claude_code tool on (workspaces: %s)", ", ".join(config["workspaces"]))
+        ctx.register_tool(TOOL_NAME, "tenuo", tool_schema, handler)
+    if config["approval"] and hasattr(ctx, "register_command"):
+        ctx.register_command("claude", command, description="Approve or deny Claude Code requests",
+                             args_hint="[approve <id> | deny <id> | status]")
+    logger.info("hermes-tenuo: claude_code tool on (here: %s; machines: %s; approval %s)",
+                ", ".join(config["workspaces"]) or "off", ", ".join(config["machines"]) or "none",
+                "on" if config["approval"] else "off")
     return True
 
 
-__all__ = ["ClaudeCodeError", "DEFAULT_COMMANDS", "command_constraint", "command_pattern",
-           "load_config", "mint_grant", "register", "resolve_workspace", "run_task"]
+__all__ = ["ClaudeCodeError", "DEFAULT_COMMANDS", "Request", "Requests", "build_request",
+           "command_constraint", "command_pattern", "describe", "load_config", "mint_grant",
+           "register", "resolve_workspace", "run_request", "run_task"]
