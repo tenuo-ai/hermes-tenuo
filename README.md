@@ -162,6 +162,12 @@ gets a signed, short-lived grant held by its own key, covering only the tools an
 name, and checks it before its model sees the task and at every tool call.
 [Set up two agents →](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/a2a-delegation.md)
 
+## Share your Hermes with other people
+
+[Hermes Guests](https://github.com/tenuo-ai/hermes-guests) uses Tenuo to let people you
+choose use part of your Hermes from their own Telegram chat, for as long as you choose:
+chat only, or chosen tools narrowed to one device or folder.
+
 ## More
 
 - [Hands settings, platform requirements and troubleshooting](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#hands-let-your-servers-agent-use-your-own-machine)
