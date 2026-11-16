@@ -2,15 +2,19 @@
 
 The machine runs ``tenuo-claude worker`` (from ``tenuo-claude-code``). It connects
 out to this hub, so the machine opens no port. Each request waits up to ~25
-seconds for a job (long poll). A job carries the task and a warrant held by the
-machine's own key, so only that machine can use it; the machine checks the
-warrant against Hermes's public key before it starts Claude Code, and sends back
-progress and the result.
+seconds for a job (long poll).
+
+The machine is the authority. Its owner signs a standing grant to Hermes's key
+(``tenuo-claude worker grant``) and the worker presents it on every poll. Hermes
+can only narrow that grant, per task, to the machine's own key; the machine
+checks each job chains back to its own key before it starts Claude Code, and
+sends back progress and a report it signed.
 
 Endpoints (all need ``Authorization: Bearer <token>`` and ``X-Tenuo-Machine``)::
 
-    GET  /claude/next            hello + wait for a job (X-Tenuo-Root: the machine's shared folder,
-                                 X-Tenuo-Public-Key: its key, which must match the configured one)
+    GET  /claude/next            hello + wait for a job (X-Tenuo-Public-Key: its key, which must match
+                                 the configured one; X-Tenuo-Grant: its standing grant to Hermes;
+                                 X-Tenuo-Grant-Info: the grant's terms; X-Tenuo-Root: its shared folder)
     POST /claude/jobs/<id>/progress   {"line": "..."}
     POST /claude/jobs/<id>/result     the run summary
 
@@ -51,6 +55,8 @@ class Machine:
     public_key: str
     token_env: str
     root: str = ""
+    grant: str = ""                      # the machine's standing grant to Hermes (base64 warrant)
+    grant_info: Dict[str, Any] = field(default_factory=dict)
     last_seen: float = 0.0
     jobs: "queue.Queue[dict]" = field(default_factory=queue.Queue)
 
@@ -122,10 +128,18 @@ class Hub:
             return None
         return machine
 
-    def next_job(self, machine: Machine, root: str, public_key: str, wait: float) -> Optional[dict]:
+    def next_job(self, machine: Machine, root: str, public_key: str, wait: float,
+                 grant: str = "", grant_info: str = "") -> Optional[dict]:
         if public_key and public_key != machine.public_key:
             raise PermissionError("this machine's key does not match the configured key")
-        machine.root, machine.last_seen = root, time.time()
+        info: Dict[str, Any] = {}
+        if grant_info:
+            try:
+                info = json.loads(base64.b64decode(grant_info))
+            except ValueError:
+                info = {}
+        machine.root, machine.grant, machine.last_seen = root, grant, time.time()
+        machine.grant_info = info if isinstance(info, dict) else {}
         try:
             return machine.jobs.get(timeout=wait)
         except queue.Empty:
@@ -175,7 +189,9 @@ def _handler(hub: Hub):
                 return self._send(404)
             try:
                 job = hub.next_job(machine, str(self.headers.get("X-Tenuo-Root") or ""),
-                                   str(self.headers.get("X-Tenuo-Public-Key") or ""), POLL_SECONDS)
+                                   str(self.headers.get("X-Tenuo-Public-Key") or ""), POLL_SECONDS,
+                                   grant=str(self.headers.get("X-Tenuo-Grant") or ""),
+                                   grant_info=str(self.headers.get("X-Tenuo-Grant-Info") or ""))
             except PermissionError as exc:
                 return self._send(403, {"error": str(exc)})
             if job is None:

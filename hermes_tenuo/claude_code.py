@@ -33,11 +33,11 @@ list short, and run Hermes in a container.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import time
@@ -69,6 +69,7 @@ DEFAULT_COMMANDS = (
 # Claude tool → capability, as tenuo-claude-code maps them.
 FILE_CAPS = ("read_file", "write_file", "edit_file", "glob", "grep")
 COMMAND_CAP = "run_command"
+REPORT_TOOL = "claude_report"   # what the machine signs its report as (tenuo-claude-code worker)
 
 
 class ClaudeCodeError(ValueError):
@@ -323,11 +324,27 @@ class Request:
     read_only: bool
     minutes: int
     session_key: str = ""
+    branch: str = ""        # machine: the one branch the machine may push, or "" for none
+    grant: Dict[str, Any] = field(default_factory=dict)  # machine: its standing grant's terms
     state: str = "waiting"  # waiting → approved → done / denied / failed
     created: float = field(default_factory=time.time)
 
 
-def build_request(config: Dict[str, Any], args: Dict[str, Any], session_key: str = "") -> Request:
+def branch_for(push: Optional[str], name: Any, request_id: str) -> str:
+    """The branch to push under the grant's pattern (``claude/*`` → ``claude/<name>``)."""
+    if not push:
+        return ""
+    raw = str(name or "").strip().strip("/")
+    if raw.startswith(push.split("*")[0]):
+        raw = raw[len(push.split("*")[0]):]
+    raw = re.sub(r"[^A-Za-z0-9._/-]+", "-", raw).strip("-./") or request_id
+    if "*" not in push:
+        return push
+    return push.split("*")[0] + raw[:60]
+
+
+def build_request(config: Dict[str, Any], args: Dict[str, Any], session_key: str = "",
+                  machines: Optional[Dict[str, Any]] = None) -> Request:
     task = args.get("task", "")
     if not isinstance(task, str) or not task.strip():
         raise ClaudeCodeError("task is required")
@@ -357,9 +374,24 @@ def build_request(config: Dict[str, Any], args: Dict[str, Any], session_key: str
         if not FOLDER_RE.fullmatch(workspace) or any(p in ("..", ".") for p in workspace.split("/")):
             raise ClaudeCodeError("workspace must be a folder name inside the machine's shared folder, "
                                   "e.g. \"calc-demo\"")
-    return Request(id=uuid.uuid4().hex[:6], task=task.strip(), machine=machine, workspace=workspace,
-                   commands=choose_commands(config, args.get("commands")),
-                   read_only=bool(args.get("read_only")), minutes=minutes, session_key=session_key)
+    request_id = uuid.uuid4().hex[:6]
+    if machine == LOCAL:
+        return Request(id=request_id, task=task.strip(), machine=machine, workspace=workspace,
+                       commands=choose_commands(config, args.get("commands")),
+                       read_only=bool(args.get("read_only")), minutes=minutes, session_key=session_key)
+    m = (machines or {}).get(machine)
+    info = dict(getattr(m, "grant_info", None) or {})
+    if not getattr(m, "grant", "") or not info:
+        raise ClaudeCodeError(
+            f"{machine} hasn't given Hermes a grant. Its owner runs, on {machine}: "
+            "tenuo-claude worker grant --to <key from /claude key> --share <folder>")
+    granted = {**config, "commands": [str(c) for c in info.get("commands") or []]}
+    read_only = bool(args.get("read_only"))
+    push = None if read_only or args.get("push") is False else info.get("push")
+    return Request(id=request_id, task=task.strip(), machine=machine, workspace=workspace,
+                   commands=choose_commands(granted, args.get("commands")), read_only=read_only,
+                   minutes=minutes, session_key=session_key,
+                   branch=branch_for(push, args.get("branch"), request_id), grant=info)
 
 
 def describe(request: Request) -> str:
@@ -369,16 +401,21 @@ def describe(request: Request) -> str:
     if request.commands:
         may.append("run " + ", ".join(request.commands))
     task = request.task if len(request.task) <= 400 else request.task[:400] + "…"
-    return (
-        f"Claude Code request {request.id}\n"
-        f"Machine: {where}\n"
-        f"Folder: {request.workspace}\n"
-        f"May: {'; '.join(may)}\n"
-        f"Never: git push, other programs, files outside the folder, web access\n"
-        f"For: {request.minutes} min\n"
-        f"Task: {task}\n\n"
-        f"Approve or deny: /claude"
-    )
+    lines = [f"Claude Code request {request.id}", f"Machine: {where}", f"Folder: {request.workspace}",
+             f"May: {'; '.join(may)}"]
+    if request.branch:
+        lines.append(f"Push: only branch {request.branch} to {request.grant.get('remote') or 'origin'}, "
+                     f"done by {request.machine} itself (Claude can't push)")
+        lines.append("Never: other branches, other programs, files outside the folder, web access")
+    else:
+        lines.append("Never: git push, other programs, files outside the folder, web access")
+    lines.append(f"For: {request.minutes} min")
+    if request.machine != LOCAL:
+        back = "Claude's answer and denied calls" if request.grant.get("report") == "full" else \
+            "status, branch, commit ids and counts"
+        lines.append(f"Reports back: {back} ({request.machine}'s setting)")
+    lines.append(f"Task: {task}")
+    return "\n".join(lines) + "\n\nApprove or deny: /claude"
 
 
 class Requests:
@@ -420,7 +457,7 @@ class Requests:
 
 
 def _summary(out: Dict[str, Any], request: Request, run_id: str) -> Dict[str, Any]:
-    return {
+    summary = {
         "ok": bool(out.get("ok")),
         "request": request.id,
         "run": run_id,
@@ -429,43 +466,170 @@ def _summary(out: Dict[str, Any], request: Request, run_id: str) -> Dict[str, An
         "minutes": request.minutes,
         "allowed_commands": request.commands,
         "read_only": request.read_only,
-        "result": out.get("result"),
         "error": out.get("error"),
-        "denied": [{"tool": d.get("tool"), "args": d.get("args")} for d in out.get("denied") or []][:20],
-        "denied_count": len(out.get("denied") or []),
         "allowed_count": out.get("allowed"),
+        "denied_count": out.get("denied_count", len(out.get("denied") or [])),
         "receipts": out.get("receipts"),
     }
+    if request.machine != LOCAL:
+        summary.update(branch=out.get("branch") or request.branch or None, pushed=bool(out.get("pushed")),
+                       commits=list(out.get("commits") or [])[:20], report=out.get("report") or "summary",
+                       verified=out.get("verified") or "unsigned")
+    if "result" in out:
+        summary["result"] = out.get("result")
+    if "denied" in out:
+        summary["denied"] = [{"tool": d.get("tool"), "args": d.get("args")} for d in out.get("denied") or []][:20]
+    return summary
+
+
+def standing_grant(machine: Any, issuer: Any) -> Any:
+    """The machine's grant to Hermes, checked: signed by the machine's key, to Hermes's key, unexpired."""
+    from tenuo import Authorizer, PublicKey, Warrant
+
+    if not machine.grant:
+        raise ClaudeCodeError(f"{machine.name} hasn't given Hermes a grant (tenuo-claude worker grant)")
+    root = Warrant.from_base64(machine.grant)
+    try:
+        Authorizer(trusted_roots=[PublicKey.from_bytes(base64.b64decode(machine.public_key))]).verify_chain([root])
+    except Exception as exc:
+        raise ClaudeCodeError(f"{machine.name}'s grant doesn't check out ({exc})") from exc
+    if root.authorized_holder.to_bytes() != issuer.public_key.to_bytes():
+        raise ClaudeCodeError(f"{machine.name}'s grant is for a different Hermes key; see /claude key")
+    return root
+
+
+def narrow(root: Any, issuer: Any, machine_key: Any, request: Request, folder: str) -> Any:
+    """Hermes's part: the machine's grant, narrowed to this request, held by the machine.
+
+    Tenuo refuses any widening (another branch, a command or folder the grant doesn't
+    cover, a longer time), so a request outside the grant fails here, before the card.
+    """
+    from tenuo import Exact, Subpath
+
+    caps: Dict[str, Any] = {}
+    for cap in FILE_CAPS:
+        if request.read_only and cap in ("write_file", "edit_file"):
+            continue
+        caps[cap] = {"path": Subpath(folder)}
+    if request.commands:
+        caps[COMMAND_CAP] = {"command": command_constraint(request.commands)}
+    if request.branch:
+        caps["git_push"] = {"remote": Exact(request.grant.get("remote") or "origin"),
+                            "branch": Exact(request.branch)}
+    ttl = min(request.minutes * 60, max(1, int(root.ttl_remaining.total_seconds())))
+    try:
+        return root.attenuate(caps, issuer, ttl_seconds=ttl, holder=machine_key)
+    except Exception as exc:
+        raise ClaudeCodeError(f"that is outside {request.machine}'s grant ({exc})") from exc
+
+
+def machine_folder(machine: Any, request: Request) -> str:
+    share = str(request.grant.get("share") or machine.root or "").rstrip("/")
+    return share + "/" + request.workspace
+
+
+def precheck(home: Path, hub: Any, request: Request) -> None:
+    """Refuse up front what the machine's grant doesn't allow, so the owner never approves it."""
+    from tenuo import PublicKey
+
+    machine = hub.machines[request.machine]
+    root = standing_grant(machine, issuer_key(home))
+    narrow(root, issuer_key(home), PublicKey.from_bytes(base64.b64decode(machine.public_key)),
+           request, machine_folder(machine, request))
+
+
+APPROVAL_TOOL = "claude_approval"
+
+
+def sign_approval(issuer: Any, root: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    """The owner's approval, signed by Hermes as holder of the machine's grant (a Tenuo proof)."""
+    import tenuo_core
+    from tenuo.meta import argument_json
+
+    ts = int(time.time())
+    env = tenuo_core.sign_meta([root], issuer, APPROVAL_TOOL, argument_json(record), ts)
+    return {**record, "proof": {"warrant": env["warrant"], "signature": env["signature"], "ts": ts}}
+
+
+def approval_ok(record: Dict[str, Any], hermes_key: Any) -> bool:
+    """True when Hermes's own key signed this approval and it hasn't changed since."""
+    import tenuo_core
+    from tenuo.meta import argument_json
+
+    proof = record.get("proof")
+    if not isinstance(proof, dict):
+        return False
+    body = {k: v for k, v in record.items() if k != "proof"}
+    try:
+        chain = list(tenuo_core.decode_warrant_stack_base64(proof["warrant"]))
+        if chain[-1].authorized_holder.to_bytes() != hermes_key.public_key.to_bytes():
+            return False
+        return bool(tenuo_core.verify_meta(proof["warrant"], proof["signature"], APPROVAL_TOOL,
+                                           argument_json(body), int(proof["ts"])))
+    except Exception:
+        return False
+
+
+def verify_report(report: Dict[str, Any], machine_key_b64: str, grant_id: str) -> str:
+    """'signed' when the machine signed this report under this job's grant; otherwise why not."""
+    import tenuo_core
+    from tenuo.meta import argument_json
+
+    proof = report.get("proof")
+    if not isinstance(proof, dict):
+        return "unsigned"
+    body = {k: v for k, v in report.items() if k != "proof"}
+    try:
+        chain = list(tenuo_core.decode_warrant_stack_base64(proof["warrant"]))
+        if chain[-1].authorized_holder.to_bytes() != base64.b64decode(machine_key_b64):
+            return "signed by another key"
+        if chain[0].id != grant_id:
+            return "signed under another grant"
+        ok = tenuo_core.verify_meta(proof["warrant"], proof["signature"], REPORT_TOOL,
+                                    argument_json(body), int(proof["ts"]))
+    except Exception as exc:
+        return f"bad signature ({type(exc).__name__})"
+    return "signed" if ok else "bad signature"
 
 
 def run_on_machine(config: Dict[str, Any], home: Path, hub: Any, request: Request,
                    on_progress=None) -> Dict[str, Any]:
-    """Sign a grant held by the machine's key and hand the job to it; wait for the result."""
+    """Narrow the machine's grant to this request, hand it the job, and wait for its signed report."""
+    import tenuo_core
     from tenuo import PublicKey
     from hermes_tenuo.claude_remote import Job
 
     machine = hub.machines[request.machine]
     if not machine.online:
         raise ClaudeCodeError(f"{request.machine} is not connected. On it, start: tenuo-claude worker")
-    folder = machine.root.rstrip("/") + "/" + request.workspace
     issuer = issuer_key(home)
-    warrant, _ = mint_grant(issuer, folder, request.commands, request.minutes * 60,
-                            read_only=request.read_only,
-                            holder_public_key=PublicKey.from_bytes(base64.b64decode(machine.public_key)))
+    root = standing_grant(machine, issuer)
+    leaf = narrow(root, issuer, PublicKey.from_bytes(base64.b64decode(machine.public_key)), request,
+                  machine_folder(machine, request))
+    stack = tenuo_core.encode_warrant_stack([root, leaf])
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + request.id
     run_dir = home / "hermes-tenuo" / "claude-code" / "runs" / run_id
     run_dir.mkdir(parents=True, mode=0o700)
-    _write_private(run_dir / "warrant", warrant.to_base64())
-    payload = {"id": run_id, "task": request.task, "folder": request.workspace,
-               "warrant": warrant.to_base64(), "minutes": request.minutes,
-               "issuer": _b64(issuer.public_key.to_bytes())}
+    _write_private(run_dir / "warrant", stack)
+    approval = sign_approval(issuer, root, {
+        "type": "claude_code.approval", "request": request.id, "machine": request.machine,
+        "task_sha256": hashlib.sha256(request.task.encode()).hexdigest(), "folder": request.workspace,
+        "commands": request.commands, "read_only": request.read_only, "branch": request.branch,
+        "minutes": request.minutes, "grant": root.id, "warrant": leaf.id,
+        "session": hashlib.sha256(request.session_key.encode()).hexdigest()[:16] if request.session_key else "",
+        "approved_at": int(time.time())})
+    (run_dir / "approval.json").write_text(json.dumps(approval, indent=2))
+    payload = {"id": run_id, "task": request.task, "folder": request.workspace, "warrant": stack,
+               "minutes": request.minutes, "branch": request.branch or None}
     if config["model"]:
         payload["model"] = config["model"]
     job = Job(id=run_id, machine=request.machine, payload=payload, on_progress=on_progress)
-    logger.info("hermes-tenuo: claude_code request %s sent to %s (warrant %s)",
-                request.id, request.machine, warrant.id)
+    logger.info("hermes-tenuo: claude_code request %s sent to %s (grant %s → warrant %s)",
+                request.id, request.machine, root.id, leaf.id)
     hub.submit(job)
     out = hub.wait(job, request.minutes * 60 + 120) or {"ok": False, "error": "no result from the machine in time"}
+    out = dict(out)
+    out["verified"] = verify_report(out, machine.public_key, root.id)
     (run_dir / "result.json").write_text(json.dumps(out, indent=2))
     return _summary(out, request, run_id)
 
@@ -486,14 +650,24 @@ def finished_text(request: Request, out: Dict[str, Any]) -> str:
     lines = [f"Claude Code on {where} {'finished' if out.get('ok') else 'stopped'} (request {request.id})."]
     if out.get("error"):
         lines.append(f"Problem: {out['error']}")
+    if out.get("pushed"):
+        commits = out.get("commits") or []
+        lines.append(f"Pushed {out.get('branch')}: {', '.join(commits[:5])}"
+                     + (f" (+{len(commits) - 5})" if len(commits) > 5 else ""))
+    elif request.branch and out.get("ok"):
+        lines.append(f"Nothing pushed: no new commits on {request.branch}.")
     lines.append(f"Checked calls: {out.get('allowed_count') or 0} allowed, {out.get('denied_count') or 0} denied.")
     for d in (out.get("denied") or [])[:5]:
         arg = next(iter((d.get("args") or {}).values()), "")
         lines.append(f"Denied: {d.get('tool')} {str(arg)[:120]}")
     receipts = out.get("receipts") or {}
     if receipts:
-        lines.append(f"Receipt log: {receipts.get('count')} entries, chain "
-                     f"{'intact' if receipts.get('chain_ok') else 'BROKEN'}.")
+        lines.append(f"Receipts: {receipts.get('count')}, chain "
+                     f"{'intact' if receipts.get('chain_ok') else 'BROKEN'}"
+                     + (f", signed by {where}" if receipts.get("signed_by") else "") + ".")
+    if request.machine != LOCAL:
+        verified = out.get("verified") or "unsigned"
+        lines.append(f"Report: {'signed by ' + where + ' ✓' if verified == 'signed' else verified.upper()}.")
     return "\n".join(lines)
 
 
@@ -504,11 +678,12 @@ def finished_text(request: Request, out: Dict[str, Any]) -> str:
 DESCRIPTION = (
     "Hand a coding task to Claude Code under a narrow, expiring grant the owner approves: it may "
     "read (and unless read_only, edit) files in one folder and run only the listed git and test "
-    "commands, never git push or other programs. Use it when the owner asks for code work in a "
+    "commands. Claude Code itself never pushes; on a machine whose owner allows it, the machine "
+    "pushes the work to one new branch afterwards. Use it when the owner asks for code work in a "
     "repository. Pass on what the owner said about scope: machine, folder (workspace), which "
-    "commands, read_only, and minutes. The owner then approves with /claude; this tool returns "
-    "at once with the request id. Don't call it again for the same task; tell the owner it is "
-    "waiting for their approval. The result arrives as a later message."
+    "commands, read_only, branch, and minutes. The owner then approves with /claude; this tool "
+    "returns at once with the request id. Don't call it again for the same task; tell the owner it "
+    "is waiting for their approval. The result arrives as a later message."
 )
 
 
@@ -532,9 +707,16 @@ def schema(config: Dict[str, Any]) -> Dict[str, Any]:
                                              "\"calc-demo\". On this host: the folder's absolute path."},
                 "commands": {"type": "array", "items": {"type": "string"},
                              "description": "Commands Claude Code may run, as the owner chose them, e.g. "
-                                            "[\"git diff\", \"pytest\"]. Each must be one of: "
-                                            + ", ".join(config["commands"])
-                                            + " (or a narrower form). Omit for all of them; [] for none."},
+                                            "[\"git diff\", \"pytest\"]. Each must be one the host or "
+                                            "machine allows (or a narrower form); /claude status lists "
+                                            "them. Omit for all of them; [] for none."},
+                "branch": {"type": "string",
+                           "description": "On a machine that allows pushing: a short name for the branch "
+                                          "the work is pushed to, e.g. \"issue-78\" (it becomes "
+                                          "claude/issue-78). Omit to use the request id."},
+                "push": {"type": "boolean",
+                         "description": "False when the owner doesn't want the work pushed. Default: "
+                                        "push to a new branch where the machine allows it."},
                 "read_only": {"type": "boolean",
                               "description": "True when the owner only wants Claude Code to read and "
                                              "report (review, explain), not change files."},
@@ -545,6 +727,55 @@ def schema(config: Dict[str, Any]) -> Dict[str, Any]:
             "additionalProperties": False,
         },
     }
+
+
+def status_text(hub: Any, waiting: List[Request]) -> str:
+    lines = []
+    for name, m in (hub.machines.items() if hub else []):
+        if not m.online:
+            lines.append(f"{name}: not connected")
+            continue
+        info = m.grant_info or {}
+        if not m.grant or not info:
+            lines.append(f"{name}: connected, no grant to Hermes yet (/claude key)")
+            continue
+        lines.append(f"{name}: connected; its grant runs until {str(info.get('expires_at', '?'))[:16]}\n"
+                     f"  folders in {info.get('share')}\n"
+                     f"  commands: {', '.join(info.get('commands') or []) or 'none'}\n"
+                     f"  push: {info.get('push') or 'never'}; reports back: {info.get('report', 'summary')}")
+    lines.append(f"Waiting for approval: {', '.join(r.id for r in waiting) or 'none'}")
+    return "\n".join(lines)
+
+
+def audit_text(home: Path, limit: int = 5) -> str:
+    """The last few machine runs: who approved what, under which grant, and what came back."""
+    runs = home / "hermes-tenuo" / "claude-code" / "runs"
+    dirs = sorted((d for d in runs.glob("*") if (d / "approval.json").exists()), reverse=True)[:limit] \
+        if runs.exists() else []
+    if not dirs:
+        return "No Claude Code runs on machines yet."
+    key = issuer_key(home)
+    lines = []
+    for d in dirs:
+        try:
+            approval = json.loads((d / "approval.json").read_text())
+            result = json.loads((d / "result.json").read_text()) if (d / "result.json").exists() else {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        receipts = result.get("receipts") or {}
+        state = "running" if not result else ("ok" if result.get("ok") else "stopped")
+        lines.append(
+            f"{approval.get('request')} on {approval.get('machine')} · {state} · "
+            f"{time.strftime('%m-%d %H:%M', time.localtime(approval.get('approved_at', 0)))}\n"
+            f"  approved: {approval.get('folder')}, {len(approval.get('commands') or [])} commands, "
+            f"push {approval.get('branch') or 'none'}, {approval.get('minutes')} min "
+            f"(approval {'signed ✓' if approval_ok(approval, key) else 'BAD SIGNATURE'})\n"
+            f"  grant {str(approval.get('grant'))[-8:]} → warrant {str(approval.get('warrant'))[-8:]}\n"
+            + (f"  back: {'pushed ' + str(result.get('branch')) if result.get('pushed') else 'nothing pushed'}"
+               f", {len(result.get('commits') or [])} commits, {receipts.get('count', 0)} receipts "
+               f"(chain {'intact' if receipts.get('chain_ok') else 'BROKEN'}), report {result.get('verified')}"
+               if result else "  back: nothing yet"))
+    return "\n".join(lines)
 
 
 def _bound_session_key() -> str:
@@ -610,10 +841,12 @@ def register(ctx: Any) -> bool:
     def handler(args: Dict[str, Any], **_kw: Any) -> str:
         try:
             session_key = _bound_session_key()
-            request = build_request(config, args, session_key)
-            if request.machine != LOCAL and hub is not None and not hub.machines[request.machine].online:
-                raise ClaudeCodeError(
-                    f"{request.machine} is not connected. On that machine, start `tenuo-claude worker`.")
+            request = build_request(config, args, session_key, hub.machines if hub else None)
+            if request.machine != LOCAL:
+                if not hub.machines[request.machine].online:
+                    raise ClaudeCodeError(
+                        f"{request.machine} is not connected. On that machine, start `tenuo-claude worker`.")
+                precheck(hermes_home(), hub, request)
             if not config["approval"]:
                 request.state = "approved"
                 out = run_request(config, hermes_home(), hub, request)
@@ -635,15 +868,17 @@ def register(ctx: Any) -> bool:
             return json.dumps({"ok": False, "error": f"claude_code failed ({type(exc).__name__})"})
 
     def command(raw_args: str = "", session_key: str = "", **_kw: Any) -> str:
-        """``/claude`` (buttons), ``/claude approve <id>``, ``/claude deny <id>``, ``/claude status``."""
+        """``/claude`` (buttons), ``approve|deny <id>``, ``status``, ``key``, ``audit``."""
         words = (raw_args or "").split()
         verb = words[0].lower() if words else ""
         if verb == "status":
-            lines = [f"{name}: {'connected, sharing ' + m.root if m.online else 'not connected'}"
-                     for name, m in (hub.machines.items() if hub else [])]
-            waiting = requests.waiting(session_key)
-            lines.append(f"Waiting for approval: {', '.join(r.id for r in waiting) or 'none'}")
-            return "\n".join(lines)
+            return status_text(hub, requests.waiting(session_key))
+        if verb == "key":
+            key = _b64(issuer_key(hermes_home()).public_key.to_bytes())
+            return (f"Hermes's key for Claude Code grants:\n{key}\n\nOn your machine:\n"
+                    f"tenuo-claude worker --name <name> grant --to {key} --share <folder>")
+        if verb == "audit":
+            return audit_text(hermes_home())
         if verb in ("approve", "deny") and len(words) == 2:
             choice, request_id = verb, words[1]
         else:
@@ -687,7 +922,7 @@ def register(ctx: Any) -> bool:
         ctx.register_tool(TOOL_NAME, "tenuo", tool_schema, handler)
     if config["approval"] and hasattr(ctx, "register_command"):
         ctx.register_command("claude", command, description="Approve or deny Claude Code requests",
-                             args_hint="[approve <id> | deny <id> | status]")
+                             args_hint="[approve <id> | deny <id> | status | key | audit]")
     logger.info("hermes-tenuo: claude_code tool on (here: %s; machines: %s; approval %s)",
                 ", ".join(config["workspaces"]) or "off", ", ".join(config["machines"]) or "none",
                 "on" if config["approval"] else "off")

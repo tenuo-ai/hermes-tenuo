@@ -27,6 +27,41 @@ def _config(tmp_path, monkeypatch, **over):
     return cc.load_config({"claude_code": block})
 
 
+GRANT_COMMANDS = ["git status", "git diff", "git add", "git commit", "python3 -m pytest"]
+
+
+def _standing_grant(machine_key, hermes_pub, *, share="/Users/me/code", push="claude/*", days=1,
+                    commands=GRANT_COMMANDS, report="summary"):
+    """What `tenuo-claude worker grant` signs on the machine."""
+    from tenuo import Exact, Pattern, Subpath, Warrant
+    b = Warrant.mint_builder()
+    for cap in cc.FILE_CAPS:
+        b = b.capability(cap, {"path": Subpath(share)})
+    b = b.capability(cc.COMMAND_CAP, {"command": cc.command_constraint(commands)})
+    if push:
+        b = b.capability("git_push", {"remote": Exact("origin"), "branch": Pattern(push)})
+    w = b.holder(hermes_pub).ttl(int(days * 86400)).mint(machine_key)
+    info = {"id": w.id, "share": share, "commands": commands, "push": push, "remote": "origin",
+            "report": report, "expires_at": str(w.expires_at())}
+    return w.to_base64(), info
+
+
+def _machine(tmp_path, monkeypatch, **grant_kw):
+    """A config with one connected machine that granted this Hermes; returns (config, machine key, home)."""
+    from tenuo import SigningKey
+    key = SigningKey.generate()
+    pub = base64.b64encode(key.public_key.to_bytes()).decode()
+    monkeypatch.setenv("TEST_WORKER_TOKEN", "s3cret")
+    config = cc.load_config({"claude_code": {"listen": "127.0.0.1:0", "machines": {
+        "laptop": {"public_key": pub, "token_env": "TEST_WORKER_TOKEN"}}}})
+    home = tmp_path / "home"
+    hermes = cc.issuer_key(home)
+    m = config["machines"]["laptop"]
+    m.grant, m.grant_info = _standing_grant(key, grant_kw.pop("to", hermes.public_key), **grant_kw)
+    m.root, m.last_seen = "/Users/me/code", time.time()
+    return config, key, home
+
+
 def test_machines_need_listen_and_valid_keys(tmp_path):
     with pytest.raises(ValueError, match="listen"):
         cc.load_config({"claude_code": {"machines": {"m": {"public_key": _key_b64()[1], "token_env": "X"}}}})
@@ -34,27 +69,144 @@ def test_machines_need_listen_and_valid_keys(tmp_path):
         cc.load_config({"claude_code": {"listen": "x:1", "machines": {"m": {"public_key": "bad", "token_env": "X"}}}})
 
 
-def test_build_request_for_a_machine(tmp_path, monkeypatch):
+def test_a_machine_without_a_grant_is_refused(tmp_path, monkeypatch):
     config = _config(tmp_path, monkeypatch)
+    with pytest.raises(cc.ClaudeCodeError, match="hasn't given Hermes a grant"):
+        cc.build_request(config, {"task": "fix it", "workspace": "calc-demo"}, "sk", config["machines"])
+
+
+def test_build_request_for_a_machine(tmp_path, monkeypatch):
+    config, _, _ = _machine(tmp_path, monkeypatch)
+    machines = config["machines"]
     r = cc.build_request(config, {"task": "fix it", "workspace": "calc-demo", "commands": ["git diff"],
-                                  "minutes": 999}, "sk")
-    assert (r.machine, r.workspace, r.commands, r.minutes, r.session_key) == \
-        ("laptop", "calc-demo", ["git diff"], config["max_minutes"], "sk")
+                                  "minutes": 999, "branch": "issue 78"}, "sk", machines)
+    assert (r.machine, r.workspace, r.commands, r.minutes, r.session_key, r.branch) == \
+        ("laptop", "calc-demo", ["git diff"], config["max_minutes"], "sk", "claude/issue-78")
+    assert cc.build_request(config, {"task": "x", "workspace": "a", "branch": "claude/x"}, "", machines).branch \
+        == "claude/x"
+    assert cc.build_request(config, {"task": "x", "workspace": "a", "read_only": True}, "", machines).branch == ""
+    assert cc.build_request(config, {"task": "x", "workspace": "a", "push": False}, "", machines).branch == ""
+    # The machine's grant decides the commands, not Hermes's config.
+    with pytest.raises(cc.ClaudeCodeError, match="not allowed"):
+        cc.build_request(config, {"task": "x", "workspace": "a", "commands": ["npm test"]}, "", machines)
     for bad in ("../x", "/etc", "a/../b", "a b"):
         with pytest.raises(cc.ClaudeCodeError):
-            cc.build_request(config, {"task": "x", "workspace": bad})
+            cc.build_request(config, {"task": "x", "workspace": bad}, "", machines)
     with pytest.raises(cc.ClaudeCodeError):
-        cc.build_request(config, {"task": "x", "workspace": "a", "machine": "other"})
+        cc.build_request(config, {"task": "x", "workspace": "a", "machine": "other"}, "", machines)
 
 
 def test_card_says_what_is_granted(tmp_path, monkeypatch):
-    config = _config(tmp_path, monkeypatch)
+    config, _, _ = _machine(tmp_path, monkeypatch)
     r = cc.build_request(config, {"task": "review", "workspace": "calc-demo", "commands": ["git diff"],
-                                  "read_only": True, "minutes": 10})
+                                  "read_only": True, "minutes": 10}, "", config["machines"])
     card = cc.describe(r)
     assert "laptop" in card and "calc-demo" in card and "git diff" in card and "10 min" in card
     assert "read files" in card and "edit" not in card.split("May:")[1].split("\n")[0]
-    assert "/claude" in card
+    assert "Never: git push" in card and "/claude" in card
+    r = cc.build_request(config, {"task": "fix", "workspace": "calc-demo", "branch": "issue-78"}, "",
+                         config["machines"])
+    card = cc.describe(r)
+    assert "Push: only branch claude/issue-78 to origin" in card and "Claude can't push" in card
+    assert "status, branch, commit ids" in card
+
+
+def test_precheck_refuses_what_the_grant_does_not_cover(tmp_path, monkeypatch):
+    config, _, home = _machine(tmp_path, monkeypatch)
+    hub = cr.Hub(config["machines"])
+    ok = cc.build_request(config, {"task": "fix", "workspace": "calc-demo"}, "", hub.machines)
+    cc.precheck(home, hub, ok)
+    ok.branch = "main"  # a branch outside claude/*
+    with pytest.raises(cc.ClaudeCodeError, match="outside laptop's grant"):
+        cc.precheck(home, hub, ok)
+    ok.branch, ok.commands = "claude/x", ["git push"]
+    with pytest.raises(cc.ClaudeCodeError, match="outside laptop's grant"):
+        cc.precheck(home, hub, ok)
+
+
+def test_precheck_refuses_a_grant_to_another_hermes_or_signed_by_someone_else(tmp_path, monkeypatch):
+    from tenuo import SigningKey
+    config, _, home = _machine(tmp_path, monkeypatch, to=SigningKey.generate().public_key)
+    hub = cr.Hub(config["machines"])
+    r = cc.build_request(config, {"task": "fix", "workspace": "calc-demo"}, "", hub.machines)
+    with pytest.raises(cc.ClaudeCodeError, match="different Hermes key"):
+        cc.precheck(home, hub, r)
+    # A grant Hermes signed itself (not the machine) doesn't check out.
+    hermes = cc.issuer_key(home)
+    hub.machines["laptop"].grant, _ = _standing_grant(hermes, hermes.public_key)
+    with pytest.raises(cc.ClaudeCodeError, match="doesn't check out"):
+        cc.precheck(home, hub, r)
+
+
+def _fake_worker(hub, machine_key, base_url, pub, report_extra=None):
+    """Stands in for `tenuo-claude worker`: checks the job against its own key, reports signed."""
+    import tenuo_core
+    from tenuo import Authorizer
+    from tenuo.meta import argument_json
+    seen = {}
+
+    def loop():
+        job = None
+        for _ in range(20):
+            status, job = _call(base_url + "/claude/next", pub=pub)
+            if job:
+                break
+        chain = list(tenuo_core.decode_warrant_stack_base64(job["warrant"]))
+        Authorizer(trusted_roots=[machine_key.public_key]).verify_chain(chain)
+        seen["job"], seen["chain"] = job, chain
+        report = {"ok": True, "branch": job["branch"], "pushed": True, "commits": ["a1b2c3d"],
+                  "allowed": 7, "denied_count": 2, "receipts": {"count": 10, "head": "h", "chain_ok": True,
+                                                               "signed_by": pub},
+                  "grant": chain[0].id, "warrant": chain[-1].id, "report": "summary", **(report_extra or {})}
+        ts = int(time.time())
+        env = tenuo_core.sign_meta(chain, machine_key, cc.REPORT_TOOL, argument_json(report), ts)
+        report["proof"] = {"warrant": env["warrant"], "signature": env["signature"], "ts": ts}
+        _call(base_url + f"/claude/jobs/{job['id']}/result", "POST", report, pub=pub)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return seen, t
+
+
+def test_run_on_machine_narrows_the_grant_and_checks_the_signed_report(tmp_path, monkeypatch):
+    config, key, home = _machine(tmp_path, monkeypatch)
+    from http.server import ThreadingHTTPServer
+    hub = cr.Hub(config["machines"])
+    hub.server = ThreadingHTTPServer(("127.0.0.1", 0), cr._handler(hub))
+    threading.Thread(target=hub.server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(cr, "POLL_SECONDS", 5)
+    base = f"http://127.0.0.1:{hub.server.server_address[1]}"
+    pub = config["machines"]["laptop"].public_key
+    m = hub.machines["laptop"]
+    grant_b64, info = m.grant, m.grant_info
+
+    seen, t = _fake_worker(hub, key, base, pub)
+    # The worker's poll refreshes the grant from its headers; keep it.
+    monkeypatch.setattr(hub, "next_job", lambda machine, root, public_key, wait, grant="", grant_info="":
+                        cr.Hub.next_job(hub, machine, root, public_key, wait, grant_b64,
+                                        base64.b64encode(json.dumps(info).encode()).decode()))
+    r = cc.build_request(config, {"task": "fix issue 78", "workspace": "calc-demo", "branch": "issue-78",
+                                  "commands": ["git commit", "python3 -m pytest"]}, "owner", hub.machines)
+    out = cc.run_on_machine(config, home, hub, r)
+    t.join(5)
+    root, leaf = seen["chain"]
+    assert root.id == info["id"] and leaf.depth == 1
+    assert leaf.authorized_holder.to_bytes() == key.public_key.to_bytes()
+    assert seen["job"]["folder"] == "calc-demo" and seen["job"]["branch"] == "claude/issue-78"
+    assert out["ok"] and out["pushed"] and out["branch"] == "claude/issue-78" and out["verified"] == "signed"
+    assert "result" not in out  # summary report: Claude's words don't come back
+    text = cc.finished_text(r, out)
+    assert "Pushed claude/issue-78: a1b2c3d" in text and "Report: signed by laptop ✓" in text
+    audit = cc.audit_text(home)
+    assert r.id in audit and "approval signed ✓" in audit and "report signed" in audit
+    # A changed report no longer verifies.
+    run_dir = next((home / "hermes-tenuo" / "claude-code" / "runs").glob("*"))
+    result = json.loads((run_dir / "result.json").read_text())
+    result.pop("verified")
+    assert cc.verify_report({**result, "pushed": False}, pub, root.id) == "bad signature"
+    assert cc.verify_report(result, pub, "another-grant") == "signed under another grant"
+    approval = json.loads((run_dir / "approval.json").read_text())
+    assert cc.approval_ok(approval, cc.issuer_key(home))
+    assert not cc.approval_ok({**approval, "branch": "main"}, cc.issuer_key(home))
 
 
 def test_requests_are_approved_once_and_only_in_their_conversation():
