@@ -145,3 +145,34 @@ assert Path(module._pkg.__file__).resolve() == Path({str(ROOT / 'hermes_tenuo/__
 from hermes_tenuo.hands import device
 '''
     subprocess.run([sys.executable, '-c', code], cwd=tmp_path, check=True)
+
+
+def _pm_copy(monkeypatch, tmp_path, *, edit=False):
+    """Hermes 0.23's package manager also installs an enabled git plugin as a package
+    (``…/plugin-sources/hermes-tenuo-<hash>/hermes_tenuo``) and may import it first."""
+    import shutil
+    from types import ModuleType
+    copy = tmp_path / "plugin-sources" / "hermes-tenuo-abc" / "hermes_tenuo"
+    shutil.copytree(ROOT / "hermes_tenuo", copy, ignore=shutil.ignore_patterns("__pycache__"))
+    if edit:
+        (copy / "_version.py").write_text((copy / "_version.py").read_text() + "\n# changed\n")
+    loaded = ModuleType("hermes_tenuo")
+    loaded.__file__ = str(copy / "__init__.py")
+    loaded.register = lambda ctx: "pm copy"
+    loaded.HermesGuard = loaded.HermesAuditEvent = object
+    monkeypatch.setitem(sys.modules, "hermes_tenuo", loaded)
+    return _load_as_hermes_does()
+
+
+def test_identical_package_manager_copy_is_the_same_installation(monkeypatch, tmp_path):
+    module = _pm_copy(monkeypatch, tmp_path)
+    assert module.register(None) == "pm copy"
+
+
+def test_package_manager_copy_with_different_code_still_blocks(monkeypatch, tmp_path):
+    from tests.test_integration_smoke import MockCtx
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+    module = _pm_copy(monkeypatch, tmp_path, edit=True)
+    ctx = MockCtx()
+    module.register(ctx)
+    assert ctx.call_hook("pre_tool_call", tool_name="terminal", args={})["action"] == "block"
