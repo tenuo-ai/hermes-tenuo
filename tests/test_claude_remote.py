@@ -81,7 +81,11 @@ def test_build_request_for_a_machine(tmp_path, monkeypatch):
     r = cc.build_request(config, {"task": "fix it", "workspace": "calc-demo", "commands": ["git diff"],
                                   "minutes": 999, "branch": "issue 78"}, "sk", machines)
     assert (r.machine, r.workspace, r.commands, r.minutes, r.session_key, r.branch) == \
-        ("laptop", "calc-demo", ["git diff"], config["max_minutes"], "sk", "claude/issue-78")
+        ("laptop", "calc-demo", ["git diff", "git add", "git commit"], config["max_minutes"], "sk",
+         "claude/issue-78")
+    # Without a push, the owner's commands stand as chosen.
+    assert cc.build_request(config, {"task": "x", "workspace": "a", "commands": ["git diff"], "push": False},
+                            "", machines).commands == ["git diff"]
     assert cc.build_request(config, {"task": "x", "workspace": "a", "branch": "claude/x"}, "", machines).branch \
         == "claude/x"
     assert cc.build_request(config, {"task": "x", "workspace": "a", "read_only": True}, "", machines).branch == ""

@@ -69,7 +69,8 @@ DEFAULT_COMMANDS = (
 # Claude tool → capability, as tenuo-claude-code maps them.
 FILE_CAPS = ("read_file", "write_file", "edit_file", "glob", "grep")
 COMMAND_CAP = "run_command"
-REPORT_TOOL = "claude_report"   # what the machine signs its report as (tenuo-claude-code worker)
+REPORT_TOOL = "claude_report"
+COMMIT_COMMANDS = ("git add", "git commit")   # what the machine signs its report as (tenuo-claude-code worker)
 
 
 class ClaudeCodeError(ValueError):
@@ -388,9 +389,12 @@ def build_request(config: Dict[str, Any], args: Dict[str, Any], session_key: str
     granted = {**config, "commands": [str(c) for c in info.get("commands") or []]}
     read_only = bool(args.get("read_only"))
     push = None if read_only or args.get("push") is False else info.get("push")
+    commands = choose_commands(granted, args.get("commands"))
+    if push:
+        # Work that is pushed has to be committed first.
+        commands += [c for c in COMMIT_COMMANDS if c in granted["commands"] and c not in commands]
     return Request(id=request_id, task=task.strip(), machine=machine, workspace=workspace,
-                   commands=choose_commands(granted, args.get("commands")), read_only=read_only,
-                   minutes=minutes, session_key=session_key,
+                   commands=commands, read_only=read_only, minutes=minutes, session_key=session_key,
                    branch=branch_for(push, args.get("branch"), request_id), grant=info)
 
 
@@ -706,10 +710,10 @@ def schema(config: Dict[str, Any]) -> Dict[str, Any]:
                               "description": "On a machine: the folder name inside its shared folder, e.g. "
                                              "\"calc-demo\". On this host: the folder's absolute path."},
                 "commands": {"type": "array", "items": {"type": "string"},
-                             "description": "Commands Claude Code may run, as the owner chose them, e.g. "
+                             "description": "Only when the owner named the commands Claude Code may run, e.g. "
                                             "[\"git diff\", \"pytest\"]. Each must be one the host or "
-                                            "machine allows (or a narrower form); /claude status lists "
-                                            "them. Omit for all of them; [] for none."},
+                                            "machine allows (or a narrower form). Otherwise omit it: "
+                                            "Claude Code gets all the allowed ones. [] for none."},
                 "branch": {"type": "string",
                            "description": "On a machine that allows pushing: a short name for the branch "
                                           "the work is pushed to, e.g. \"issue-78\" (it becomes "
@@ -875,8 +879,8 @@ def register(ctx: Any) -> bool:
             return status_text(hub, requests.waiting(session_key))
         if verb == "key":
             key = _b64(issuer_key(hermes_home()).public_key.to_bytes())
-            return (f"Hermes's key for Claude Code grants:\n{key}\n\nOn your machine:\n"
-                    f"tenuo-claude worker --name <name> grant --to {key} --share <folder>")
+            return (f"Hermes's key for Claude Code grants:\n`{key}`\n\nOn your machine:\n"
+                    f"`tenuo-claude worker --name <name> grant --to {key} --share <folder>`")
         if verb == "audit":
             return audit_text(hermes_home())
         if verb in ("approve", "deny") and len(words) == 2:
