@@ -65,7 +65,7 @@ class Machine:
 
     @property
     def online(self) -> bool:
-        return bool(self.root) and time.time() - self.last_seen < ONLINE_SECONDS
+        return time.time() - self.last_seen < ONLINE_SECONDS
 
 
 @dataclass

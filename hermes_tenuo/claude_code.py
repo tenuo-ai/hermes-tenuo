@@ -28,6 +28,32 @@ attacker can already run Claude Code directly.
 What the grant can't stop: a granted command runs code from the repo (a test
 suite, a git hook), and that code is not checked call by call. Keep the command
 list short, and run Hermes in a container.
+
+The owner approves each request in chat (``/claude``). For the result to come
+back into the conversation, allow the plugin to post to it::
+
+    plugins:
+      entries:
+        hermes-tenuo:
+          allow_gateway_injection: true
+
+Claude Code on the owner's own machines
+---------------------------------------
+Add ``machines`` and ``listen`` (see ``claude_remote``). There the machine is the
+authority, not Hermes:
+
+1. ``/claude key`` shows Hermes's key. On the machine, its owner runs
+   ``tenuo-claude worker grant --to <key> --share ~/code`` (read and edit inside
+   ``~/code``, the git and test commands it lists, push only ``claude/*``), then
+   ``tenuo-claude worker --hermes http://<hermes>:<port>``.
+2. A request is checked against that grant before the card is shown; anything
+   outside it is refused without asking.
+3. On approval Hermes narrows the grant to the folder, the commands, one branch
+   and the minutes. The machine checks the chain back to its own key, runs Claude
+   Code, pushes that one branch itself, and sends a signed report.
+4. ``tenuo-claude worker revoke`` on the machine stops a running job at once.
+   ``/claude audit`` lists approvals (signed by Hermes) and reports (signed by the
+   machine).
 """
 
 from __future__ import annotations

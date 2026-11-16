@@ -344,3 +344,14 @@ def test_denied_request_never_runs(tmp_path, monkeypatch):
     cc.register(ctx)
     ctx.tools["claude_code"]({"task": "fix", "workspace": str(ws)})
     assert "Denied" in ctx.commands["claude"]("", session_key="owner-chat")
+
+
+def test_a_machine_that_revoked_its_grant_is_still_connected(monkeypatch):
+    hub, pub, base = _hub(monkeypatch)
+    req = urllib.request.Request(base + "/claude/next", headers={
+        "Authorization": "Bearer s3cret", "X-Tenuo-Machine": "laptop", "X-Tenuo-Public-Key": pub})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        assert resp.status == 204
+    m = hub.machines["laptop"]
+    assert m.online and not m.grant
+    assert "connected, no grant" in cc.status_text(hub, [])
