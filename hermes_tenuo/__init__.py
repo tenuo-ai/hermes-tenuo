@@ -116,6 +116,11 @@ def register(ctx: Any) -> None:
     enforcing: dict = {"guard": None}  # the enforcing guard, once there is one
     from hermes_tenuo import a2a_delegate, mcp_proofs
     a2a_delegate.register(ctx, lambda: enforcing["guard"])
+    try:
+        from hermes_tenuo import claude_code
+        claude_code.register(ctx)
+    except Exception as exc:
+        logger.warning("hermes-tenuo: claude_code tool did not start (%s)", exc)
     mcp_resolver = mcp_proofs.register(ctx, lambda: enforcing["guard"])
     try:
         guard = build_plugin_guard(ctx)
