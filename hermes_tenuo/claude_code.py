@@ -158,13 +158,42 @@ def issuer_key(home: Path) -> Any:
     return key
 
 
-def mint_grant(issuer: Any, workspace: str, commands: List[str], ttl_seconds: int) -> Tuple[Any, Any]:
+def choose_commands(config: Dict[str, Any], requested: Any) -> List[str]:
+    """The commands for this run: the owner's choice, each inside the configured list.
+
+    A requested command must be one of the configured prefixes or a narrower form of
+    one ("git commit" or "pytest tests/unit" when "pytest" is configured). None means
+    the configured list; an empty list means no commands at all.
+    """
+    if requested is None:
+        return list(config["commands"])
+    if not isinstance(requested, list) or not all(isinstance(c, str) for c in requested):
+        raise ClaudeCodeError("commands must be a list of command prefixes")
+    chosen: List[str] = []
+    for raw in requested:
+        command = " ".join(raw.split())
+        if not command:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_./:=+-]+( [A-Za-z0-9_./:=+-]+)*", command):
+            raise ClaudeCodeError(f"{raw!r} must be plain words, without shell syntax")
+        if not any(command == c or command.startswith(c + " ") for c in config["commands"]):
+            raise ClaudeCodeError(
+                f"{command!r} is not allowed here. Allowed: {', '.join(config['commands'])}")
+        if command not in chosen:
+            chosen.append(command)
+    return chosen
+
+
+def mint_grant(issuer: Any, workspace: str, commands: List[str], ttl_seconds: int,
+               *, read_only: bool = False) -> Tuple[Any, Any]:
     """(warrant, holder key) for one run."""
     from tenuo import SigningKey, Subpath, Warrant
 
     holder = SigningKey.generate()
     builder = Warrant.mint_builder()
     for cap in FILE_CAPS:
+        if read_only and cap in ("write_file", "edit_file"):
+            continue
         builder = builder.capability(cap, {"path": Subpath(workspace)})
     if commands:
         builder = builder.capability(COMMAND_CAP, {"command": command_constraint(commands)})
@@ -195,7 +224,8 @@ def tenuo_claude_command(config: Dict[str, Any]) -> str:
 
 
 def run_task(config: Dict[str, Any], home: Path, *, task: str, workspace: str,
-             minutes: int, runner=subprocess.run) -> Dict[str, Any]:
+             minutes: int, commands: Any = None, read_only: bool = False,
+             runner=subprocess.run) -> Dict[str, Any]:
     if not isinstance(task, str) or not task.strip():
         raise ClaudeCodeError("task is required")
     if len(task) > MAX_TASK_CHARS:
@@ -209,7 +239,8 @@ def run_task(config: Dict[str, Any], home: Path, *, task: str, workspace: str,
     binary = tenuo_claude_command(config)
 
     issuer = issuer_key(home)
-    warrant, holder = mint_grant(issuer, ws, config["commands"], minutes * 60)
+    chosen = choose_commands(config, commands)
+    warrant, holder = mint_grant(issuer, ws, chosen, minutes * 60, read_only=bool(read_only))
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:6]
     run_dir = home / "hermes-tenuo" / "claude-code" / "runs" / run_id
     run_dir.mkdir(parents=True, mode=0o700)
@@ -246,7 +277,8 @@ def run_task(config: Dict[str, Any], home: Path, *, task: str, workspace: str,
         "run": run_id,
         "workspace": ws,
         "minutes": minutes,
-        "allowed_commands": config["commands"],
+        "allowed_commands": chosen,
+        "read_only": bool(read_only),
         "result": out.get("result"),
         "error": out.get("error"),
         "denied": [{"tool": d.get("tool"), "args": d.get("args")} for d in out.get("denied") or []][:20],
@@ -264,7 +296,9 @@ DESCRIPTION = (
     "Hand a coding task to Claude Code, running on this machine under a narrow grant: it may "
     "read and edit files in one workspace folder and run only git status/diff/log/show/add/"
     "commit and test commands (never git push or other programs), for a limited time. Use it "
-    "when the owner asks for code changes in a repository. Blocks until Claude Code finishes. "
+    "when the owner asks for code changes in a repository. Pass on what the owner said about "
+    "scope: which commands (commands), whether it may change files (read_only) and for how "
+    "long (minutes). Blocks until Claude Code finishes. "
     "Report its result and any denied actions to the owner."
 )
 
@@ -279,6 +313,14 @@ SCHEMA = {
                                     "if known, and what done looks like (e.g. tests pass, change committed)."},
             "workspace": {"type": "string",
                           "description": "Absolute path of the repository folder to work in."},
+            "commands": {"type": "array", "items": {"type": "string"},
+                         "description": "Commands Claude Code may run, as the owner chose them, e.g. "
+                                        "[\"git diff\", \"pytest\"]. Each must be one of the allowed "
+                                        "commands or a narrower form of one. Omit for the default list; "
+                                        "[] for no commands."},
+            "read_only": {"type": "boolean",
+                          "description": "True when the owner only wants Claude Code to read and "
+                                         "report (review, explain), not change files."},
             "minutes": {"type": "integer", "minimum": 1,
                         "description": f"How long the grant lasts (default {DEFAULT_MINUTES})."},
         },
@@ -308,7 +350,9 @@ def register(ctx: Any) -> bool:
         try:
             result = run_task(config, hermes_home(), task=args.get("task", ""),
                               workspace=args.get("workspace", ""),
-                              minutes=args.get("minutes") or DEFAULT_MINUTES)
+                              minutes=args.get("minutes") or DEFAULT_MINUTES,
+                              commands=args.get("commands"),
+                              read_only=bool(args.get("read_only")))
             return json.dumps(result)
         except ClaudeCodeError as exc:
             return json.dumps({"ok": False, "error": str(exc)})

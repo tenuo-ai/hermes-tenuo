@@ -135,3 +135,28 @@ def test_register_only_when_configured(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry",
                         lambda ctx: {"claude_code": {"workspaces": [str(tmp_path)]}})
     assert cc.register(Ctx()) is True and calls == ["claude_code"]
+
+
+def test_owner_chooses_commands_within_the_configured_list(tmp_path):
+    config = _config(tmp_path)
+    assert cc.choose_commands(config, None) == config["commands"]
+    assert cc.choose_commands(config, []) == []
+    assert cc.choose_commands(config, ["git  diff", "pytest tests/unit", "git diff"]) == \
+        ["git diff", "pytest tests/unit"]
+    for bad in (["git push"], ["curl example.com"], ["pytest; rm -rf /"], ["gitx status"], "git diff"):
+        with pytest.raises(cc.ClaudeCodeError):
+            cc.choose_commands(config, bad)
+
+
+def test_read_only_grant_has_no_write_or_edit(tmp_path):
+    from tenuo import SigningKey
+    warrant, _ = cc.mint_grant(SigningKey.generate(), str(tmp_path), [], 60, read_only=True)
+    assert sorted(warrant.tools) == ["glob", "grep", "read_file"]
+
+
+def test_run_task_uses_the_owner_choice(tmp_path):
+    config = _config(tmp_path)
+    runner = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps({"ok": True}), "")
+    result = cc.run_task(config, tmp_path / "home", task="review", workspace=str(tmp_path / "ws"),
+                         minutes=5, commands=["git diff"], read_only=True, runner=runner)
+    assert result["allowed_commands"] == ["git diff"] and result["read_only"] is True
