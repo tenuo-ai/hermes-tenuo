@@ -31,20 +31,14 @@ def cmd_key(_args: Any) -> int:
 
 def cmd_check(_args: Any) -> int:
     """Offline readiness check. Exit 1 when something configured cannot be used."""
-    from dotenv import dotenv_values
-
     from hermes_tenuo.a2a_delegate import load_sender_config
     from hermes_tenuo.a2a_ingress import IngressRefused, load_ingress, public_key_b64
-    from hermes_tenuo._home import hermes_home
 
+    print("Checking tokens in the process environment only; Hermes .env is not read.")
     problems: List[str] = []
     ingress = None
-    profile_env = {}
     try:
-        profile_env = {key: value for key, value in dotenv_values(
-            hermes_home() / ".env", encoding="utf-8-sig",
-        ).items() if value is not None}
-        ingress = load_ingress(None, read_env=lambda name: profile_env.get(name, os.environ.get(name)))
+        ingress = load_ingress(None, read_env=os.environ.get)
     except Exception as exc:
         problems.append(f"a2a_ingress: {exc} (every inbound A2A message would be dropped)")
     if ingress is not None:
@@ -68,7 +62,7 @@ def cmd_check(_args: Any) -> int:
     if sender is not None:
         print(f"Delegating: on. Peers: {', '.join(sorted(sender.peers))}")
         for peer in sender.peers.values():
-            token = "set" if profile_env.get(peer.token_env, os.environ.get(peer.token_env)) else f"{peer.token_env} not in this environment"
+            token = "set" if os.environ.get(peer.token_env) else f"{peer.token_env} not in this environment"
             print(f"  {peer.name}: {peer.url} (token {token})")
             if token != "set":
                 problems.append(f"a2a_delegation: peer {peer.name!r} needs {peer.token_env}")

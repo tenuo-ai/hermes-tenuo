@@ -30,7 +30,7 @@ def _configure(tmp_path, monkeypatch, *, srl_path=None):
 """)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("A2A_BEARER_TOKEN", raising=False)
-    (home / ".env").write_text("A2A_PEER_TOKENS=agent-a:example-token\n")
+    monkeypatch.setenv("A2A_PEER_TOKENS", "agent-a:example-token")
     return root
 
 
@@ -84,7 +84,9 @@ def test_check_reports_an_unusable_ingress_block(tmp_path, monkeypatch, capsys):
 ])
 def test_check_refuses_unsafe_receiver_authentication(tmp_path, monkeypatch, capsys, env, message):
     _configure(tmp_path, monkeypatch)
-    (tmp_path / "hermes-home" / ".env").write_text(env)
+    for line in env.splitlines():
+        name, value = line.split("=", 1)
+        monkeypatch.setenv(name, value)
     assert a2a_cli.cmd_check(None) == 1
     error = capsys.readouterr().err
     assert message in error and "example-token" not in error and "second-token" not in error
@@ -118,8 +120,9 @@ def test_sender_readiness_requires_each_peer_token(tmp_path, monkeypatch, capsys
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("PEER_TEST_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("PEER_TEST_TOKEN=dotenv-only-token\n")
     if token is not None:
-        (tmp_path / ".env").write_text(f"PEER_TEST_TOKEN={token}\n")
+        monkeypatch.setenv("PEER_TEST_TOKEN", token)
     monkeypatch.setattr("hermes_tenuo.a2a_ingress.load_ingress", lambda *a, **kw: None)
     monkeypatch.setattr("hermes_tenuo.a2a_delegate.load_sender_config", lambda ctx: SenderConfig(
         peers={"peer": Peer("peer", "http://peer:9900", "unused", "PEER_TEST_TOKEN")}))
@@ -147,3 +150,31 @@ def test_concurrent_revocations_preserve_all_ids_and_increase_version(tmp_path):
     loaded = SignedRevocationList.from_bytes(srl.read_bytes())
     assert loaded.version == 8
     assert set(loaded.revoked_ids) == {f"tnu_wrt_{i}" for i in range(8)}
+
+
+@pytest.mark.parametrize("process_token", [None, "agent-a:example-token"])
+def test_check_ignores_hermes_dotenv(tmp_path, monkeypatch, capsys, process_token):
+    from pathlib import Path
+
+    _configure(tmp_path, monkeypatch)
+    home = tmp_path / "hermes-home"
+    (home / ".env").write_text("A2A_PEER_TOKENS=agent-a:dotenv-only-token\nA2A_BEARER_TOKEN=shared\n")
+    if process_token is None:
+        monkeypatch.delenv("A2A_PEER_TOKENS")
+    else:
+        monkeypatch.setenv("A2A_PEER_TOKENS", process_token)
+    original_open = Path.open
+    dotenv_reads = []
+
+    def forbid_dotenv_read(path, *args, **kwargs):
+        if path == home / ".env":
+            dotenv_reads.append(path)
+            raise AssertionError("The check must not read Hermes .env")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_dotenv_read)
+    assert a2a_cli.cmd_check(None) == (0 if process_token else 1)
+    assert not dotenv_reads
+    output = capsys.readouterr()
+    assert "dotenv-only-token" not in output.out + output.err
+    assert "example-token" not in output.out + output.err
