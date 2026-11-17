@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-tenuo"
-version = "0.4.1"
+version = "0.4.2"
 description = "Signed, expiring tool permissions and local workspaces for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,6 @@ classifiers = [
 ]
 dependencies = [
     "path-jail>=0.3,<0.4",
-    "python-dotenv>=1,<2",
     "tenuo>=0.3.7,<0.4",
 ]
 

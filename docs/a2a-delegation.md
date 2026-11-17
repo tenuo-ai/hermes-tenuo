@@ -48,7 +48,10 @@ operator root ──▶ A's warrant ──(tenuo_delegate)──▶ grant held b
            revocation_list: ~/.hermes/tenuo/revocations.srl   # optional
    ```
 
-4. Run `hermes-tenuo a2a check`, then restart the gateway.
+4. Run `hermes-tenuo a2a check` with the A2A token variables exported in the process
+   environment, then restart the gateway. The standalone check does not read Hermes's
+   `.env`; a token stored only there is reported as missing. Runtime secret resolution
+   inside Hermes is unchanged.
 
 Use one receiver per sending agent until [upstream #146669](https://github.com/NousResearch/hermes-agent/issues/146669)
 is fixed. Hermes serves `ListTasks` and `GetTask` before the plugin's dispatch hook and shares

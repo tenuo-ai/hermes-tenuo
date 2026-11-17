@@ -1,5 +1,5 @@
 name: hermes-tenuo
-version: 0.4.1
+version: 0.4.2
 description: >
   Signed, expiring tool permissions and local workspaces for Hermes Agent.
   Tenuo warrants control which tools and arguments each task can use, including
@@ -13,7 +13,6 @@ kind: standalone
 # `hermes plugins enable` installs these into the Hermes runtime, after consent.
 python_dependencies:
   - "path-jail>=0.3,<0.4"
-  - "python-dotenv>=1,<2"
   - "tenuo>=0.3.7,<0.4"
 requires_hermes: ">=0.20"
 tags: [authorization, warrants, hands, remote, workspace, sandbox, tenuo]

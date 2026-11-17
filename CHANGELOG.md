@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - Unreleased
+
+- `hermes-tenuo a2a check` checks tokens only in the process environment and no longer
+  reads Hermes's `.env`. Export the A2A token variables before running the check.
+- Remove the `python-dotenv` dependency.
+
 ## 0.4.1 - 2026-11-13
 
 Main additions since 0.4.0, each off until configured:
