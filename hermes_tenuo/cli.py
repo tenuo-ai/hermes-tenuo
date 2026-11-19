@@ -295,18 +295,23 @@ def _mint_local(args: argparse.Namespace) -> int:
     signing_key_b64 = base64.b64encode(agent_key.secret_key_bytes()).decode()
     trusted_root_b64 = base64.b64encode(control_key.public_key.to_bytes()).decode()
 
+    from hermes_tenuo._home import hermes_home
+    from hermes_tenuo._version import __version__
+    config_path = hermes_home() / "config.yaml"
+    env_path = hermes_home() / ".env"
+
     if args.output == "env":
         print(f"export TENUO_WARRANT={warrant_b64}")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
         print(f"export TENUO_TRUSTED_ROOT={trusted_root_b64}")
     elif args.output == "yaml":
-        print("# Add to ~/.hermes/config.yaml under plugins.entries.hermes-tenuo:")
+        print(f"# Add to {config_path} under plugins.entries.hermes-tenuo:")
         print(f"warrant: {warrant_b64}")
         print(f"trusted_root: {trusted_root_b64}")
-        print("# Export before running hermes:")
-        print(f"# export TENUO_SIGNING_KEY={signing_key_b64}")
+        print(f"# Put this line in {env_path}, then restart Hermes:")
+        print(f"# TENUO_SIGNING_KEY={signing_key_b64}")
     else:  # "full" default
-        print("# ── Hermes config (add to ~/.hermes/config.yaml) ────────────────")
+        print(f"# ── 1. Hermes config: add to {config_path}")
         print("plugins:")
         print("  enabled:")
         print("    - hermes-tenuo")
@@ -316,8 +321,13 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"      trusted_root: {trusted_root_b64}")
         print("      signing_key_env: TENUO_SIGNING_KEY")
         print()
-        print("# ── Signing key (export before running hermes) ───────────────────")
-        print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
+        print(f"# ── 2. Signing key: put this line in {env_path}")
+        print(f"TENUO_SIGNING_KEY={signing_key_b64}")
+        print()
+        print("# ── 3. Check, then restart Hermes (a running gateway keeps the old settings)")
+        print("#   export TENUO_SIGNING_KEY=...   (same value, for the check in this shell)")
+        print(f"#   uvx hermes-tenuo=={__version__} doctor")
+        print("#   hermes gateway restart")
         print()
         print("# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
