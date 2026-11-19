@@ -28,7 +28,7 @@ import os
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class DelegationPlanError(ValueError):
@@ -40,6 +40,16 @@ class Level:
     ttl_seconds: Optional[int]
     tools: Dict[str, Dict[str, dict]]  # tool → arg → {"binaries": [...], "patterns": [...]}
     max_uses: Dict[str, int] = field(default_factory=dict)  # tool → uses a grant at this level allows
+
+    def use_limits(self, tools: Iterable[str]) -> Dict[str, int]:
+        """The effective limits for retained tools, with aliases sharing the minimum."""
+        keep = set(tools)
+        limits: Dict[str, int] = {}
+        for tool, limit in self.max_uses.items():
+            if tool in keep:
+                name = tool.removeprefix("tool:")
+                limits[name] = min(limits.get(name, limit), limit)
+        return limits
 
 
 def _members(spec: dict) -> List[Any]:
@@ -206,13 +216,16 @@ def parse_plan(data: Any) -> DelegationPlan:
     )
     for depth in range(1, plan.max_depth + 1):
         plan.constraints_for(depth)  # report ancestry errors at load time
-    for depth in range(2, plan.max_depth + 1):
-        above = plan.levels[depth - 2].max_uses
-        for tool, uses in plan.levels[depth - 1].max_uses.items():
-            if tool in above and uses > above[tool]:
+    inherited_limits: Dict[str, int] = {}
+    for index, level in enumerate(plan.levels):
+        limits = level.use_limits(level.tools)
+        for tool, uses in limits.items():
+            if tool in inherited_limits and uses > inherited_limits[tool]:
                 raise DelegationPlanError(
-                    f"levels[{depth - 1}]: {tool}.{MAX_USES} is larger than the level above allows"
+                    f"levels[{index}]: {tool}.{MAX_USES} is larger than the level above allows"
                 )
+        # Omitting a limit does not erase the budget inherited from ancestors.
+        inherited_limits.update(limits)
     return plan
 
 

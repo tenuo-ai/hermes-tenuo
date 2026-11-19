@@ -817,12 +817,7 @@ class HermesGuard:
                 if not {"delegate_task", "tenuo_delegate"} & {t.removeprefix("tool:") for t in keep}:
                     # No local or remote delegation capability remains.
                     builder.terminal()
-                limits: Dict[str, int] = {}
-                for tool, limit in level.max_uses.items():
-                    if tool in keep:
-                        name = tool.removeprefix("tool:")
-                        # Aliases spend the same budget; neither entry may relax it.
-                        limits[name] = min(limits.get(name, limit), limit)
+                limits = level.use_limits(keep)
                 uses = UseBudget(limits, parent_uses) if limits or parent_uses is not None else None
                 planned.append(_ChildGrant(
                     builder.delegate(parent_key), chain, child_key, goal, invocation_id, uses=uses,

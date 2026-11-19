@@ -482,3 +482,29 @@ def test_plugin_bridge_preserves_empty_unkeyed_arguments_across_workers():
             tool_name="ping", args=payload, session_id="s1", registry_check=True),
     ) is None
     assert plugin.pre_tool_call_hook(tool_name="ping", args=args, session_id="s1", registry_check=True) is not None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_plan_validation_compares_effective_alias_limits(reverse):
+    plan = copy.deepcopy(NESTED)
+    plan["root"]["tools"]["tool:terminal"] = {"command": PUSH}
+    parent = [("terminal", {"command": PUSH, "max_uses": 1}),
+              ("tool:terminal", {"command": PUSH, "max_uses": 3}), ("delegate_task", {})]
+    child = [("terminal", {"command": PUSH, "max_uses": 2}),
+             ("tool:terminal", {"command": PUSH, "max_uses": 1})]
+    plan["levels"][0]["tools"] = dict(reversed(parent) if reverse else parent)
+    plan["levels"][1]["tools"] = dict(reversed(child) if reverse else child)
+    guard, _ = _guard(plan)  # Both levels have an effective terminal limit of 1.
+    assert _delegate(guard, "s0", "s1") is None
+    assert _delegate(guard, "s1", "s2") is None
+    assert _push(guard, "s2") is None
+    assert _push(guard, "s2") is not None
+    assert _push(guard, "s1") is not None
+
+
+def test_plan_validation_preserves_limits_across_an_omitting_level():
+    plan = copy.deepcopy(NESTED)
+    plan["levels"][1]["tools"]["delegate_task"] = {}
+    plan["levels"].append({"ttl_seconds": 60, "tools": {"terminal": {"command": PUSH, "max_uses": 3}}})
+    with pytest.raises(DelegationPlanError, match="larger than the level above"):
+        parse_plan(plan)
