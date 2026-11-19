@@ -60,11 +60,44 @@ def _blocking_register(message: str):
     return register
 
 
+def _package_digest(package_dir: Path):
+    """A digest of every file in *package_dir* except bytecode, or None if it can't be read."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        files = sorted(
+            p for p in package_dir.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
+        )
+        for path in files:
+            digest.update(path.relative_to(package_dir).as_posix().encode() + b"\0")
+            digest.update(path.read_bytes() + b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _same_package(source: str) -> bool:
+    """Whether the loaded package at *source* is this checkout or a byte-identical copy of it.
+
+    Enabling the plugin can also install it as a package from a copy of this
+    checkout (Hermes keeps that copy in its managed environment), so the same
+    code is loaded from a second path. Only a copy with different contents is a
+    conflict.
+    """
+    loaded_dir = Path(source).resolve().parent
+    if loaded_dir == _PKG_DIR.resolve():
+        return True
+    ours = _package_digest(_PKG_DIR)
+    return ours is not None and ours == _package_digest(loaded_dir)
+
+
 def _load_package():
     loaded = sys.modules.get("hermes_tenuo")
     if loaded is not None:
         source = getattr(loaded, "__file__", None)
-        if source and Path(source).resolve() == (_PKG_DIR / "__init__.py").resolve():
+        if source and _same_package(source):
             return loaded
         raise InstallConflict(
             f"hermes-tenuo installation conflict: {source} is already loaded, "

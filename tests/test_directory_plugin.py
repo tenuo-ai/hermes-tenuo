@@ -122,6 +122,53 @@ def test_directory_conflict_also_denies_through_the_registry(monkeypatch, tmp_pa
     assert ctx.call_hook("pre_tool_call", tool_name="terminal", args={})["action"] == "block"
 
 
+def _load_copy(tmp_path, monkeypatch, change=None):
+    """Load hermes_tenuo from a copy of this checkout, as an enabled plugin's managed install does."""
+    import shutil
+    copy = tmp_path / "plugin-sources" / "hermes-tenuo-copy"
+    shutil.copytree(ROOT / "hermes_tenuo", copy / "hermes_tenuo",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    if change:
+        change(copy / "hermes_tenuo")
+    for name in [n for n in sys.modules if n == "hermes_tenuo" or n.startswith("hermes_tenuo.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(copy))
+    import hermes_tenuo
+    assert Path(hermes_tenuo.__file__).resolve().parent == (copy / "hermes_tenuo").resolve()
+    return hermes_tenuo
+
+
+def test_directory_reuses_an_identical_managed_copy(monkeypatch, tmp_path):
+    """The same code loaded from Hermes's managed copy is not a conflict."""
+    from tests.test_integration_smoke import MockCtx
+    loaded = _load_copy(tmp_path, monkeypatch)
+    module = _load_as_hermes_does()
+    assert module.register is loaded.register
+    ctx = MockCtx()
+    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: {})
+    for var in ("TENUO_WARRANT", "TENUO_CONNECT_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    module.register(ctx)
+    assert "tenuo-scope" in ctx.skills
+
+
+def test_directory_blocks_a_managed_copy_with_different_code(monkeypatch, tmp_path):
+    """A copy that differs by one byte is still another installation."""
+    from tests.test_integration_smoke import MockCtx
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+
+    def edit(pkg):
+        version = pkg / "_version.py"
+        version.write_text(version.read_text() + "\n# changed\n")
+
+    _load_copy(tmp_path, monkeypatch, change=edit)
+    module = _load_as_hermes_does()
+    ctx = MockCtx()
+    module.register(ctx)
+    verdict = ctx.call_hook("pre_tool_call", tool_name="terminal", args={"command": "id"})
+    assert verdict["action"] == "block" and "installation conflict" in verdict["message"]
+
+
 def test_directory_reuses_itself_when_already_loaded():
     first = _load_as_hermes_does()
     second = _load_as_hermes_does("hermes_plugins.hermes_tenuo_again")
