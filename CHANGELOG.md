@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.4.2 - Unreleased
+## 0.4.3 - Unreleased
+
+- Fix every tool call being blocked as an installation conflict after
+  `hermes plugins enable` on Hermes 0.23. Hermes also installs an enabled plugin as a
+  package from its own copy of the checkout; a copy holding the same code is now treated
+  as the same installation, and `hermes-tenuo doctor` reports it as one. A loaded package
+  with different code still blocks every call. Affects 0.4.0 to 0.4.2.
+
+## 0.4.2 - 2026-11-17
 
 - `hermes-tenuo a2a check` checks tokens only in the process environment and no longer
   reads Hermes's `.env`. Export the A2A token variables before running the check.

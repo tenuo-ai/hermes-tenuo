@@ -122,26 +122,56 @@ def test_directory_conflict_also_denies_through_the_registry(monkeypatch, tmp_pa
     assert ctx.call_hook("pre_tool_call", tool_name="terminal", args={})["action"] == "block"
 
 
-def _load_copy(tmp_path, monkeypatch, change=None):
-    """Load hermes_tenuo from a copy of this checkout, as an enabled plugin's managed install does."""
+def _package_modules():
+    return {n: m for n, m in sys.modules.items() if n == "hermes_tenuo" or n.startswith("hermes_tenuo.")}
+
+
+@pytest.fixture
+def load_copy(tmp_path, monkeypatch):
+    """Load hermes_tenuo from a copy of this checkout, as an enabled plugin's managed install does.
+
+    Afterwards every module the copy brought in is dropped and this checkout's
+    own modules are put back, so later tests never see a mix of the two.
+    """
     import shutil
-    copy = tmp_path / "plugin-sources" / "hermes-tenuo-copy"
-    shutil.copytree(ROOT / "hermes_tenuo", copy / "hermes_tenuo",
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    if change:
-        change(copy / "hermes_tenuo")
-    for name in [n for n in sys.modules if n == "hermes_tenuo" or n.startswith("hermes_tenuo.")]:
-        monkeypatch.delitem(sys.modules, name)
-    monkeypatch.syspath_prepend(str(copy))
-    import hermes_tenuo
-    assert Path(hermes_tenuo.__file__).resolve().parent == (copy / "hermes_tenuo").resolve()
-    return hermes_tenuo
+    before = _package_modules()
+
+    def load(change=None):
+        copy = tmp_path / "plugin-sources" / "hermes-tenuo-copy"
+        shutil.copytree(ROOT / "hermes_tenuo", copy / "hermes_tenuo",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        if change:
+            change(copy / "hermes_tenuo")
+        for name in _package_modules():
+            del sys.modules[name]
+        monkeypatch.syspath_prepend(str(copy))
+        import hermes_tenuo
+        assert Path(hermes_tenuo.__file__).resolve().parent == (copy / "hermes_tenuo").resolve()
+        return hermes_tenuo
+
+    yield load
+    for name in _package_modules():
+        del sys.modules[name]
+    sys.modules.update(before)
 
 
-def test_directory_reuses_an_identical_managed_copy(monkeypatch, tmp_path):
-    """The same code loaded from Hermes's managed copy is not a conflict."""
+def _edit_version(pkg):
+    version = pkg / "_version.py"
+    version.write_text(version.read_text() + "\n# changed\n")
+
+
+def _add_stray_files(pkg):
+    (pkg / ".DS_Store").write_bytes(b"\0")
+    (pkg / "cli.py~").write_text("backup")
+    (pkg / "hands" / ".ruff_cache").mkdir()
+    (pkg / "hands" / ".ruff_cache" / "CACHEDIR.TAG").write_text("cache")
+
+
+@pytest.mark.parametrize("change", [None, _add_stray_files])
+def test_directory_reuses_a_managed_copy_with_the_same_code(monkeypatch, load_copy, change):
+    """The same code loaded from Hermes's managed copy is not a conflict, whatever else lies beside it."""
     from tests.test_integration_smoke import MockCtx
-    loaded = _load_copy(tmp_path, monkeypatch)
+    loaded = load_copy(change)
     module = _load_as_hermes_does()
     assert module.register is loaded.register
     ctx = MockCtx()
@@ -152,21 +182,58 @@ def test_directory_reuses_an_identical_managed_copy(monkeypatch, tmp_path):
     assert "tenuo-scope" in ctx.skills
 
 
-def test_directory_blocks_a_managed_copy_with_different_code(monkeypatch, tmp_path):
-    """A copy that differs by one byte is still another installation."""
+def _blocked(module):
     from tests.test_integration_smoke import MockCtx
-    _fake_registry(monkeypatch, enforcement=False, denied=False)
-
-    def edit(pkg):
-        version = pkg / "_version.py"
-        version.write_text(version.read_text() + "\n# changed\n")
-
-    _load_copy(tmp_path, monkeypatch, change=edit)
-    module = _load_as_hermes_does()
     ctx = MockCtx()
     module.register(ctx)
     verdict = ctx.call_hook("pre_tool_call", tool_name="terminal", args={"command": "id"})
-    assert verdict["action"] == "block" and "installation conflict" in verdict["message"]
+    return verdict["action"] == "block" and "installation conflict" in verdict["message"]
+
+
+def test_directory_blocks_a_managed_copy_with_different_code(monkeypatch, load_copy):
+    """A copy that differs by one byte is still another installation."""
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+    load_copy(_edit_version)
+    assert _blocked(_load_as_hermes_does())
+
+
+def test_directory_blocks_a_copy_it_cannot_compare(monkeypatch, load_copy):
+    """A failed comparison blocks; it never leaves the plugin unloaded."""
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+    load_copy()
+
+    def unreadable(self):
+        raise UnicodeError("cannot read")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    assert _blocked(_load_as_hermes_does())
+
+
+def test_a_directory_without_code_has_no_digest(tmp_path):
+    """Two unreadable or empty trees must not compare as the same package."""
+    from hermes_tenuo import cli
+    shim = _load_as_hermes_does()
+    (tmp_path / "empty").mkdir()
+    for digest in (shim._package_digest, cli._package_digest):
+        assert digest(tmp_path / "missing") is None
+        assert digest(tmp_path / "empty") is None
+
+
+def test_doctor_compares_packages_as_the_directory_loader_does(tmp_path):
+    """Doctor keeps its own copy of the comparison; the two must agree."""
+    import shutil
+    from hermes_tenuo import cli
+    shim = _load_as_hermes_does()
+    package = ROOT / "hermes_tenuo"
+    assert shim._package_digest(package) == cli._package_digest(package) is not None
+    shipped = {p for p in package.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+    assert all(p.suffix in shim._COMPARED_SUFFIXES for p in shipped), "a packaged file type is not compared"
+    for change in (_add_stray_files, _edit_version):
+        copy = tmp_path / change.__name__ / "hermes_tenuo"
+        shutil.copytree(package, copy, ignore=shutil.ignore_patterns("__pycache__"))
+        change(copy)
+        assert shim._package_digest(copy) == cli._package_digest(copy)
+        assert (shim._package_digest(copy) == shim._package_digest(package)) is (change is _add_stray_files)
 
 
 def test_directory_reuses_itself_when_already_loaded():
