@@ -44,6 +44,8 @@ def _guard(plan, **kwargs):
     for tool in plan["root"]["tools"]:
         if tool.removeprefix("tool:") == "terminal":
             builder.capability(tool, command=constraint)
+        elif tool != "delegate_task":
+            builder.capability(tool)
     warrant = builder.ttl(3600).mint(root_key)
     events = []
     guard = HermesGuard(
@@ -362,8 +364,9 @@ def test_concurrent_unkeyed_calls_keep_separate_passes(hook_inside_middleware):
 
     def worker(index):
         try:
+            payload = dict(args)
             if not hook_inside_middleware:
-                assert _push(guard, "s1") is None
+                assert guard.pre_tool_call("terminal", payload, session_id="s1") is None
 
             def dispatch(payload):
                 if hook_inside_middleware:
@@ -374,9 +377,9 @@ def test_concurrent_unkeyed_calls_keep_separate_passes(hook_inside_middleware):
                 return guard.pre_tool_call("terminal", payload, session_id="s1", registry_check=True)
 
             results[index] = guard.around_tool_call(
-                tool_name="terminal", args=dict(args), session_id="s1", next_call=dispatch,
+                tool_name="terminal", args=payload, session_id="s1", next_call=dispatch,
             )
-            guard.post_tool_call("terminal", dict(args), "done", session_id="s1", status="success")
+            guard.post_tool_call("terminal", payload, "done", session_id="s1", status="success")
         except Exception as exc:
             errors.append(exc)
         finally:
@@ -403,11 +406,79 @@ def test_unkeyed_mcp_pass_cleanup_ignores_the_proof_carrier():
     guard._mcp_resolver = lambda name: "terminal" if name == wrapper else None
     assert _delegate(guard, "s0", "s1") is None
     args = {"command": "git push origin fix/123"}
-    assert guard.pre_tool_call(wrapper, dict(args), session_id="s1") is None
-    # Proof middleware inserted a carrier; downstream middleware then blocked
-    # dispatch without a post hook. Cleanup must still find the original pass.
+    proof_args = {**args, CARRIER: {"proof": "test"}}
+
+    def stopped(payload):
+        assert guard.pre_tool_call(wrapper, payload, session_id="s1") is None
+        return "blocked"
+
+    # The hook strips the proof, but cleanup receives the original arguments.
     assert guard.around_tool_call(
-        tool_name=wrapper, args={**args, CARRIER: {"proof": "test"}}, session_id="s1",
-        next_call=lambda payload: "blocked",
+        tool_name=wrapper, args=proof_args, session_id="s1", next_call=stopped,
     ) == "blocked"
-    assert guard.pre_tool_call(wrapper, dict(args), session_id="s1", registry_check=True) is not None
+    assert guard.pre_tool_call(wrapper, proof_args, session_id="s1", registry_check=True) is not None
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_unkeyed_hook_worker_hands_off_to_caller_and_post_worker(blocked):
+    from concurrent.futures import ThreadPoolExecutor
+
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    args = {"command": "git push origin fix/123"}
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        assert worker.submit(guard.pre_tool_call, "terminal", args, session_id="s1").result() is None
+        if blocked:
+            worker.submit(guard.post_tool_call, "terminal", args, "blocked",
+                          session_id="s1", status="blocked").result()
+        else:
+            assert guard.around_tool_call(
+                tool_name="terminal", args=args, session_id="s1",
+                next_call=lambda payload: guard.pre_tool_call("terminal", payload, session_id="s1", registry_check=True),
+            ) is None
+    assert guard.pre_tool_call("terminal", args, session_id="s1", registry_check=True) is not None
+
+
+@pytest.mark.parametrize("call_id", ["", "rewrite"])
+@pytest.mark.parametrize("allowed", [False, True])
+def test_argument_rewrites_reuse_only_this_invocations_reservation(monkeypatch, call_id, allowed):
+    monkeypatch.setitem(PUSH, "patterns", [r"^git push origin fix/(123|456)$"])
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    args = {"command": "git push origin fix/123"}
+    assert guard.pre_tool_call("terminal", args, session_id="s1", tool_call_id=call_id) is None
+
+    def rewrite_and_dispatch(payload):
+        final_args = {"command": "git push origin fix/456" if allowed else "git push origin main"}
+        return guard.pre_tool_call("terminal", final_args, session_id="s1", registry_check=True)
+
+    result = guard.around_tool_call(
+        tool_name="terminal", args=args, session_id="s1", tool_call_id=call_id,
+        next_call=rewrite_and_dispatch,
+    )
+    assert (result is None) == allowed
+    assert guard.pre_tool_call("terminal", args, session_id="s1", tool_call_id=call_id,
+                               registry_check=True) is not None
+
+
+def test_plugin_bridge_preserves_empty_unkeyed_arguments_across_workers():
+    from concurrent.futures import ThreadPoolExecutor
+    from hermes_tenuo._guard import PluginGuard
+
+    plan = {"version": 1, "root": {"tools": {"delegate_task": {}, "ping": {}}},
+            "levels": [{"ttl_seconds": 300, "tools": {"ping": {"max_uses": 1}}}]}
+    guard, _ = _guard(plan)
+    plugin = PluginGuard(guard)
+    plugin.registry_enforces()
+    assert _delegate(guard, "s0", "s1") is None
+    args = {}
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        assert worker.submit(plugin.pre_tool_call_hook, tool_name="ping", args=args, session_id="s1").result() is None
+    assert plugin.around_tool_call(
+        tool_name="ping", args=args, session_id="s1",
+        next_call=lambda payload: plugin.pre_tool_call_hook(
+            tool_name="ping", args=payload, session_id="s1", registry_check=True),
+    ) is None
+    assert plugin.pre_tool_call_hook(tool_name="ping", args=args, session_id="s1", registry_check=True) is not None

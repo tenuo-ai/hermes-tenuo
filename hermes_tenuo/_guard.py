@@ -224,6 +224,8 @@ class PluginGuard:
         self._guard._registry_enforces = True
 
     def around_tool_call(self, **kwargs: Any) -> Any:
+        if not self._guard._registry_enforces:
+            return kwargs["next_call"](kwargs.get("args"))
         return self._guard.around_tool_call(**kwargs)
 
     @property
@@ -242,7 +244,7 @@ class PluginGuard:
         try:
             result = self._guard.pre_tool_call(
                 tool_name=tool_name,
-                args=args or {},
+                args=args if args is not None else {},
                 task_id=task_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
@@ -250,7 +252,7 @@ class PluginGuard:
             )
         except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
             block = self._internal_error_block(tool_name, "authorization check", exc)
-            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            self._record_block(tool_name, args if args is not None else {}, block["message"], session_id, task_id, tool_call_id)
             return block
 
         if result is not None and not isinstance(result, dict):
@@ -259,7 +261,7 @@ class PluginGuard:
                 "authorization check",
                 TypeError(f"unexpected result type {type(result).__name__}"),
             )
-            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            self._record_block(tool_name, args if args is not None else {}, block["message"], session_id, task_id, tool_call_id)
             return block
 
         if result and result.get("action") == "block":
@@ -339,7 +341,7 @@ class PluginGuard:
     ) -> None:
         self._guard.post_tool_call(
             tool_name=tool_name,
-            args=args or {},
+            args=args if args is not None else {},
             result=result,
             task_id=task_id,
             session_id=session_id,

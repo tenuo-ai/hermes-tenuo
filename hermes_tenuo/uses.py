@@ -13,6 +13,19 @@ from typing import Dict, Hashable, Iterator, Optional
 _lock = threading.Lock()  # one lock for every budget: a use is taken along a whole chain
 
 
+class ArgumentIdentity:
+    """Retain an unkeyed call's argument object across Hermes hook worker threads."""
+
+    def __init__(self, args: dict) -> None:
+        self.args = args
+
+    def __hash__(self) -> int:
+        return id(self.args)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, ArgumentIdentity) and self.args is other.args
+
+
 class UseBudget:
     """How many times one grant may still use each tool that has a limit.
 
@@ -85,7 +98,7 @@ class UseBudget:
         """Discard only this invocation's passes, never another concurrent call's.
 
         An explicit ID matches even if middleware changed the arguments.
-        Unkeyed calls match their execution scope and proof-free arguments.
+        Unkeyed calls match their execution scope, independently of argument rewrites.
         """
         with _lock:
             tool_call_id = call[0]

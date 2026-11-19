@@ -1133,6 +1133,7 @@ class HermesGuard:
         """
         from hermes_tenuo.mcp_proofs import CARRIER, MCPMappingError
 
+        pass_args = args  # preserve the unkeyed invocation's identity before stripping its proof
         session_id, unattributed = self._attribute_session(session_id, task_id)
         if registry_check and not tool_call_id:
             invocation = self._registry_call.get()
@@ -1205,7 +1206,7 @@ class HermesGuard:
             return None
 
         result, _ = self._enforce(tool_name, args, signing_key, warrant, session_id, task_id, tool_call_id,
-                                  authorization_name=wrapped_name, registry_check=registry_check)
+                                  authorization_name=wrapped_name, registry_check=registry_check, pass_args=pass_args)
         return result
 
     def _bind_ingress_grant(self, session_id: str, task_id: str = "") -> Optional[str]:
@@ -1386,6 +1387,7 @@ class HermesGuard:
         *,
         authorization_name: Optional[str] = None,
         registry_check: bool = False,
+        pass_args: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
         """Return the hook response and the actual authorization decision.
 
@@ -1448,7 +1450,8 @@ class HermesGuard:
         used: Optional[Tuple[Any, str, Any]] = None
         if result.allowed:
             limit, used = self._take_use(
-                session_id, name, tool_call_id, (tool_name, args, session_id, task_id), registry_check,
+                session_id, name, tool_call_id,
+                (tool_name, pass_args if pass_args is not None else args, session_id, task_id), registry_check,
             )
             if limit is not None:
                 # A plugin policy refusal is not a Rust-attested authorization.
@@ -1541,17 +1544,21 @@ class HermesGuard:
     def _use_pass_key(
         self, tool_name: str, args: Dict[str, Any], session_id: str, task_id: str, tool_call_id: str,
     ) -> tuple:
-        args = self._without_mcp_carrier(tool_name, args)
-        key = self._call_key((tool_name, args, session_id, task_id))
+        from hermes_tenuo.uses import ArgumentIdentity
+
+        # A reservation belongs to the invocation, not an argument snapshot.
+        # The registry still verifies the final arguments before redeeming it.
+        key = (tool_name, session_id, task_id)
         invocation = self._registry_call.get()
         if tool_call_id:
             owner = None
         elif invocation is not None and invocation[:3] == (tool_name, session_id, task_id):
             owner = invocation[4]
         else:
-            # Legacy hooks outside middleware run synchronously on the caller's
-            # thread. Never let another thread redeem or delete their passes.
-            owner = threading.current_thread()
+            # Hermes can run pre/post hooks on separate worker threads before
+            # execution middleware starts. The shared argument object bridges
+            # that handoff without merging concurrent identical invocations.
+            owner = ArgumentIdentity(args)
         return tool_call_id, key, owner
 
     def around_tool_call(
@@ -1563,8 +1570,9 @@ class HermesGuard:
         Middleware scopes the ID to this execution (including concurrent calls),
         and removes unused passes even if execution exits without a post hook.
         """
+        args = args if args is not None else {}
         session_id, _ = self._attribute_session(session_id, task_id)
-        previous_key = self._use_pass_key(tool_name, args or {}, session_id, task_id, tool_call_id)
+        previous_key = self._use_pass_key(tool_name, args, session_id, task_id, tool_call_id)
         token = self._registry_call.set((tool_name, session_id, task_id, tool_call_id, object()))
         try:
             if not tool_call_id:
@@ -1572,13 +1580,13 @@ class HermesGuard:
                     budget = self._session_uses.get(session_id)
                 if budget is not None:
                     # Standalone handle_function_call fires its hook before
-                    # middleware. Transfer that thread's pass into this scope.
+                    # middleware. Transfer that invocation's pass into this scope.
                     budget.move_pass(previous_key, self._use_pass_key(
-                        tool_name, args or {}, session_id, task_id, tool_call_id))
+                        tool_name, args, session_id, task_id, tool_call_id))
             return next_call(args)
         finally:
             try:
-                self._finish_use_pass(tool_name, args or {}, session_id, task_id, tool_call_id)
+                self._finish_use_pass(tool_name, args, session_id, task_id, tool_call_id)
             finally:
                 self._registry_call.reset(token)
 
@@ -1693,11 +1701,12 @@ class HermesGuard:
         error_type: str = "",
     ) -> None:
         """Emit an audit event. Fires for every tool call, including audit-only mode."""
+        pass_args = args
         args = self._without_mcp_carrier(tool_name, args)
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
         session_id, unattributed = self._attribute_session(session_id, task_id)
-        self._finish_use_pass(tool_name, args, session_id, task_id, tool_call_id)
+        self._finish_use_pass(tool_name, pass_args, session_id, task_id, tool_call_id)
         pre = self._take_decision(
             tool_call_id, (tool_name, args, session_id, task_id), blocked=status == "blocked",
         )
