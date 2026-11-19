@@ -69,8 +69,8 @@ _COMPARED_SUFFIXES = (".py", ".md")
 def _package_digest(package_dir: Path):
     """A digest of the code and bundled skills in *package_dir*, or None if it can't be read.
 
-    Bytecode, editor backups and hidden files are not part of the package, so
-    they do not make two copies of the same code differ.
+    Bytecode, editor backups and hidden files or directories are not part of the
+    package, so they do not make two copies of the same code differ.
     """
     import hashlib
     import os
@@ -78,11 +78,15 @@ def _package_digest(package_dir: Path):
     digest = hashlib.sha256()
     try:
         files = sorted(
-            p for p in package_dir.rglob("*")
-            if p.suffix in _COMPARED_SUFFIXES and not p.name.startswith(".") and p.is_file()
+            (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
+            if p.suffix in _COMPARED_SUFFIXES
         )
-        for path in files:
-            digest.update(os.fsencode(path.relative_to(package_dir).as_posix()) + b"\0")
+        files = [
+            (name, p) for name, p in files
+            if not any(part.startswith(".") for part in name.parts) and p.is_file()
+        ]
+        for name, path in files:
+            digest.update(os.fsencode(name.as_posix()) + b"\0")
             digest.update(hashlib.sha256(path.read_bytes()).digest())
     except Exception:
         return None
@@ -98,7 +102,7 @@ def _same_package(source: str) -> bool:
     conflict, and so is one that cannot be compared.
     """
     try:
-        loaded_dir = Path(source).resolve().parent
+        loaded_dir = Path(source).parent.resolve()
         if loaded_dir == _PKG_DIR.resolve():
             return True
         ours = _package_digest(_PKG_DIR)

@@ -471,11 +471,15 @@ def _package_digest(package_dir: Path) -> Optional[str]:
     digest = hashlib.sha256()
     try:
         files = sorted(
-            p for p in package_dir.rglob("*")
-            if p.suffix in (".py", ".md") and not p.name.startswith(".") and p.is_file()
+            (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
+            if p.suffix in (".py", ".md")
         )
-        for path in files:
-            digest.update(os.fsencode(path.relative_to(package_dir).as_posix()) + b"\0")
+        files = [
+            (name, p) for name, p in files
+            if not any(part.startswith(".") for part in name.parts) and p.is_file()
+        ]
+        for name, path in files:
+            digest.update(os.fsencode(name.as_posix()) + b"\0")
             digest.update(hashlib.sha256(path.read_bytes()).digest())
     except Exception:
         return None
@@ -507,7 +511,7 @@ def _second_installation() -> Optional[Tuple[Path, str]]:
         return None
     if "_blocking_register" in shim:
         if "_same_package" in shim:
-            ours = _package_digest(Path(__file__).resolve().parent)
+            ours = _package_digest(Path(__file__).parent.resolve())
             if ours is not None and ours == _package_digest(directory / "hermes_tenuo"):
                 return directory, "same"
         return directory, "blocks"

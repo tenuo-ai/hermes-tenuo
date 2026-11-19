@@ -165,6 +165,9 @@ def _add_stray_files(pkg):
     (pkg / "cli.py~").write_text("backup")
     (pkg / "hands" / ".ruff_cache").mkdir()
     (pkg / "hands" / ".ruff_cache" / "CACHEDIR.TAG").write_text("cache")
+    (pkg / ".pytest_cache" / "v").mkdir(parents=True)
+    (pkg / ".pytest_cache" / "README.md").write_text("cache")
+    (pkg / ".pytest_cache" / "v" / "stale.py").write_text("cache")
 
 
 @pytest.mark.parametrize("change", [None, _add_stray_files])
