@@ -656,6 +656,7 @@ Two things stay outside this check:
 ```bash
 hermes-tenuo demo        # local allow/deny transcript (no Hermes process)
 hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--task ID] [--output full|yaml|env]
+hermes-tenuo mint --plan PLAN.json [--allow ...] [--ttl 1h]   # a warrant that delegates under a delegation plan
 hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
@@ -736,32 +737,14 @@ again, and every TTL is atomically capped to the parent's remaining lifetime.
 }
 ```
 
-The root warrant must use matching `All(...)` constraint structure; the
+`hermes-tenuo mint --plan PLAN.json` mints a warrant that holds what the plan's
+`root` lists and prints the `delegation_plan` setting with it. Add `--allow`
+for tools only the parent uses. A root warrant minted another way must use the
+matching `All(...)` constraint structure; the
 `hermes_tenuo.delegation.capability_members()` helper builds its members. Keep
 the plan operator-controlled, as a regular file that is not a symlink and is
 not group- or world-writable. Invalid or unreadable plans fail closed during
 plugin startup.
-
-A tool entry in a level may set `max_uses`, a positive integer: how many
-times a grant at that level may use the tool.
-
-```json
-"terminal": {
-  "max_uses": 1,
-  "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
-}
-```
-
-A use is taken when a call is allowed, before it runs, so a call that then
-fails still counts. Further calls are refused and logged. Grants delegated
-from a limited grant share its limit, and a level cannot set a higher limit
-than the level above it. Every `delegate_task` call makes a new grant with a
-new count; set `max_uses` on `delegate_task` to limit how often a child
-delegates. The root has no `max_uses`. The count is kept in the Hermes
-process and applies to local `delegate_task` children. Tool names with and
-without the `tool:` prefix share a budget; if both retained entries set a
-limit, the smaller limit applies. With `on_denial: log`, exhausted limits
-are logged but ordinary tool calls still run; delegation remains blocked.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,
@@ -775,6 +758,87 @@ concurrent delegations. Control actions (`list`, `steer`, `stop`) create no gran
 A spawn denied by the warrant is blocked even under `on_denial: log`. Letting
 it run could attach its child to another invocation’s pending grant. Ordinary
 non-spawn calls retain log-only behavior.
+
+### Use limits
+
+A plan level can say how many times a child may use a tool. Use it when a
+child should do one thing once: one push, one write, one message.
+
+```json
+{
+  "version": 1,
+  "root": {
+    "tools": {
+      "terminal": {
+        "_allow_unknown": true,
+        "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
+      },
+      "delegate_task": {}
+    }
+  },
+  "levels": [
+    {
+      "role": "pusher",
+      "ttl_seconds": 300,
+      "tools": {
+        "terminal": {
+          "max_uses": 1,
+          "_allow_unknown": true,
+          "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
+        }
+      }
+    }
+  ]
+}
+```
+
+```bash
+chmod 600 plan.json
+hermes-tenuo mint --plan plan.json --ttl 1h
+```
+
+Paste the printed config and export the key. A child started by
+`delegate_task` can now run that one command once, within five minutes. Its
+second try is refused:
+
+```text
+$ hermes-tenuo audit
+2026-11-19 17:25:01  ALLOW  terminal  command=git push origin fix/123  (use 1 of 1)
+2026-11-19 17:25:04  DENY   terminal  command=git push origin fix/123  — tenuo: use limit reached: this grant allows terminal 1 time
+```
+
+Each record of a limited call carries `"use": {"count", "limit", "grant"}`:
+the use it took, or for a refusal the limit that is used up, and the id of the
+grant that limit belongs to. `hermes-tenuo doctor` lists what each depth may do.
+
+What the limit covers:
+
+- **Calls, not effects.** Every allowed call of the tool takes a use, whatever
+  its arguments, and a call that then fails still counts. Pair `max_uses`
+  with a pattern that matches one exact command.
+- **That tool only.** If the same level also grants a tool that runs code or
+  commands of the child's choosing, such as `execute_code` with no argument
+  limits, the child can do the same thing there without a use. Calls a script
+  makes to the limited tool do count. `hermes-tenuo doctor` points out a level
+  like that.
+- **The whole subtree.** Grants delegated from a limited grant share its
+  limit, and a level cannot set a higher limit than the level above it.
+- **One delegation.** Every `delegate_task` call makes a new grant with a new
+  count. To limit how often a child delegates, set `max_uses` on its
+  `delegate_task`; one call may start several children (`tasks`), and control
+  actions (`list`, `steer`, `stop`) count as uses too.
+  The root takes no `max_uses`, so the limit bounds each child, not how many
+  children the parent starts.
+- **This Hermes process.** The count is kept in memory for local
+  `delegate_task` children. A child's grant ends with the process, so a
+  restart does not hand its uses back.
+- **Enforcing mode.** Under `on_denial: log` a spent limit is logged as a
+  denial and an ordinary call still runs; a `delegate_task` call stays blocked.
+- **One name per tool.** Tool names with and without the `tool:` prefix share
+  a count. If a level lists both with a limit, the smaller limit applies.
+
+`max_uses` is always the limit. A tool argument of that name cannot be
+constrained in a plan, and a plan file that repeats a key is refused.
 
 ## Things to know
 

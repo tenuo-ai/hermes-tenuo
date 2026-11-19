@@ -242,6 +242,9 @@ class HermesAuditEvent:
     outcome: str = ""
     peer: str = ""
     context_id: str = ""
+    # For a tool with a use limit: {"count", "limit", "grant"}. On ALLOW, the
+    # use this call took; on DENY for the limit, the limit that is used up.
+    use: Optional[Dict[str, Any]] = None
 
 
 AuditCallback = Callable[[HermesAuditEvent], None]
@@ -352,6 +355,9 @@ class HermesGuard:
         self._session_uses: Dict[str, Any] = {}
         # Set when the tool registry also checks each call (see hermes_tenuo.uses).
         self._registry_enforces = False
+        # task id of a delegated child → the session id that holds its grant (or its
+        # no-authority marker). Guarded by _session_lock. See _follow_child.
+        self._child_tasks: "OrderedDict[str, str]" = OrderedDict()
         self._registry_call = contextvars.ContextVar("tenuo_registry_call", default=None)
         # Cancelled workers may announce children late. Never reuse their goals.
         self._cancelled_goals: Dict[str, set] = {}
@@ -390,9 +396,10 @@ class HermesGuard:
         # of evicting live ambiguity information and later trusting a singleton.
         self._task_attribution_saturated = False
 
-        # Pre-hook decisions: tool_call_id → (allowed, reason)
+        # Pre-hook decisions: (session id, tool_call_id) → (allowed, reason). Models may
+        # reuse a tool-call id in every session, so the id alone does not name a call.
         # Stored by pre_tool_call so post_tool_call can record the accurate outcome.
-        self._pre_decisions: Dict[str, Tuple[bool, str, Tuple[str, ...]]] = {}
+        self._pre_decisions: Dict[Tuple[str, str], Tuple[bool, str, Tuple[str, ...]]] = {}
         self._pre_decisions_lock = threading.Lock()
         # The same, for calls Hermes sends without a tool-call id: keyed by the
         # call itself. Each entry is (thread id, allowed, reason), one per
@@ -818,10 +825,12 @@ class HermesGuard:
                     # No local or remote delegation capability remains.
                     builder.terminal()
                 limits = level.use_limits(keep)
-                uses = UseBudget(limits, parent_uses) if limits or parent_uses is not None else None
-                planned.append(_ChildGrant(
-                    builder.delegate(parent_key), chain, child_key, goal, invocation_id, uses=uses,
-                ))
+                child_warrant = builder.delegate(parent_key)
+                uses = (
+                    UseBudget(limits, parent_uses, str(child_warrant.id))
+                    if limits or parent_uses is not None else None
+                )
+                planned.append(_ChildGrant(child_warrant, chain, child_key, goal, invocation_id, uses=uses))
         except Exception as exc:
             error_type = type(exc).__name__
             logger.warning("hermes-tenuo: delegation plan grant failed at depth %d (%s)", depth, error_type)
@@ -1022,6 +1031,11 @@ class HermesGuard:
             return
         self._saw_subagent_start = True  # the session-order fallback is no longer needed
         with self._session_lock:
+            # Hermes runs the child's tool calls under its subagent id as the task id.
+            for task in {child_task_id, _kwargs.get("child_subagent_id")}:
+                if task:
+                    self._note_child_task(str(task), child_session_id, replace=False)
+        with self._session_lock:
             if child_session_id in self._session_warrants:
                 # Hermes may replay lifecycle hooks. Never consume another
                 # one-time grant or revoke an already attached child.
@@ -1061,6 +1075,73 @@ class HermesGuard:
             self._deny_session(child_session_id, _NO_AUTHORITY)
 
     # ------------------------------------------------------------------
+    # A child that Hermes moves to a new session id
+    # ------------------------------------------------------------------
+
+    _MAX_CHILD_TASKS = 65536
+
+    def _note_child_task(self, task_id: str, session_id: str, *, replace: bool) -> None:
+        """Remember which session holds the grant of the child running *task_id*. Caller holds ``_session_lock``."""
+        if not replace and task_id in self._child_tasks:
+            return
+        self._child_tasks[task_id] = session_id
+        self._child_tasks.move_to_end(task_id)
+        if len(self._child_tasks) > self._MAX_CHILD_TASKS:
+            # A forgotten child could not be told from a new primary session.
+            # Fail closed the same way as an overflowing denied-session record.
+            self._child_tasks.popitem(last=False)
+            if not self._denied_sessions_saturated:
+                self._denied_sessions_saturated = True
+                logger.error(
+                    "hermes-tenuo: more than %d delegated children have run; sessions with no "
+                    "warrant of their own are blocked and delegate_task is refused until "
+                    "Hermes restarts", self._MAX_CHILD_TASKS,
+                )
+
+    def _follow_child(self, session_id: str, task_id: str) -> None:
+        """Keep a delegated child on its own grant when Hermes gives it a new session id.
+
+        Hermes can continue a running agent under a new session id (for example
+        when it compacts a long context) without announcing it. The task id
+        stays the same. The grant, its chain and its use count move to the new
+        id and the old id is retired; a child whose grant is gone holds no
+        authority under the new id either. Without this the new id would be
+        taken for a primary session.
+        """
+        moved_from = None
+        with self._session_lock:
+            if session_id in self._session_warrants:
+                if session_id in self._child_sessions:
+                    self._note_child_task(task_id, session_id, replace=True)
+                return
+            owner = self._child_tasks.get(task_id)
+            if owner is None or owner == session_id:
+                return
+            warrant, key = self._session_warrants.get(owner, (_NO_AUTHORITY, None))
+            if _marker_reason(warrant) is not None:
+                self._deny_session(session_id, warrant)
+            else:
+                chain = self._session_warrant_chains.get(owner)
+                uses = self._session_uses.get(owner)
+                roots = self._ingress_roots.get(owner)
+                self._bind_session(session_id, warrant, key, chain)
+                if roots is not None:
+                    self._ingress_roots[session_id] = list(roots)
+                if uses is not None:
+                    self._session_uses[session_id] = uses
+                self._child_sessions[session_id] = None
+                self._deny_session(owner, _RETIRED)
+                moved_from = owner
+            self._note_child_task(task_id, session_id, replace=True)
+        if moved_from is not None:
+            with self._task_lock:
+                sessions = self._task_sessions.get(task_id)
+                if sessions is not None:
+                    sessions.discard(moved_from)
+            logger.info("hermes-tenuo: child task %s continues as session %s; its grant moved with it",
+                        task_id, session_id)
+
+    # ------------------------------------------------------------------
     # Sessionless calls (execute_code): attribute by task id
     # ------------------------------------------------------------------
 
@@ -1089,6 +1170,7 @@ class HermesGuard:
         """
         if session_id:
             if task_id:
+                self._follow_child(session_id, task_id)
                 self._remember_task(task_id, session_id)
             return session_id, None
         if not task_id and not self._uses_session_warrants:
@@ -1443,19 +1525,19 @@ class HermesGuard:
 
         # A grant with a use limit takes one use for a call the warrant allows.
         used: Optional[Tuple[Any, str, Any]] = None
+        use: Optional[Any] = None
         if result.allowed:
-            limit, used = self._take_use(
+            use, used = self._take_use(
                 session_id, name, tool_call_id,
                 (tool_name, pass_args if pass_args is not None else args, session_id, task_id), registry_check,
             )
-            if limit is not None:
+            if use is not None and not use.taken:
+                times = f"{use.limit} time{'' if use.limit == 1 else 's'}"
+                whose = "this grant allows" if use.own else "the grant this one was delegated from allows"
                 # A plugin policy refusal is not a Rust-attested authorization.
                 result = replace(
                     result, allowed=False, error_type="use_limit", chain_result=None,
-                    denial_reason=(
-                        f"tenuo: use limit reached: this grant allows {name.removeprefix('tool:')} "
-                        f"{limit} time{'' if limit == 1 else 's'}"
-                    ),
+                    denial_reason=f"tenuo: use limit reached: {whose} {name.removeprefix('tool:')} {times}",
                 )
 
         # Grant validation is part of the effective delegation decision. Do it
@@ -1471,6 +1553,7 @@ class HermesGuard:
                 grant_rejected = True
                 if used is not None:
                     used[0].give_back(used[1])  # the delegation did not start
+                    use = used = None
                 # A plugin policy refusal is not a Rust-attested authorization.
                 result = replace(result, allowed=False, denial_reason=blocked["message"],
                                  error_type="delegation_rejected", chain_result=None)
@@ -1489,7 +1572,7 @@ class HermesGuard:
                 pass
 
         self._emit_audit(tool_name, args, result.allowed, result.denial_reason or "", session_id, task_id, tool_call_id,
-                         lineage=lineage)
+                         lineage=lineage, use=use.record() if use is not None else None)
 
         if not result.allowed:
             reason = _format_denial_reason(result, tool_name)
@@ -1513,12 +1596,13 @@ class HermesGuard:
     def _take_use(
         self, session_id: str, name: str, tool_call_id: str,
         call: Tuple[str, Dict[str, Any], str, str], registry_check: bool,
-    ) -> Tuple[Optional[int], Optional[Tuple[Any, str, Any]]]:
+    ) -> Tuple[Optional[Any], Optional[Tuple[Any, str, Any]]]:
         """Take one use of *name* from the session's budget, if it has one.
 
-        Returns ``(limit, taken)``: *limit* is set when the uses are spent and
-        the call must be refused; *taken* is ``(budget, tool, call)`` when a use was
-        taken by this check and can be given back.
+        Returns ``(use, taken)``. *use* is None when nothing limits the tool
+        for this session, else a ``hermes_tenuo.uses.Use``: refused when the
+        uses are spent. *taken* is ``(budget, tool, call)`` when this check
+        took a use that can be given back.
         """
         with self._session_lock:
             budget = self._session_uses.get(session_id)
@@ -1531,10 +1615,10 @@ class HermesGuard:
         if not registry_check and not tool_call_id:
             # An unkeyed hook starts a new invocation in this execution scope.
             budget.finish_call(this_call)
-        limit = budget.take(tool)
-        if limit is not None:
-            return limit, None
-        return None, (budget, tool, this_call)
+        use = budget.take(tool)
+        if use is None or not use.taken:
+            return use, None
+        return use, (budget, tool, this_call)
 
     def _use_pass_key(
         self, tool_name: str, args: Dict[str, Any], session_id: str, task_id: str, tool_call_id: str,
@@ -1619,7 +1703,7 @@ class HermesGuard:
         """
         with self._pre_decisions_lock:
             if tool_call_id:
-                self._pre_decisions[tool_call_id] = (allowed, reason, lineage)
+                self._pre_decisions[(call[2] if call else "", tool_call_id)] = (allowed, reason, lineage)
                 while len(self._pre_decisions) > self._MAX_PENDING_DECISIONS:
                     self._pre_decisions.pop(next(iter(self._pre_decisions)))
             elif call is not None:
@@ -1651,7 +1735,7 @@ class HermesGuard:
         """
         with self._pre_decisions_lock:
             if tool_call_id:
-                return self._pre_decisions.pop(tool_call_id, None)
+                return self._pre_decisions.pop((call[2], tool_call_id), None)
             key = self._call_key(call)
             pending = self._unkeyed_decisions.get(key)
             if not pending:
@@ -1724,6 +1808,12 @@ class HermesGuard:
             self._emit_audit(tool_name, args, False, "tenuo: blocked before the tool ran",
                              session_id, task_id, tool_call_id, duration_ms)
             return
+        # Hermes rejects a call whose arguments are not an object before any
+        # check and before the handler. It did not run and was not allowed.
+        if status == "error" and error_type == "invalid_tool_arguments":
+            self._emit_audit(tool_name, args, False, "tenuo: not run; Hermes rejected the call's arguments",
+                             session_id, task_id, tool_call_id, duration_ms, outcome=f"Hermes dispatch: {status}")
+            return
         # A call the pre hook would have blocked outright is still a denial.
         warrant, signing_key = self._resolve_warrant(session_id)
         denial = self._denial_before_enforcement(warrant, signing_key)
@@ -1776,6 +1866,7 @@ class HermesGuard:
         outcome: str = "",
         peer: str = "",
         context_id: str = "",
+        use: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self._audit_callback is None:
             return
@@ -1793,6 +1884,7 @@ class HermesGuard:
             outcome=outcome,
             peer=peer,
             context_id=context_id,
+            use=use,
         )
         try:
             self._audit_callback(event)

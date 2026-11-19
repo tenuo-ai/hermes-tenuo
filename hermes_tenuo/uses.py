@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections import Counter
-from typing import Dict, Hashable, Iterator, Optional
+from typing import Dict, Hashable, Iterator, NamedTuple, Optional
 
 _lock = threading.Lock()  # one lock for every budget: a use is taken along a whole chain
 
@@ -26,6 +26,26 @@ class ArgumentIdentity:
         return isinstance(other, ArgumentIdentity) and self.args is other.args
 
 
+class Use(NamedTuple):
+    """The outcome of asking for one use of a limited tool.
+
+    When *taken*, ``count`` of ``limit`` is where the tightest limit along the
+    chain now stands. When refused, it names the limit that is used up. *grant*
+    is the id of the grant that limit belongs to; *own* says whether that is
+    the grant making the call.
+    """
+
+    taken: bool
+    count: int
+    limit: int
+    grant: str
+    own: bool
+
+    def record(self) -> Dict[str, object]:
+        """The form written to the audit log."""
+        return {"count": self.count, "limit": self.limit, "grant": self.grant}
+
+
 class UseBudget:
     """How many times one grant may still use each tool that has a limit.
 
@@ -33,10 +53,11 @@ class UseBudget:
     so the grants below one never use a tool more often than it allows.
     """
 
-    def __init__(self, limits: Dict[str, int], parent: Optional["UseBudget"] = None) -> None:
+    def __init__(self, limits: Dict[str, int], parent: Optional["UseBudget"] = None, grant: str = "") -> None:
         self._limits = dict(limits)
         self._used: Dict[str, int] = {}
         self._parent = parent
+        self._grant = grant
         self._passes: Counter = Counter()
 
     def _chain(self, tool: str) -> Iterator["UseBudget"]:
@@ -46,16 +67,20 @@ class UseBudget:
                 yield node
             node = node._parent
 
-    def take(self, tool: str) -> Optional[int]:
-        """Take one use of *tool*. None when taken, else the limit that is used up."""
+    def take(self, tool: str) -> Optional[Use]:
+        """Take one use of *tool*. None when nothing limits it."""
         with _lock:
             holders = list(self._chain(tool))
+            if not holders:
+                return None
             for budget in holders:
-                if budget._used.get(tool, 0) >= budget._limits[tool]:
-                    return budget._limits[tool]
+                used, limit = budget._used.get(tool, 0), budget._limits[tool]
+                if used >= limit:
+                    return Use(False, used, limit, budget._grant, budget is self)
             for budget in holders:
                 budget._used[tool] = budget._used.get(tool, 0) + 1
-            return None
+            tightest = min(holders, key=lambda b: b._limits[tool] - b._used[tool])
+            return Use(True, tightest._used[tool], tightest._limits[tool], tightest._grant, tightest is self)
 
     def give_back(self, tool: str) -> None:
         """Return a use taken for a call that was then refused before it ran."""

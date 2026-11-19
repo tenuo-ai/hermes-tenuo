@@ -122,8 +122,8 @@ ALLOW_UNKNOWN = "_allow_unknown"
 
 # A tool entry in a level may set this to a positive integer: how many times a
 # grant at that level may use the tool. A use is taken when a call is allowed,
-# so a call that then fails still counts. An object under this name is an
-# ordinary argument constraint.
+# so a call that then fails still counts. The name is reserved: it is never
+# read as an argument of the tool.
 MAX_USES = "max_uses"
 
 
@@ -144,7 +144,7 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
         if not isinstance(args, dict):
             raise DelegationPlanError(f"{where}: {tool} constraints must be an object")
         for arg, spec in args.items():
-            if arg == MAX_USES and not isinstance(spec, dict):
+            if arg == MAX_USES:
                 if root:
                     raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} is only supported in levels")
                 if not isinstance(spec, int) or isinstance(spec, bool) or spec <= 0:
@@ -229,6 +229,55 @@ def parse_plan(data: Any) -> DelegationPlan:
     return plan
 
 
+# Tools that run code or commands of the child's choosing. A use limit on another
+# tool does not bound what a child does through these.
+RUNS_CODE = ("execute_code", "terminal", "process_manage")
+
+
+def unbounded_routes(plan: DelegationPlan) -> List[str]:
+    """Warnings for levels where a use limit sits next to an unlimited tool that runs code."""
+    notes = []
+    for depth, level in enumerate(plan.levels, start=1):
+        limited = {t.removeprefix("tool:") for t in level.max_uses}
+        open_tools = [t for t in level.tools
+                      if t.removeprefix("tool:") in RUNS_CODE and t.removeprefix("tool:") not in limited
+                      and not (level.tools[t] or {}).keys() - {ALLOW_UNKNOWN}]
+        if limited and open_tools:
+            notes.append(
+                f"depth {depth}: {', '.join(sorted(limited))} has a use limit, but {', '.join(open_tools)} "
+                "is granted with no argument limits and can run the same commands without one"
+            )
+    return notes
+
+
+def describe(plan: DelegationPlan) -> List[str]:
+    """One line per level, for the command line: what a child at that depth may do."""
+    lines = []
+    for depth, level in enumerate(plan.levels, start=1):
+        tools = []
+        for tool in level.tools:
+            limit = level.max_uses.get(tool)
+            tools.append(f"{tool} (at most {limit} use{'' if limit == 1 else 's'})" if limit else tool)
+        lines.append(f"depth {depth}: {', '.join(tools)}; expires after {level.ttl_seconds}s")
+    return lines
+
+
+def root_capabilities(plan: DelegationPlan) -> Dict[str, Dict[str, Any]]:
+    """The capabilities a warrant must hold to delegate under *plan*: its ``root`` entry.
+
+    Each argument is ``All(capability_members(spec))`` so children's grants narrow it.
+    """
+    from tenuo import All
+
+    capabilities: Dict[str, Dict[str, Any]] = {}
+    for tool, args in plan.root.tools.items():
+        caps: Dict[str, Any] = {}
+        for arg, spec in (args or {}).items():
+            caps[arg] = True if arg == ALLOW_UNKNOWN else All(_members(spec))
+        capabilities[tool] = caps
+    return capabilities
+
+
 def capability_members(spec: dict) -> List[Any]:
     """The constraint members for one argument spec, wrapped for a capability.
 
@@ -237,6 +286,16 @@ def capability_members(spec: dict) -> List[Any]:
     attenuation stays All-to-All.
     """
     return _members(spec)
+
+
+def _no_duplicate_keys(pairs: List[Any]) -> Dict[str, Any]:
+    """JSON keeps the last of two equal keys without a word; in a plan that could drop a limit."""
+    seen: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise DelegationPlanError(f"the plan lists {key!r} twice in one object")
+        seen[key] = value
+    return seen
 
 
 def load_plan(path: str | Path) -> DelegationPlan:
@@ -257,7 +316,7 @@ def load_plan(path: str | Path) -> DelegationPlan:
                     f"delegation plan {p} must not be writable by group or other users"
                 )
             with os.fdopen(fd, encoding="utf-8", closefd=False) as stream:
-                return parse_plan(json.load(stream))
+                return parse_plan(json.load(stream, object_pairs_hook=_no_duplicate_keys))
         finally:
             os.close(fd)
     except FileNotFoundError as exc:

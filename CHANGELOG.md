@@ -6,6 +6,17 @@
   `delegate_task` child's grant may use that tool. A use is taken when a call is allowed;
   further calls are refused and logged. Grants delegated from a limited grant share its
   limit. Plans without `max_uses` behave as before.
+- `hermes-tenuo mint --plan PLAN.json` mints a warrant that can delegate under a delegation
+  plan and prints the `delegation_plan` setting. `hermes-tenuo doctor` lists what each depth
+  of a plan may do.
+- Audit log: a call to a tool with a use limit records the use (`"use": {"count", "limit",
+  "grant"}`), and `hermes-tenuo audit` shows it. The decision and completion records of a
+  call are matched per session, so calls from different sessions that carry the same
+  tool-call id are shown separately. A call Hermes rejects for its arguments before any
+  check is recorded as not run.
+- A delegated child that Hermes continues under a new session id keeps its own grant and
+  its use count.
+- A delegation plan file that repeats a key is refused.
 
 ## 0.4.2 - Unreleased
 
