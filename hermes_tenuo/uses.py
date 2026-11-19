@@ -73,3 +73,18 @@ class UseBudget:
             if not self._passes[call]:
                 del self._passes[call]
             return True
+
+    def finish_call(self, tool_call_id: str, call_key: str) -> None:
+        """Discard passes for an invocation that completed, blocked, or was cancelled.
+
+        An ID matches even if middleware changed the arguments. Without an ID,
+        discard matching unkeyed passes conservatively rather than let a later
+        registry-only invocation reuse one.
+        """
+        with _lock:
+            for call in list(self._passes):
+                invocation_id, key = call
+                if (tool_call_id and invocation_id == tool_call_id) or (
+                    key == call_key and (not tool_call_id or not invocation_id)
+                ):
+                    del self._passes[call]

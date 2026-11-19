@@ -229,6 +229,8 @@ def _register_guard_hooks(ctx: Any, guard: Any) -> None:
             _tool_registry.set_enforcement_fn(_enforcement_fn)
             _registered_via_registry = True
             guard.registry_enforces()
+            if hasattr(ctx, "register_middleware"):
+                ctx.register_middleware("tool_execution", guard.around_tool_call)
             logger.info("hermes-tenuo: enforcement registered via ToolRegistry (universal coverage)")
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry enforcement unavailable (%s), using hook fallback", exc)

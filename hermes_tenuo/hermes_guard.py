@@ -24,6 +24,7 @@ Invariants:
 from __future__ import annotations
 
 import atexit
+import contextvars
 import hashlib
 import json
 import logging
@@ -351,6 +352,7 @@ class HermesGuard:
         self._session_uses: Dict[str, Any] = {}
         # Set when the tool registry also checks each call (see hermes_tenuo.uses).
         self._registry_enforces = False
+        self._registry_call = contextvars.ContextVar("tenuo_registry_call", default=None)
         # Cancelled workers may announce children late. Never reuse their goals.
         self._cancelled_goals: Dict[str, set] = {}
         self._cancelled_invocations: set = set()
@@ -1132,6 +1134,10 @@ class HermesGuard:
         from hermes_tenuo.mcp_proofs import CARRIER, MCPMappingError
 
         session_id, unattributed = self._attribute_session(session_id, task_id)
+        if registry_check and not tool_call_id:
+            invocation = self._registry_call.get()
+            if invocation is not None and invocation[:3] == (tool_name, session_id, task_id):
+                tool_call_id = invocation[3]
         try:
             wrapped_name = self._mcp_resolver(tool_name) if self._mcp_resolver else None
         except MCPMappingError as exc:
@@ -1529,6 +1535,31 @@ class HermesGuard:
             return limit, None
         return None, (budget, tool)
 
+    def around_tool_call(
+        self, tool_name: str = "", args: Optional[dict] = None, next_call: Any = None,
+        session_id: str = "", task_id: str = "", tool_call_id: str = "", **kwargs: Any,
+    ) -> Any:
+        """Carry Hermes's invocation ID to registries that omit it from dispatch kwargs.
+
+        Middleware scopes the ID to this execution (including concurrent calls),
+        and removes unused passes even if execution exits without a post hook.
+        """
+        session_id, _ = self._attribute_session(session_id, task_id)
+        token = self._registry_call.set((tool_name, session_id, task_id, tool_call_id))
+        try:
+            return next_call(args)
+        finally:
+            self._registry_call.reset(token)
+            self._finish_use_pass(tool_name, args or {}, session_id, task_id, tool_call_id)
+
+    def _finish_use_pass(
+        self, tool_name: str, args: Dict[str, Any], session_id: str, task_id: str, tool_call_id: str,
+    ) -> None:
+        with self._session_lock:
+            budget = self._session_uses.get(session_id)
+        if budget is not None:
+            budget.finish_call(tool_call_id, self._call_key((tool_name, args, session_id, task_id)))
+
     _MAX_PENDING_DECISIONS = 2048
 
     @staticmethod
@@ -1636,6 +1667,7 @@ class HermesGuard:
         # A recorded pre-hook denial wins even when no static warrant exists
         # (e.g. gateway-only session warrants). Never turn it into audit-only ALLOW.
         session_id, unattributed = self._attribute_session(session_id, task_id)
+        self._finish_use_pass(tool_name, args, session_id, task_id, tool_call_id)
         pre = self._take_decision(
             tool_call_id, (tool_name, args, session_id, task_id), blocked=status == "blocked",
         )

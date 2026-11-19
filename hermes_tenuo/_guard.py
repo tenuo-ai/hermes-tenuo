@@ -223,6 +223,9 @@ class PluginGuard:
         """The tool registry checks each call too, after this guard's hook."""
         self._guard._registry_enforces = True
 
+    def around_tool_call(self, **kwargs: Any) -> Any:
+        return self._guard.around_tool_call(**kwargs)
+
     @property
     def has_warrant(self) -> bool:
         return self._guard.has_warrant

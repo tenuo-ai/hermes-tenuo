@@ -50,6 +50,29 @@ _DRIVER = textwrap.dedent(
                  .capability("read_file", path=Subpath(os.path.join(data, "pub")), _allow_unknown=True)
                  .ttl(600).mint(root))
         entry["child_warrant"] = b64(child.to_bytes())
+    if scenario == "max_uses_registry":
+        plan_path = os.path.join(home, "plan.json")
+        with open(plan_path, "w") as fh:
+            json.dump({"version": 1, "root": {"tools": {"read_file": {}, "delegate_task": {}}},
+                       "levels": [{"ttl_seconds": 300, "tools": {"read_file": {"max_uses": 1}}}]}, fh)
+        entry["delegation_plan"] = plan_path
+        # Exercise Hermes's real hook/middleware/dispatch pipeline even before
+        # upstream exposes the registry enforcement setter. Match the dispatch
+        # contract that omits the hook's tool-call ID.
+        from tools.registry import registry
+        original_dispatch = registry.dispatch
+        enforcement = []
+        executed = []
+        registry.set_enforcement_fn = lambda fn: enforcement.append(fn)
+        def dispatch(name, args, **kwargs):
+            kwargs.pop("tool_call_id", None)
+            try:
+                enforcement[-1](name, args, **kwargs)
+            except Exception as exc:
+                return json.dumps({"error": str(exc)})
+            executed.append(name)
+            return original_dispatch(name, args, **kwargs)
+        registry.dispatch = dispatch
     with open(os.path.join(home, "config.yaml"), "w") as fh:
         yaml.safe_dump({"plugins": {"enabled": ["hermes-tenuo"], "entries": {"hermes-tenuo": entry}}}, fh)
     os.environ["TENUO_SIGNING_KEY"] = b64(agent.secret_key_bytes())
@@ -74,7 +97,14 @@ _DRIVER = textwrap.dedent(
     def read(path, **ids):
         return model_tools.handle_function_call("read_file", {"path": path}, **ids)
 
-    if scenario in ("cw_single_goal", "cw_batch"):
+    if scenario == "max_uses_registry":
+        out["delegate"] = delegate("p", {"goal": "read once"})
+        start("p", "c0", "read once", "sa-0-x")
+        out["first"] = read(public, session_id="c0", task_id="sa-0-x", tool_call_id="read-1")
+        out["second"] = read(secret, session_id="c0", task_id="sa-0-x", tool_call_id="read-2")
+        out["direct"] = registry.dispatch("read_file", {"path": public}, session_id="c0", task_id="sa-0-x")
+        out["executed"] = executed
+    elif scenario in ("cw_single_goal", "cw_batch"):
         tasks = {"goal": "summarise"} if scenario == "cw_single_goal" else {
             "tasks": [{"goal": "a"}, {"goal": "b"}]}
         out["delegate"] = delegate("p", tasks)
@@ -235,3 +265,12 @@ def test_cancelled_child_cannot_claim_a_retry_through_hermes_hooks(tmp_path):
     assert r["distinct"] is None
     assert _blocked(r["late_public"]), r["late_public"]
     assert _ran(r["new_public"], PUBLIC), r["new_public"]
+
+
+def test_max_uses_survives_registry_omitting_the_hook_call_id(tmp_path):
+    r = _run("max_uses_registry", tmp_path)
+    assert r["delegate"] is None
+    assert _ran(r["first"], PUBLIC), r["first"]
+    assert _blocked(r["second"]), r["second"]
+    assert _blocked(r["direct"]), r["direct"]
+    assert r["executed"] == ["read_file"]

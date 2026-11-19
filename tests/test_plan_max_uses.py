@@ -278,3 +278,71 @@ def test_rejected_delegation_does_not_leave_a_refunded_registry_pass(monkeypatch
     guard.on_subagent_start(parent_session_id="s1", child_session_id="s2", child_goal="first")
     refused = _delegate(guard, "s1", "s3", goal="second", call_id="next")
     assert refused is not None and "delegate_task 1 time" in refused["message"]
+
+
+@pytest.mark.parametrize("status", ["blocked", "cancelled", "error", "success"])
+@pytest.mark.parametrize("call_id", ["", "call_1"])
+def test_completed_invocations_cannot_leave_registry_passes(status, call_id):
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    assert _push(guard, "s1", call_id) is None
+    guard.post_tool_call("terminal", {"command": "git push origin fix/123"}, "done",
+                        session_id="s1", tool_call_id=call_id, status=status)
+    assert _push(guard, "s1", call_id, registry_check=True) is not None
+    assert _push(guard, "s1", registry_check=True) is not None
+
+
+def test_middleware_correlates_registry_without_tool_call_id():
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    assert _push(guard, "s1", "call_1") is None
+    # Hermes supplies the ID to middleware but omits it in registry.dispatch.
+    result = guard.around_tool_call(
+        tool_name="terminal", args={"command": "git push origin fix/123"},
+        session_id="s1", tool_call_id="call_1",
+        next_call=lambda args: guard.pre_tool_call("terminal", args, session_id="s1", registry_check=True),
+    )
+    assert result is None
+    assert _push(guard, "s1", registry_check=True) is not None
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_middleware_discards_pass_when_dispatch_does_not_run(raises):
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    assert _push(guard, "s1", "call_1") is None
+
+    def stopped(args):
+        if raises:
+            raise RuntimeError("cancelled")
+        return "blocked by another middleware"
+
+    def invoke():
+        return guard.around_tool_call(
+            tool_name="terminal", args={"command": "git push origin fix/123"},
+            session_id="s1", tool_call_id="call_1", next_call=stopped,
+        )
+
+    if raises:
+        with pytest.raises(RuntimeError, match="cancelled"):
+            invoke()
+    else:
+        assert invoke() == "blocked by another middleware"
+    assert _push(guard, "s1", "call_1", registry_check=True) is not None
+
+
+def test_finishing_one_call_preserves_another_inflight_call():
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 2
+    guard, _ = _guard(plan)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    assert _push(guard, "s1", "blocked") is None
+    assert _push(guard, "s1", "running") is None
+    guard.post_tool_call("terminal", {"command": "git push origin fix/123"}, "blocked",
+                        session_id="s1", tool_call_id="blocked", status="blocked")
+    assert _push(guard, "s1", "running", registry_check=True) is None
+    assert _push(guard, "s1", "blocked", registry_check=True) is not None
