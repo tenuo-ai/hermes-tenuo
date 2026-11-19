@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A plugin installed with `hermes plugins install` no longer blocks every tool call with
+  "installation conflict" when Hermes also loads its own identical copy of the plugin from
+  the managed environment. A copy with different code still blocks.
+
 ## 0.4.2 - Unreleased
 
 - `hermes-tenuo a2a check` checks tokens only in the process environment and no longer
