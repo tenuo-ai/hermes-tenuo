@@ -50,7 +50,7 @@ _DRIVER = textwrap.dedent(
                  .capability("read_file", path=Subpath(os.path.join(data, "pub")), _allow_unknown=True)
                  .ttl(600).mint(root))
         entry["child_warrant"] = b64(child.to_bytes())
-    if scenario == "max_uses_registry":
+    if scenario.startswith("max_uses_registry"):
         plan_path = os.path.join(home, "plan.json")
         with open(plan_path, "w") as fh:
             json.dump({"version": 1, "root": {"tools": {"read_file": {}, "delegate_task": {}}},
@@ -97,11 +97,12 @@ _DRIVER = textwrap.dedent(
     def read(path, **ids):
         return model_tools.handle_function_call("read_file", {"path": path}, **ids)
 
-    if scenario == "max_uses_registry":
+    if scenario.startswith("max_uses_registry"):
         out["delegate"] = delegate("p", {"goal": "read once"})
         start("p", "c0", "read once", "sa-0-x")
-        out["first"] = read(public, session_id="c0", task_id="sa-0-x", tool_call_id="read-1")
-        out["second"] = read(secret, session_id="c0", task_id="sa-0-x", tool_call_id="read-2")
+        keyed = scenario == "max_uses_registry"
+        out["first"] = read(public, session_id="c0", task_id="sa-0-x", tool_call_id="read-1" if keyed else "")
+        out["second"] = read(secret, session_id="c0", task_id="sa-0-x", tool_call_id="read-2" if keyed else "")
         out["direct"] = registry.dispatch("read_file", {"path": public}, session_id="c0", task_id="sa-0-x")
         out["executed"] = executed
     elif scenario in ("cw_single_goal", "cw_batch"):
@@ -267,8 +268,9 @@ def test_cancelled_child_cannot_claim_a_retry_through_hermes_hooks(tmp_path):
     assert _ran(r["new_public"], PUBLIC), r["new_public"]
 
 
-def test_max_uses_survives_registry_omitting_the_hook_call_id(tmp_path):
-    r = _run("max_uses_registry", tmp_path)
+@pytest.mark.parametrize("scenario", ["max_uses_registry", "max_uses_registry_unkeyed"])
+def test_max_uses_survives_registry_omitting_the_hook_call_id(tmp_path, scenario):
+    r = _run(scenario, tmp_path)
     assert r["delegate"] is None
     assert _ran(r["first"], PUBLIC), r["first"]
     assert _blocked(r["second"]), r["second"]

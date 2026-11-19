@@ -74,17 +74,24 @@ class UseBudget:
                 del self._passes[call]
             return True
 
-    def finish_call(self, tool_call_id: str, call_key: str) -> None:
-        """Discard passes for an invocation that completed, blocked, or was cancelled.
+    def move_pass(self, source: Hashable, target: Hashable) -> None:
+        """Move an unkeyed hook's pass into its execution middleware scope."""
+        with _lock:
+            count = self._passes.pop(source, 0)
+            if count:
+                self._passes[target] += count
 
-        An ID matches even if middleware changed the arguments. Without an ID,
-        discard matching unkeyed passes conservatively rather than let a later
-        registry-only invocation reuse one.
+    def finish_call(self, call: Hashable) -> None:
+        """Discard only this invocation's passes, never another concurrent call's.
+
+        An explicit ID matches even if middleware changed the arguments.
+        Unkeyed calls match their execution scope and proof-free arguments.
         """
         with _lock:
-            for call in list(self._passes):
-                invocation_id, key = call
-                if (tool_call_id and invocation_id == tool_call_id) or (
-                    key == call_key and (not tool_call_id or not invocation_id)
-                ):
-                    del self._passes[call]
+            tool_call_id = call[0]
+            if not tool_call_id:
+                self._passes.pop(call, None)
+                return
+            for pending in list(self._passes):
+                if pending[0] == tool_call_id:
+                    del self._passes[pending]

@@ -1445,7 +1445,7 @@ class HermesGuard:
             ), False
 
         # A grant with a use limit takes one use for a call the warrant allows.
-        used: Optional[Tuple[Any, str]] = None
+        used: Optional[Tuple[Any, str, Any]] = None
         if result.allowed:
             limit, used = self._take_use(
                 session_id, name, tool_call_id, (tool_name, args, session_id, task_id), registry_check,
@@ -1480,7 +1480,7 @@ class HermesGuard:
         # Only successful authorization leaves a registry pass. A rejected
         # delegation refunded its use and must not leave a free pass behind.
         if result.allowed and used is not None and self._registry_enforces and not registry_check:
-            used[0].leave_pass((tool_call_id, self._call_key((tool_name, args, session_id, task_id))))
+            used[0].leave_pass(used[2])
 
         if self._control_plane is not None:
             try:
@@ -1515,11 +1515,11 @@ class HermesGuard:
     def _take_use(
         self, session_id: str, name: str, tool_call_id: str,
         call: Tuple[str, Dict[str, Any], str, str], registry_check: bool,
-    ) -> Tuple[Optional[int], Optional[Tuple[Any, str]]]:
+    ) -> Tuple[Optional[int], Optional[Tuple[Any, str, Any]]]:
         """Take one use of *name* from the session's budget, if it has one.
 
         Returns ``(limit, taken)``: *limit* is set when the uses are spent and
-        the call must be refused; *taken* is ``(budget, tool)`` when a use was
+        the call must be refused; *taken* is ``(budget, tool, call)`` when a use was
         taken by this check and can be given back.
         """
         with self._session_lock:
@@ -1527,13 +1527,32 @@ class HermesGuard:
         tool = name.removeprefix("tool:")
         if budget is None or not budget.limits(tool):
             return None, None
-        this_call = (tool_call_id, self._call_key(call))
+        this_call = self._use_pass_key(*call, tool_call_id)
         if registry_check and budget.hand_in_pass(this_call):
             return None, None  # the hook's check of this call took the use
+        if not registry_check and not tool_call_id:
+            # An unkeyed hook starts a new invocation in this execution scope.
+            budget.finish_call(this_call)
         limit = budget.take(tool)
         if limit is not None:
             return limit, None
-        return None, (budget, tool)
+        return None, (budget, tool, this_call)
+
+    def _use_pass_key(
+        self, tool_name: str, args: Dict[str, Any], session_id: str, task_id: str, tool_call_id: str,
+    ) -> tuple:
+        args = self._without_mcp_carrier(tool_name, args)
+        key = self._call_key((tool_name, args, session_id, task_id))
+        invocation = self._registry_call.get()
+        if tool_call_id:
+            owner = None
+        elif invocation is not None and invocation[:3] == (tool_name, session_id, task_id):
+            owner = invocation[4]
+        else:
+            # Legacy hooks outside middleware run synchronously on the caller's
+            # thread. Never let another thread redeem or delete their passes.
+            owner = threading.current_thread()
+        return tool_call_id, key, owner
 
     def around_tool_call(
         self, tool_name: str = "", args: Optional[dict] = None, next_call: Any = None,
@@ -1545,12 +1564,23 @@ class HermesGuard:
         and removes unused passes even if execution exits without a post hook.
         """
         session_id, _ = self._attribute_session(session_id, task_id)
-        token = self._registry_call.set((tool_name, session_id, task_id, tool_call_id))
+        previous_key = self._use_pass_key(tool_name, args or {}, session_id, task_id, tool_call_id)
+        token = self._registry_call.set((tool_name, session_id, task_id, tool_call_id, object()))
         try:
+            if not tool_call_id:
+                with self._session_lock:
+                    budget = self._session_uses.get(session_id)
+                if budget is not None:
+                    # Standalone handle_function_call fires its hook before
+                    # middleware. Transfer that thread's pass into this scope.
+                    budget.move_pass(previous_key, self._use_pass_key(
+                        tool_name, args or {}, session_id, task_id, tool_call_id))
             return next_call(args)
         finally:
-            self._registry_call.reset(token)
-            self._finish_use_pass(tool_name, args or {}, session_id, task_id, tool_call_id)
+            try:
+                self._finish_use_pass(tool_name, args or {}, session_id, task_id, tool_call_id)
+            finally:
+                self._registry_call.reset(token)
 
     def _finish_use_pass(
         self, tool_name: str, args: Dict[str, Any], session_id: str, task_id: str, tool_call_id: str,
@@ -1558,7 +1588,7 @@ class HermesGuard:
         with self._session_lock:
             budget = self._session_uses.get(session_id)
         if budget is not None:
-            budget.finish_call(tool_call_id, self._call_key((tool_name, args, session_id, task_id)))
+            budget.finish_call(self._use_pass_key(tool_name, args, session_id, task_id, tool_call_id))
 
     _MAX_PENDING_DECISIONS = 2048
 

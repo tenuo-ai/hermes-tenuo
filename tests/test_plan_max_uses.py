@@ -346,3 +346,68 @@ def test_finishing_one_call_preserves_another_inflight_call():
                         session_id="s1", tool_call_id="blocked", status="blocked")
     assert _push(guard, "s1", "running", registry_check=True) is None
     assert _push(guard, "s1", "blocked", registry_check=True) is not None
+
+
+@pytest.mark.parametrize("hook_inside_middleware", [False, True])
+def test_concurrent_unkeyed_calls_keep_separate_passes(hook_inside_middleware):
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 2
+    guard, _ = _guard(plan)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    hooks_finished = threading.Barrier(2)
+    first_finished = threading.Event()
+    results, errors = {}, []
+    args = {"command": "git push origin fix/123"}
+
+    def worker(index):
+        try:
+            if not hook_inside_middleware:
+                assert _push(guard, "s1") is None
+
+            def dispatch(payload):
+                if hook_inside_middleware:
+                    assert _push(guard, "s1") is None
+                hooks_finished.wait(timeout=5)
+                if index:
+                    assert first_finished.wait(timeout=5)
+                return guard.pre_tool_call("terminal", payload, session_id="s1", registry_check=True)
+
+            results[index] = guard.around_tool_call(
+                tool_name="terminal", args=dict(args), session_id="s1", next_call=dispatch,
+            )
+            guard.post_tool_call("terminal", dict(args), "done", session_id="s1", status="success")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            if not index:
+                first_finished.set()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    assert results == {0: None, 1: None}
+    assert _push(guard, "s1", registry_check=True) is not None
+
+
+def test_unkeyed_mcp_pass_cleanup_ignores_the_proof_carrier():
+    from hermes_tenuo.mcp_proofs import CARRIER
+
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    wrapper = "mcp__test__terminal"
+    guard._mcp_resolver = lambda name: "terminal" if name == wrapper else None
+    assert _delegate(guard, "s0", "s1") is None
+    args = {"command": "git push origin fix/123"}
+    assert guard.pre_tool_call(wrapper, dict(args), session_id="s1") is None
+    # Proof middleware inserted a carrier; downstream middleware then blocked
+    # dispatch without a post hook. Cleanup must still find the original pass.
+    assert guard.around_tool_call(
+        tool_name=wrapper, args={**args, CARRIER: {"proof": "test"}}, session_id="s1",
+        next_call=lambda payload: "blocked",
+    ) == "blocked"
+    assert guard.pre_tool_call(wrapper, dict(args), session_id="s1", registry_check=True) is not None
