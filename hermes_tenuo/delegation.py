@@ -26,7 +26,7 @@ import json
 import math
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +39,7 @@ class DelegationPlanError(ValueError):
 class Level:
     ttl_seconds: Optional[int]
     tools: Dict[str, Dict[str, dict]]  # tool → arg → {"binaries": [...], "patterns": [...]}
+    max_uses: Dict[str, int] = field(default_factory=dict)  # tool → uses a grant at this level allows
 
 
 def _members(spec: dict) -> List[Any]:
@@ -109,6 +110,12 @@ class DelegationPlan:
 # when every ancestor level sets it.
 ALLOW_UNKNOWN = "_allow_unknown"
 
+# A tool entry in a level may set this to a positive integer: how many times a
+# grant at that level may use the tool. A use is taken when a call is allowed,
+# so a call that then fails still counts. An object under this name is an
+# ordinary argument constraint.
+MAX_USES = "max_uses"
+
 
 def _level(raw: Any, where: str, *, root: bool = False) -> Level:
     if not isinstance(raw, dict) or not isinstance(raw.get("tools"), dict):
@@ -120,12 +127,20 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
     ttl = raw.get("ttl_seconds")
     if not root and (not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0):
         raise DelegationPlanError(f"{where}: ttl_seconds must be a positive integer")
+    max_uses: Dict[str, int] = {}
     for tool, args in raw["tools"].items():
         if not isinstance(tool, str) or not tool:
             raise DelegationPlanError(f"{where}: tool names must be non-empty strings")
         if not isinstance(args, dict):
             raise DelegationPlanError(f"{where}: {tool} constraints must be an object")
         for arg, spec in args.items():
+            if arg == MAX_USES and not isinstance(spec, dict):
+                if root:
+                    raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} is only supported in levels")
+                if not isinstance(spec, int) or isinstance(spec, bool) or spec <= 0:
+                    raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} must be a positive integer")
+                max_uses[tool] = spec
+                continue
             if not isinstance(arg, str) or not arg:
                 raise DelegationPlanError(f"{where}: {tool} argument names must be non-empty strings")
             if arg == ALLOW_UNKNOWN:
@@ -170,7 +185,11 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
                 raise DelegationPlanError(
                     f"{where}: {tool}.{arg} invalid constraint ({type(exc).__name__})"
                 ) from exc
-    return Level(ttl, {t: dict(a) for t, a in raw["tools"].items()})
+    tools = {
+        t: {arg: spec for arg, spec in a.items() if not (arg == MAX_USES and t in max_uses)}
+        for t, a in raw["tools"].items()
+    }
+    return Level(ttl, tools, max_uses)
 
 
 def parse_plan(data: Any) -> DelegationPlan:
@@ -187,6 +206,13 @@ def parse_plan(data: Any) -> DelegationPlan:
     )
     for depth in range(1, plan.max_depth + 1):
         plan.constraints_for(depth)  # report ancestry errors at load time
+    for depth in range(2, plan.max_depth + 1):
+        above = plan.levels[depth - 2].max_uses
+        for tool, uses in plan.levels[depth - 1].max_uses.items():
+            if tool in above and uses > above[tool]:
+                raise DelegationPlanError(
+                    f"levels[{depth - 1}]: {tool}.{MAX_USES} is larger than the level above allows"
+                )
     return plan
 
 

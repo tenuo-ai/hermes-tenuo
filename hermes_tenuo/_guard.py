@@ -219,6 +219,10 @@ class PluginGuard:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress
 
+    def registry_enforces(self) -> None:
+        """The tool registry checks each call too, after this guard's hook."""
+        self._guard._registry_enforces = True
+
     @property
     def has_warrant(self) -> bool:
         return self._guard.has_warrant
@@ -239,6 +243,7 @@ class PluginGuard:
                 task_id=task_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
+                registry_check=kwargs.get("registry_check") is True,
             )
         except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
             block = self._internal_error_block(tool_name, "authorization check", exc)

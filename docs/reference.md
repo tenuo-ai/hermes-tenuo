@@ -742,6 +742,24 @@ the plan operator-controlled, as a regular file that is not a symlink and is
 not group- or world-writable. Invalid or unreadable plans fail closed during
 plugin startup.
 
+A tool entry in a level may set `max_uses`, a positive integer: how many
+times a grant at that level may use the tool.
+
+```json
+"terminal": {
+  "max_uses": 1,
+  "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
+}
+```
+
+A use is taken when a call is allowed, before it runs, so a call that then
+fails still counts. Further calls are refused and logged. Grants delegated
+from a limited grant share its limit, and a level cannot set a higher limit
+than the level above it. Every `delegate_task` call makes a new grant with a
+new count; set `max_uses` on `delegate_task` to limit how often a child
+delegates. The root has no `max_uses`. The count is kept in the Hermes
+process and applies to local `delegate_task` children.
+
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,
 timed-out, or errored lifecycle posts reserve their goals for the lifetime of the

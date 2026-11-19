@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Delegation plans: a tool entry in a level may set `max_uses`, how many times a
+  `delegate_task` child's grant may use that tool. A use is taken when a call is allowed;
+  further calls are refused and logged. Grants delegated from a limited grant share its
+  limit. Plans without `max_uses` behave as before.
+
 ## 0.4.2 - Unreleased
 
 - `hermes-tenuo a2a check` checks tokens only in the process environment and no longer

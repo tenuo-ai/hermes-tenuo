@@ -1,0 +1,250 @@
+"""``max_uses`` in a delegation plan: how many times a child's grant may use a tool."""
+
+import copy
+import threading
+
+import pytest
+from tenuo import All, AnyOf, Regex, SigningKey, Warrant
+import tenuo_core
+
+from hermes_tenuo.delegation import DelegationPlanError, parse_plan
+from hermes_tenuo.hermes_guard import HermesGuard
+
+PUSH = {"binaries": ["git"], "patterns": [r"^git push origin fix/123$"]}
+
+PLAN = {
+    "version": 1,
+    "root": {"tools": {"terminal": {"command": PUSH}, "delegate_task": {}}},
+    "levels": [
+        {
+            "role": "pusher",
+            "ttl_seconds": 300,
+            "tools": {"terminal": {"max_uses": 1, "command": PUSH}},
+        },
+    ],
+}
+
+NESTED = {
+    "version": 1,
+    "root": {"tools": {"terminal": {"command": PUSH}, "delegate_task": {}}},
+    "levels": [
+        {
+            "ttl_seconds": 300,
+            "tools": {"terminal": {"max_uses": 2, "command": PUSH}, "delegate_task": {"max_uses": 1}},
+        },
+        {"ttl_seconds": 120, "tools": {"terminal": {"command": PUSH}}},
+    ],
+}
+
+
+def _guard(plan, **kwargs):
+    root_key, agent_key = SigningKey.generate(), SigningKey.generate()
+    constraint = All([tenuo_core.Shlex(allow=PUSH["binaries"]), AnyOf([Regex(p) for p in PUSH["patterns"]])])
+    warrant = (
+        Warrant.mint_builder()
+        .holder(agent_key.public_key)
+        .capability("terminal", command=constraint)
+        .capability("delegate_task")
+        .ttl(3600)
+        .mint(root_key)
+    )
+    events = []
+    guard = HermesGuard(
+        warrant=warrant, signing_key=agent_key, trusted_roots=[root_key.public_key],
+        delegation_plan=parse_plan(plan), audit_callback=events.append, **kwargs,
+    )
+    return guard, events
+
+
+def _push(guard, session, call_id="", **kwargs):
+    return guard.pre_tool_call(
+        "terminal", {"command": "git push origin fix/123"}, session_id=session, tool_call_id=call_id, **kwargs,
+    )
+
+
+def _delegate(guard, parent, child, goal="push the fix", call_id=""):
+    blocked = guard.pre_tool_call("delegate_task", {"goal": goal}, session_id=parent, tool_call_id=call_id)
+    if blocked is None:
+        guard.on_subagent_start(parent_session_id=parent, child_session_id=child, child_goal=goal)
+    return blocked
+
+
+def test_a_child_uses_the_tool_once_then_is_refused():
+    guard, events = _guard(PLAN)
+    assert _delegate(guard, "s0", "s1") is None
+    assert _push(guard, "s1") is None
+    refused = _push(guard, "s1")
+    assert refused["action"] == "block"
+    assert "use limit reached" in refused["message"] and "terminal 1 time" in refused["message"]
+    assert _push(guard, "s1") is not None  # and stays refused
+    assert [e.decision for e in events if e.tool == "terminal"] == ["ALLOW", "DENY", "DENY"]
+    assert "use limit" in events[-1].reason
+
+
+def test_a_call_the_warrant_refuses_takes_no_use():
+    guard, _ = _guard(PLAN)
+    _delegate(guard, "s0", "s1")
+    assert guard.pre_tool_call("terminal", {"command": "git push origin main"}, session_id="s1") is not None
+    assert _push(guard, "s1") is None
+
+
+def test_each_delegation_gets_its_own_count_and_the_parent_has_none():
+    guard, _ = _guard(PLAN)
+    _delegate(guard, "s0", "s1", goal="first")
+    _delegate(guard, "s0", "s2", goal="second")
+    assert _push(guard, "s1") is None
+    assert _push(guard, "s2") is None
+    assert _push(guard, "s1") is not None
+    assert _push(guard, "s2") is not None
+    for _ in range(3):
+        assert _push(guard, "s0") is None  # the plan sets no limit on the parent
+
+
+def test_grants_below_share_the_limit_of_the_grant_above():
+    guard, _ = _guard(NESTED)
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1") is None                # 1 of the child's 2
+    assert _delegate(guard, "s1", "s2") is None
+    assert _push(guard, "s2") is None                # the grandchild takes the 2nd
+    assert _push(guard, "s2") is not None            # nothing left above it
+    assert _push(guard, "s1") is not None
+
+
+def test_delegating_can_be_limited_too():
+    guard, _ = _guard(NESTED)
+    _delegate(guard, "s0", "s1")
+    assert _delegate(guard, "s1", "s2", goal="a") is None
+    refused = _delegate(guard, "s1", "s3", goal="b")
+    assert refused is not None and "delegate_task 1 time" in refused["message"]
+
+
+def test_a_delegation_that_is_rejected_gives_its_use_back():
+    plan = copy.deepcopy(NESTED)
+    guard, _ = _guard(plan)
+    _delegate(guard, "s0", "s1")
+    # A toolset that leaves the child with no tools is rejected after the warrant allowed the call.
+    rejected = guard.pre_tool_call(
+        "delegate_task", {"goal": "x", "toolsets": ["no-such-toolset"]}, session_id="s1",
+    )
+    assert rejected is not None and "use limit" not in rejected["message"]
+    assert _delegate(guard, "s1", "s2") is None
+
+
+def test_concurrent_calls_cannot_exceed_the_limit():
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 5
+    guard, _ = _guard(plan)
+    _delegate(guard, "s0", "s1")
+    allowed, start = [], threading.Barrier(16)
+
+    def call():
+        start.wait()
+        if _push(guard, "s1") is None:
+            allowed.append(1)
+
+    threads = [threading.Thread(target=call) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(allowed) == 5
+
+
+def test_log_only_mode_reports_the_limit_without_blocking():
+    guard, events = _guard(PLAN, on_denial="log")
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1") is None
+    assert _push(guard, "s1") is None
+    assert [e.decision for e in events if e.tool == "terminal"] == ["ALLOW", "DENY"]
+
+
+def test_a_retired_child_stays_refused():
+    guard, _ = _guard(PLAN)
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1") is None
+    guard.clear_session_warrant("s1")
+    assert _push(guard, "s1") is not None
+
+
+# Hermes builds whose tool registry checks a call after the plugin hook did.
+
+def test_hook_then_registry_check_of_one_call_takes_one_use():
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 2
+    guard, _ = _guard(plan)
+    guard._registry_enforces = True
+    _delegate(guard, "s0", "s1")
+    for call_id in ("call_1", "call_2"):
+        assert _push(guard, "s1", call_id) is None
+        assert _push(guard, "s1", call_id, registry_check=True) is None
+    assert _push(guard, "s1", "call_3") is not None
+
+
+def test_a_registry_only_call_takes_a_use():
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1", "call_1", registry_check=True) is None
+    assert _push(guard, "s1", "call_2", registry_check=True) is not None
+
+
+def test_a_repeated_call_id_cannot_add_uses():
+    guard, _ = _guard(PLAN)
+    guard._registry_enforces = True
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1", "call_1") is None
+    assert _push(guard, "s1", "call_1") is not None                       # the hook always takes a use
+    assert _push(guard, "s1", "call_1", registry_check=True) is None      # the first call's own second check
+    assert _push(guard, "s1", "call_1", registry_check=True) is not None  # and only that one
+
+
+def test_without_a_registry_check_a_repeated_call_id_gets_no_pass():
+    guard, _ = _guard(PLAN)
+    _delegate(guard, "s0", "s1")
+    assert _push(guard, "s1", "call_1") is None
+    assert _push(guard, "s1", "call_1", registry_check=True) is not None
+
+
+# Plan format.
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "1", None, []])
+def test_max_uses_must_be_a_positive_integer(value):
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = value
+    with pytest.raises(DelegationPlanError, match="max_uses must be a positive integer"):
+        parse_plan(plan)
+
+
+def test_max_uses_is_refused_on_the_root():
+    plan = copy.deepcopy(PLAN)
+    plan["root"]["tools"]["terminal"]["max_uses"] = 1
+    with pytest.raises(DelegationPlanError, match="only supported in levels"):
+        parse_plan(plan)
+
+
+def test_a_level_cannot_raise_the_limit_of_the_level_above():
+    plan = copy.deepcopy(NESTED)
+    plan["levels"][1]["tools"]["terminal"]["max_uses"] = 3
+    with pytest.raises(DelegationPlanError, match="larger than the level above"):
+        parse_plan(plan)
+    plan["levels"][1]["tools"]["terminal"]["max_uses"] = 2
+    assert parse_plan(plan).levels[1].max_uses == {"terminal": 2}
+
+
+def test_an_argument_named_max_uses_is_still_an_argument():
+    plan = copy.deepcopy(PLAN)
+    plan["root"]["tools"]["retry"] = {"max_uses": {"range": [1, 5]}}
+    plan["levels"][0]["tools"]["retry"] = {"max_uses": {"range": [1, 3]}}
+    level = parse_plan(plan).levels[0]
+    assert level.max_uses == {"terminal": 1}
+    assert "max_uses" in level.tools["retry"] and "max_uses" not in level.tools["terminal"]
+
+
+def test_plans_without_max_uses_are_unchanged():
+    plan = copy.deepcopy(PLAN)
+    del plan["levels"][0]["tools"]["terminal"]["max_uses"]
+    guard, _ = _guard(plan)
+    _delegate(guard, "s0", "s1")
+    for _ in range(4):
+        assert _push(guard, "s1") is None
+    assert guard._session_uses == {}

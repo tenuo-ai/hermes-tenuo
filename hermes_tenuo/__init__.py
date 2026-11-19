@@ -214,6 +214,7 @@ def _register_guard_hooks(ctx: Any, guard: Any) -> None:
                     task_id=str(kwargs.get("task_id") or ""),
                     session_id=str(kwargs.get("session_id") or ""),
                     tool_call_id=str(kwargs.get("tool_call_id") or ""),
+                    registry_check=True,
                 )
                 if result and result.get("action") == "block":
                     # Use EnforcementDenied sentinel so the registry distinguishes
@@ -227,6 +228,7 @@ def _register_guard_hooks(ctx: Any, guard: Any) -> None:
 
             _tool_registry.set_enforcement_fn(_enforcement_fn)
             _registered_via_registry = True
+            guard.registry_enforces()
             logger.info("hermes-tenuo: enforcement registered via ToolRegistry (universal coverage)")
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry enforcement unavailable (%s), using hook fallback", exc)
