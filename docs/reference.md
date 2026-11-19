@@ -758,7 +758,10 @@ from a limited grant share its limit, and a level cannot set a higher limit
 than the level above it. Every `delegate_task` call makes a new grant with a
 new count; set `max_uses` on `delegate_task` to limit how often a child
 delegates. The root has no `max_uses`. The count is kept in the Hermes
-process and applies to local `delegate_task` children.
+process and applies to local `delegate_task` children. Tool names with and
+without the `tool:` prefix share a budget; if both retained entries set a
+limit, the smaller limit applies. With `on_denial: log`, exhausted limits
+are logged but ordinary tool calls still run; delegation remains blocked.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,

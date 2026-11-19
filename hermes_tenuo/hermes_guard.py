@@ -815,10 +815,12 @@ class HermesGuard:
                 if not {"delegate_task", "tenuo_delegate"} & {t.removeprefix("tool:") for t in keep}:
                     # No local or remote delegation capability remains.
                     builder.terminal()
-                limits = {
-                    tool.removeprefix("tool:"): uses
-                    for tool, uses in level.max_uses.items() if tool in keep
-                }
+                limits: Dict[str, int] = {}
+                for tool, limit in level.max_uses.items():
+                    if tool in keep:
+                        name = tool.removeprefix("tool:")
+                        # Aliases spend the same budget; neither entry may relax it.
+                        limits[name] = min(limits.get(name, limit), limit)
                 uses = UseBudget(limits, parent_uses) if limits or parent_uses is not None else None
                 planned.append(_ChildGrant(
                     builder.delegate(parent_key), chain, child_key, goal, invocation_id, uses=uses,
@@ -1469,6 +1471,11 @@ class HermesGuard:
                 result = replace(result, allowed=False, denial_reason=blocked["message"],
                                  error_type="delegation_rejected", chain_result=None)
 
+        # Only successful authorization leaves a registry pass. A rejected
+        # delegation refunded its use and must not leave a free pass behind.
+        if result.allowed and used is not None and self._registry_enforces and not registry_check:
+            used[0].leave_pass((tool_call_id, self._call_key((tool_name, args, session_id, task_id))))
+
         if self._control_plane is not None:
             try:
                 self._control_plane.emit_for_enforcement(
@@ -1520,8 +1527,6 @@ class HermesGuard:
         limit = budget.take(tool)
         if limit is not None:
             return limit, None
-        if self._registry_enforces and not registry_check:
-            budget.leave_pass(this_call)
         return None, (budget, tool)
 
     _MAX_PENDING_DECISIONS = 2048

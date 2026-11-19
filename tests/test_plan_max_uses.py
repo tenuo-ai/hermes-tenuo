@@ -40,14 +40,11 @@ NESTED = {
 def _guard(plan, **kwargs):
     root_key, agent_key = SigningKey.generate(), SigningKey.generate()
     constraint = All([tenuo_core.Shlex(allow=PUSH["binaries"]), AnyOf([Regex(p) for p in PUSH["patterns"]])])
-    warrant = (
-        Warrant.mint_builder()
-        .holder(agent_key.public_key)
-        .capability("terminal", command=constraint)
-        .capability("delegate_task")
-        .ttl(3600)
-        .mint(root_key)
-    )
+    builder = Warrant.mint_builder().holder(agent_key.public_key).capability("delegate_task")
+    for tool in plan["root"]["tools"]:
+        if tool.removeprefix("tool:") == "terminal":
+            builder.capability(tool, command=constraint)
+    warrant = builder.ttl(3600).mint(root_key)
     events = []
     guard = HermesGuard(
         warrant=warrant, signing_key=agent_key, trusted_roots=[root_key.public_key],
@@ -248,3 +245,36 @@ def test_plans_without_max_uses_are_unchanged():
     for _ in range(4):
         assert _push(guard, "s1") is None
     assert guard._session_uses == {}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("first_tool", ["terminal", "tool:terminal"])
+def test_aliases_share_the_stricter_limit_regardless_of_entry_order(reverse, first_tool):
+    plan = copy.deepcopy(PLAN)
+    plan["root"]["tools"]["tool:terminal"] = {"command": PUSH}
+    entries = [("terminal", {"max_uses": 1, "command": PUSH}),
+               ("tool:terminal", {"max_uses": 3, "command": PUSH})]
+    plan["levels"][0]["tools"] = dict(reversed(entries) if reverse else entries)
+    guard, _ = _guard(plan)
+    assert _delegate(guard, "s0", "s1") is None
+    assert guard.pre_tool_call(first_tool, {"command": "git push origin fix/123"}, session_id="s1") is None
+    for tool in ("terminal", "tool:terminal"):
+        refused = guard.pre_tool_call(tool, {"command": "git push origin fix/123"}, session_id="s1")
+        assert refused is not None and "terminal 1 time" in refused["message"]
+
+
+def test_rejected_delegation_does_not_leave_a_refunded_registry_pass(monkeypatch):
+    guard, _ = _guard(NESTED)
+    guard._registry_enforces = True
+    assert _delegate(guard, "s0", "s1") is None
+    args = {"goal": "first"}
+    with monkeypatch.context() as patch:
+        patch.setattr(guard, "_register_planned_children", lambda *a: {"action": "block", "message": "rejected"})
+        assert guard.pre_tool_call("delegate_task", args, session_id="s1", tool_call_id="retry") is not None
+    # A registry-only retry must spend the returned use, not redeem a free pass.
+    assert guard.pre_tool_call(
+        "delegate_task", args, session_id="s1", tool_call_id="retry", registry_check=True,
+    ) is None
+    guard.on_subagent_start(parent_session_id="s1", child_session_id="s2", child_goal="first")
+    refused = _delegate(guard, "s1", "s3", goal="second", call_id="next")
+    assert refused is not None and "delegate_task 1 time" in refused["message"]
