@@ -62,10 +62,6 @@ def _blocking_register(message: str):
     return register
 
 
-# What a built package ships: Python sources and the skills' Markdown.
-_COMPARED_SUFFIXES = (".py", ".md")
-
-
 def _package_digest(package_dir: Path):
     """A digest of the code and bundled skills in *package_dir*, or None if it can't be read.
 
@@ -77,9 +73,10 @@ def _package_digest(package_dir: Path):
 
     digest = hashlib.sha256()
     try:
+        # What a built package ships: Python sources and each bundled skill's SKILL.md.
         files = sorted(
             (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
-            if p.suffix in _COMPARED_SUFFIXES
+            if p.suffix == ".py" or p.name == "SKILL.md"
         )
         files = [
             (name, p) for name, p in files

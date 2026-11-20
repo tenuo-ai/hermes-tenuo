@@ -513,7 +513,7 @@ def _package_digest(package_dir: Path) -> Optional[str]:
     try:
         files = sorted(
             (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
-            if p.suffix in (".py", ".md")
+            if p.suffix == ".py" or p.name == "SKILL.md"
         )
         files = [
             (name, p) for name, p in files

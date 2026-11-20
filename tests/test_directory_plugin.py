@@ -160,6 +160,11 @@ def _edit_version(pkg):
     version.write_text(version.read_text() + "\n# changed\n")
 
 
+def _edit_skill(pkg):
+    skill = pkg / "skills" / "tenuo-scope" / "SKILL.md"
+    skill.write_text(skill.read_text() + "\nchanged\n")
+
+
 def _add_stray_files(pkg):
     (pkg / ".DS_Store").write_bytes(b"\0")
     (pkg / "cli.py~").write_text("backup")
@@ -168,6 +173,7 @@ def _add_stray_files(pkg):
     (pkg / ".pytest_cache" / "v").mkdir(parents=True)
     (pkg / ".pytest_cache" / "README.md").write_text("cache")
     (pkg / ".pytest_cache" / "v" / "stale.py").write_text("cache")
+    (pkg / "README.md").write_text("notes")
 
 
 @pytest.mark.parametrize("change", [None, _add_stray_files])
@@ -229,9 +235,10 @@ def test_doctor_compares_packages_as_the_directory_loader_does(tmp_path):
     shim = _load_as_hermes_does()
     package = ROOT / "hermes_tenuo"
     assert shim._package_digest(package) == cli._package_digest(package) is not None
-    shipped = {p for p in package.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
-    assert all(p.suffix in shim._COMPARED_SUFFIXES for p in shipped), "a packaged file type is not compared"
-    for change in (_add_stray_files, _edit_version):
+    # Besides Python sources the package ships only what package-data names.
+    assert 'hermes_tenuo = ["skills/*/SKILL.md"]' in (ROOT / "pyproject.toml").read_text(), \
+        "package-data changed: compare the new files in both digests"
+    for change in (_add_stray_files, _edit_version, _edit_skill):
         copy = tmp_path / change.__name__ / "hermes_tenuo"
         shutil.copytree(package, copy, ignore=shutil.ignore_patterns("__pycache__"))
         change(copy)
