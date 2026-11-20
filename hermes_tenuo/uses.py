@@ -1,14 +1,20 @@
 """Use limits for delegated grants (``max_uses`` in a delegation plan).
 
 A warrant says what a grant may do until it expires. How many times it has done
-it is state, and it is kept here, where the calls are checked. The count lives
-in this process for as long as the grant's session does.
+it is state, and it is kept here, where the calls are checked. A delegated
+child's count lives in this process, like its grant. The count of a warrant
+that outlives the process is kept in a file (:class:`UseStore`).
 """
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
+import time
 from collections import Counter
-from typing import Dict, Hashable, Iterator, NamedTuple, Optional
+from contextlib import closing
+from pathlib import Path
+from typing import Dict, Hashable, Iterator, NamedTuple, Optional, Tuple
 
 _lock = threading.Lock()  # one lock for every budget: a use is taken along a whole chain
 
@@ -46,6 +52,81 @@ class Use(NamedTuple):
         return {"count": self.count, "limit": self.limit, "grant": self.grant}
 
 
+def default_store_path() -> Path:
+    """``$HERMES_HOME/tenuo/uses.db`` (profile-aware inside Hermes; see ``_home.hermes_home``)."""
+    from hermes_tenuo._home import hermes_home
+
+    return hermes_home() / "tenuo" / "uses.db"
+
+
+class UseStore:
+    """Use counts in a SQLite file, shared by every process of one Hermes profile.
+
+    One row per warrant and tool. Taking a use is one write transaction, so two
+    processes can never both take the last one. Rows go when the warrant expires.
+    """
+
+    def __init__(self, path: os.PathLike | str) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._open()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS uses ("
+                "warrant TEXT NOT NULL, tool TEXT NOT NULL, used INTEGER NOT NULL, expires REAL NOT NULL, "
+                "PRIMARY KEY (warrant, tool))"
+            )
+            db.execute("COMMIT")
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+    def _open(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path, timeout=10, isolation_level=None)
+
+    def take(self, warrant: str, tool: str, limit: int, expires: float, at_least: int = 0) -> Tuple[bool, int]:
+        """Take one use if fewer than *limit* are used. Returns (taken, uses now recorded).
+
+        *at_least* is the count this process has already seen: a file that
+        reports less (replaced or cleared while Hermes runs) is corrected first.
+        """
+        with closing(self._open()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("DELETE FROM uses WHERE expires <= ?", (time.time(),))
+                db.execute("INSERT OR IGNORE INTO uses VALUES (?, ?, 0, ?)", (warrant, tool, expires))
+                used = db.execute("SELECT used FROM uses WHERE warrant = ? AND tool = ?", (warrant, tool)).fetchone()[0]
+                used = max(used, at_least)
+                taken = used < limit
+                if taken:
+                    used += 1
+                db.execute("UPDATE uses SET used = ? WHERE warrant = ? AND tool = ?", (used, warrant, tool))
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return taken, used
+
+    def give_back(self, warrant: str, tool: str) -> int:
+        with closing(self._open()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("UPDATE uses SET used = used - 1 WHERE warrant = ? AND tool = ? AND used > 0", (warrant, tool))
+                row = db.execute("SELECT used FROM uses WHERE warrant = ? AND tool = ?", (warrant, tool)).fetchone()
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return row[0] if row else 0
+
+    def used(self, warrant: str) -> Dict[str, int]:
+        """tool → uses recorded for *warrant*."""
+        with closing(self._open()) as db:
+            return dict(db.execute("SELECT tool, used FROM uses WHERE warrant = ? AND expires > ?",
+                                   (warrant, time.time())).fetchall())
+
+
 class UseBudget:
     """How many times one grant may still use each tool that has a limit.
 
@@ -53,11 +134,18 @@ class UseBudget:
     so the grants below one never use a tool more often than it allows.
     """
 
-    def __init__(self, limits: Dict[str, int], parent: Optional["UseBudget"] = None, grant: str = "") -> None:
+    def __init__(
+        self, limits: Dict[str, int], parent: Optional["UseBudget"] = None, grant: str = "",
+        *, store: Optional[UseStore] = None, expires: float = 0.0,
+    ) -> None:
         self._limits = dict(limits)
         self._used: Dict[str, int] = {}
         self._parent = parent
         self._grant = grant
+        # With a store, this budget's own count is kept in the file; _used mirrors
+        # the highest count this process has seen.
+        self._store = store
+        self._expires = expires
         self._passes: Counter = Counter()
 
     def _chain(self, tool: str) -> Iterator["UseBudget"]:
@@ -75,10 +163,24 @@ class UseBudget:
                 return None
             for budget in holders:
                 used, limit = budget._used.get(tool, 0), budget._limits[tool]
-                if used >= limit:
+                if budget._store is None and used >= limit:
                     return Use(False, used, limit, budget._grant, budget is self)
+            stored = []
             for budget in holders:
-                budget._used[tool] = budget._used.get(tool, 0) + 1
+                if budget._store is None:
+                    continue
+                taken, used = budget._store.take(
+                    budget._grant, tool, budget._limits[tool], budget._expires, budget._used.get(tool, 0),
+                )
+                budget._used[tool] = used
+                if not taken:
+                    for earlier in stored:
+                        earlier._used[tool] = earlier._store.give_back(earlier._grant, tool)
+                    return Use(False, used, budget._limits[tool], budget._grant, budget is self)
+                stored.append(budget)
+            for budget in holders:
+                if budget._store is None:
+                    budget._used[tool] = budget._used.get(tool, 0) + 1
             tightest = min(holders, key=lambda b: b._limits[tool] - b._used[tool])
             return Use(True, tightest._used[tool], tightest._limits[tool], tightest._grant, tightest is self)
 
@@ -86,7 +188,9 @@ class UseBudget:
         """Return a use taken for a call that was then refused before it ran."""
         with _lock:
             for budget in self._chain(tool):
-                if budget._used.get(tool, 0) > 0:
+                if budget._store is not None:
+                    budget._used[tool] = budget._store.give_back(budget._grant, tool)
+                elif budget._used.get(tool, 0) > 0:
                     budget._used[tool] -= 1
 
     def limits(self, tool: str) -> bool:

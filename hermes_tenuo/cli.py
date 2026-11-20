@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import shlex
 import math
 import os
 import re
@@ -328,13 +329,13 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
         print(f"export TENUO_TRUSTED_ROOT={trusted_root_b64}")
         if plan is not None:
-            print(f"export TENUO_DELEGATION_PLAN={plan_path}")
+            print(f"export TENUO_DELEGATION_PLAN={shlex.quote(str(plan_path))}")
     elif args.output == "yaml":
         print("# Add to ~/.hermes/config.yaml under plugins.entries.hermes-tenuo:")
         print(f"warrant: {warrant_b64}")
         print(f"trusted_root: {trusted_root_b64}")
         if plan is not None:
-            print(f"delegation_plan: {plan_path}")
+            print(f"delegation_plan: {json.dumps(str(plan_path))}")
         print("# Export before running hermes:")
         print(f"# export TENUO_SIGNING_KEY={signing_key_b64}")
     else:  # "full" default
@@ -348,7 +349,7 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"      trusted_root: {trusted_root_b64}")
         print("      signing_key_env: TENUO_SIGNING_KEY")
         if plan is not None:
-            print(f"      delegation_plan: {plan_path}")
+            print(f"      delegation_plan: {json.dumps(str(plan_path))}")
         print()
         print("# ── Signing key (export before running hermes) ───────────────────")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
@@ -756,6 +757,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     check(True, "delegation plan loads")
                     for line in describe(loaded_plan):
                         note(line)
+                    if loaded_plan.root.max_uses:
+                        if get_access_block(None) is not None:
+                            check(False, "max_uses on the plan's root is not supported together with access roles",
+                                  f"remove one — {blocks}")
+                        else:
+                            from hermes_tenuo.uses import UseStore, default_store_path
+                            try:
+                                at = default_store_path()
+                                spent = UseStore(at).used(str(warrant.id)) if warrant and at.exists() else {}
+                            except Exception as exc:
+                                check(False, f"use-count file cannot be read ({type(exc).__name__})", blocks)
+                            else:
+                                for tool, limit in loaded_plan.root.use_limits(loaded_plan.root.tools).items():
+                                    note(f"this warrant has used {tool} {spent.get(tool, 0)} of {limit} times; "
+                                         "a new warrant starts a new count")
                     for line in unbounded_routes(loaded_plan):
                         note(f"check: {line}")
 

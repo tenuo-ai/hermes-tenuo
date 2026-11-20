@@ -214,10 +214,12 @@ def test_max_uses_must_be_a_positive_integer(value):
         parse_plan(plan)
 
 
-def test_max_uses_is_refused_on_the_root():
+def test_the_root_may_set_a_limit_and_levels_may_not_exceed_it():
     plan = copy.deepcopy(PLAN)
-    plan["root"]["tools"]["terminal"]["max_uses"] = 1
-    with pytest.raises(DelegationPlanError, match="only supported in levels"):
+    plan["root"]["tools"]["terminal"]["max_uses"] = 3
+    assert parse_plan(plan).root.max_uses == {"terminal": 3}
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 4
+    with pytest.raises(DelegationPlanError, match="larger than the level above"):
         parse_plan(plan)
 
 
@@ -679,7 +681,7 @@ def test_mint_with_a_plan_makes_a_warrant_that_delegates_under_it(tmp_path, caps
 
     assert cmd_mint(argparse.Namespace(ttl="1h", allow=None, output="full", plan=str(path))) == 0
     out = capsys.readouterr().out
-    assert f"delegation_plan: {path.resolve()}" in out and "depth 1: terminal (at most 1 use)" in out
+    assert f"delegation_plan: {json.dumps(str(path.resolve()))}" in out and "depth 1: terminal (at most 1 use)" in out
 
 
 def test_mint_refuses_a_tool_the_plan_already_grants(tmp_path, capsys):
@@ -833,3 +835,265 @@ def test_a_limit_cannot_be_raised_two_levels_down():
     plan["levels"].append({"ttl_seconds": 60, "tools": {"terminal": {"max_uses": 50, "command": PUSH}}})
     with pytest.raises(DelegationPlanError, match="larger than the level above"):
         parse_plan(plan)
+
+
+# A limit on the plan's root: a total for the warrant and everything delegated from it.
+
+ROOT_LIMIT = {
+    "version": 1,
+    "root": {"tools": {"terminal": {"max_uses": 2, "command": PUSH}, "delegate_task": {}}},
+    "levels": [{"ttl_seconds": 300, "tools": {"terminal": {"command": PUSH}}}],
+}
+
+
+def _rooted(plan=ROOT_LIMIT, store=None, keys=None, **kwargs):
+    root_key, agent_key = keys or (SigningKey.generate(), SigningKey.generate())
+    constraint = All([tenuo_core.Shlex(allow=PUSH["binaries"]), AnyOf([Regex(p) for p in PUSH["patterns"]])])
+    warrant = kwargs.pop("warrant", None) or (
+        Warrant.mint_builder().holder(agent_key.public_key)
+        .capability("terminal", command=constraint).capability("delegate_task").ttl(3600).mint(root_key)
+    )
+    events = []
+    guard = HermesGuard(warrant=warrant, signing_key=agent_key, trusted_roots=[root_key.public_key],
+                        delegation_plan=parse_plan(plan), audit_callback=events.append, use_store=store, **kwargs)
+    return guard, events, warrant, (root_key, agent_key)
+
+
+def test_the_roots_limit_is_a_total_for_the_parent_and_its_children():
+    guard, events, warrant, _ = _rooted()
+    assert _push(guard, "s0") is None
+    assert events[-1].use == {"count": 1, "limit": 2, "grant": str(warrant.id)}
+    _delegate(guard, "s0", "s1", goal="a")
+    assert _push(guard, "s1") is None
+    assert events[-1].use == {"count": 2, "limit": 2, "grant": str(warrant.id)}
+    refused = _push(guard, "s1")
+    assert "the grant this one was delegated from allows terminal 2 times" in refused["message"]
+    _delegate(guard, "s0", "s2", goal="b")                 # a new child does not bring new uses
+    assert _push(guard, "s2") is not None
+    assert "this grant allows terminal 2 times" in _push(guard, "s0")["message"]
+
+
+def test_delegating_again_cannot_get_around_a_limit_on_the_root():
+    plan = copy.deepcopy(ROOT_LIMIT)
+    plan["root"]["tools"]["terminal"]["max_uses"] = 1
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 1
+    guard, _, _, _ = _rooted(plan)
+    pushes = 0
+    for n in range(4):
+        assert _delegate(guard, "s0", f"c{n}", goal=f"goal {n}") is None
+        pushes += _push(guard, f"c{n}") is None
+    assert pushes == 1
+
+
+def test_the_root_can_limit_how_often_it_delegates():
+    plan = copy.deepcopy(ROOT_LIMIT)
+    plan["root"]["tools"]["delegate_task"] = {"max_uses": 1}
+    guard, _, _, _ = _rooted(plan)
+    rejected = guard.pre_tool_call("delegate_task", {"goal": "x", "toolsets": ["no-such-toolset"]}, session_id="s0")
+    assert rejected is not None and "use limit" not in rejected["message"]   # gives its use back
+    assert _delegate(guard, "s0", "s1", goal="a") is None
+    assert "use limit reached" in _delegate(guard, "s0", "s2", goal="b")["message"]
+
+
+def test_the_count_survives_a_restart_and_is_shared_between_processes_of_one_profile(tmp_path):
+    from hermes_tenuo.uses import UseStore
+
+    guard, _, warrant, keys = _rooted(store=UseStore(tmp_path / "uses.db"))
+    assert _push(guard, "s0") is None
+    again, events, _, _ = _rooted(store=UseStore(tmp_path / "uses.db"), keys=keys, warrant=warrant)   # "restart"
+    assert _push(again, "s0") is None
+    assert events[-1].use["count"] == 2
+    assert _push(again, "s0") is not None
+    assert _push(guard, "s0") is not None                  # the first process sees the same total
+    assert UseStore(tmp_path / "uses.db").used(str(warrant.id)) == {"terminal": 2}
+
+
+def test_a_new_warrant_starts_a_new_count(tmp_path):
+    from hermes_tenuo.uses import UseStore
+
+    guard, _, _, keys = _rooted(store=UseStore(tmp_path / "uses.db"))
+    assert _push(guard, "s0") is None and _push(guard, "s0") is None and _push(guard, "s0") is not None
+    fresh, _, _, _ = _rooted(store=UseStore(tmp_path / "uses.db"), keys=keys)
+    assert _push(fresh, "s0") is None
+
+
+def _hammer(path, warrant_b64, agent_b64, root_b64, tries, out):
+    """One process: try the limited call *tries* times, report how many were allowed."""
+    import base64
+
+    from hermes_tenuo.uses import UseStore
+
+    plan = copy.deepcopy(ROOT_LIMIT)
+    plan["root"]["tools"]["terminal"]["max_uses"] = 7
+    guard = HermesGuard(
+        warrant=Warrant.from_bytes(base64.b64decode(warrant_b64)),
+        signing_key=SigningKey.from_bytes(base64.b64decode(agent_b64)),
+        trusted_roots=[tenuo_core.PublicKey.from_bytes(base64.b64decode(root_b64))],
+        delegation_plan=parse_plan(plan), use_store=UseStore(path),
+    )
+    out.put(sum(_push(guard, "s0") is None for _ in range(tries)))
+
+
+def test_several_processes_cannot_exceed_the_total(tmp_path):
+    import base64
+    import multiprocessing
+
+    plan = copy.deepcopy(ROOT_LIMIT)
+    plan["root"]["tools"]["terminal"]["max_uses"] = 7
+    _, _, warrant, (root_key, agent_key) = _rooted(plan)
+    b64 = lambda raw: base64.b64encode(raw).decode()  # noqa: E731
+    ctx = multiprocessing.get_context("spawn")
+    out = ctx.Queue()
+    workers = [
+        ctx.Process(target=_hammer, args=(str(tmp_path / "uses.db"), b64(warrant.to_bytes()),
+                                          b64(agent_key.secret_key_bytes()), b64(root_key.public_key.to_bytes()), 6, out))
+        for _ in range(4)
+    ]
+    for w in workers:
+        w.start()
+    allowed = sum(out.get(timeout=60) for _ in workers)
+    for w in workers:
+        w.join(timeout=30)
+    assert allowed == 7
+
+
+def test_removing_the_count_file_while_hermes_runs_does_not_reset_the_count(tmp_path):
+    from hermes_tenuo.uses import UseStore
+
+    guard, _, warrant, _ = _rooted(store=UseStore(tmp_path / "uses.db"))
+    assert _push(guard, "s0") is None and _push(guard, "s0") is None
+    (tmp_path / "uses.db").unlink()
+    UseStore(tmp_path / "uses.db")                         # an empty file in its place
+    assert _push(guard, "s0") is not None
+    assert UseStore(tmp_path / "uses.db").used(str(warrant.id)) == {"terminal": 2}   # and the file is corrected
+
+
+def test_a_count_file_that_cannot_be_used_blocks_the_call(tmp_path):
+    from hermes_tenuo._guard import PluginGuard
+    from hermes_tenuo.uses import UseStore
+
+    guard, _, _, _ = _rooted(store=UseStore(tmp_path / "uses.db"))
+    hooks = PluginGuard(guard)
+    push = {"command": "git push origin fix/123"}
+    assert hooks.pre_tool_call_hook(tool_name="terminal", args=push, session_id="s0") is None
+    (tmp_path / "uses.db").write_bytes(b"not a database")
+    blocked = hooks.pre_tool_call_hook(tool_name="terminal", args=push, session_id="s0")
+    assert blocked["action"] == "block" and "authorization check failed" in blocked["message"]
+
+
+def test_counts_of_expired_warrants_are_dropped(tmp_path):
+    from hermes_tenuo import uses
+
+    store = uses.UseStore(tmp_path / "uses.db")
+    assert store.take("old", "terminal", 1, uses.time.time() - 1) == (True, 1)
+    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (True, 1)
+    assert store.used("old") == {} and store.used("live") == {"terminal": 1}
+    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (False, 1)
+
+
+def test_a_root_limit_is_refused_together_with_access_roles():
+    with pytest.raises(DelegationPlanError, match="not supported together with access roles"):
+        _rooted(access_policy=object())
+
+
+def test_a_grant_with_a_chain_and_no_count_cannot_use_a_tool_the_root_limits():
+    """A grant another agent delegated in is not covered by this profile's count."""
+    guard, events, _, _ = _rooted()
+    _delegate(guard, "s0", "s1")
+    with guard._session_lock:
+        guard._session_uses.pop("s1")                      # as for a grant that arrived from elsewhere
+    refused = _push(guard, "s1")
+    assert refused is not None and "does not cover grants received from another agent" in refused["message"]
+    assert events[-1].decision == "DENY"
+
+
+def test_mint_and_doctor_show_the_roots_total(tmp_path, capsys):
+    import argparse
+    import json
+
+    from hermes_tenuo.cli import cmd_mint
+
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(ROOT_LIMIT))
+    path.chmod(0o600)
+    assert cmd_mint(argparse.Namespace(ttl="1h", allow=None, output="full", plan=str(path))) == 0
+    assert "the warrant: terminal (at most 2 uses in total, children included), delegate_task" in capsys.readouterr().out
+
+
+# Review findings on the first version of the session-id move and the audit reader.
+
+def test_a_task_id_shared_with_the_parent_never_moves_a_childs_grant():
+    guard, _ = _guard(PLAN)
+    guard.pre_tool_call("delegate_task", {"goal": "push the fix"}, session_id="p", task_id="shared")
+    guard.on_subagent_start(parent_session_id="p", child_session_id="c", child_goal="push the fix")
+    push = {"command": "git push origin fix/123"}
+    assert guard.pre_tool_call("terminal", push, session_id="c", task_id="shared") is None
+    for _ in range(2):                                     # the parent keeps its own warrant
+        assert guard.pre_tool_call("terminal", push, session_id="p", task_id="shared") is None
+    assert guard.pre_tool_call("terminal", push, session_id="c", task_id="shared") is not None  # the child its limit
+    assert "c" in guard._child_sessions
+
+
+def test_a_late_event_for_the_old_session_id_does_not_confuse_the_task():
+    guard, events = _guard(PLAN)
+    guard.pre_tool_call("delegate_task", {"goal": "push the fix"}, session_id="s0", task_id="s0")
+    guard.on_subagent_start(parent_session_id="s0", child_session_id="s1", child_goal="push the fix",
+                            child_subagent_id="sa-0-abc")
+    other = {"command": "git status"}
+    guard.pre_tool_call("terminal", other, session_id="s1", task_id="sa-0-abc", tool_call_id="call_0")
+    guard.pre_tool_call("terminal", other, session_id="s1-b", task_id="sa-0-abc", tool_call_id="call_1")  # moved
+    guard.post_tool_call("terminal", other, "", session_id="s1", task_id="sa-0-abc", tool_call_id="call_0",
+                         status="blocked")                 # late completion under the old id
+    push = {"command": "git push origin fix/123"}
+    assert guard.pre_tool_call("terminal", push, session_id="", task_id="sa-0-abc") is None   # a script's call
+    assert events[-1].session_id == "s1-b"
+
+
+def test_a_call_whose_session_was_rebound_meanwhile_is_refused(monkeypatch):
+    guard, _ = _guard(PLAN)
+    _delegate(guard, "s0", "s1")
+    stale = guard._resolve_warrant("s1")
+    guard.clear_session_warrant("s1")                      # retired after the call read its warrant
+    monkeypatch.setattr(guard, "_resolve_warrant", lambda session_id: stale)
+    refused = _push(guard, "s1")
+    assert refused is not None and "changed during the call" in refused["message"]
+
+
+def test_completion_records_close_their_call_even_without_an_outcome(tmp_path):
+    """A blocked call reported without a matching decision, then the same id reused."""
+    from hermes_tenuo.audit import read_audit_log
+
+    plan = copy.deepcopy(PLAN)
+    plan["levels"][0]["tools"]["terminal"]["max_uses"] = 2
+    guard, path = _logged(tmp_path, plan)
+    _delegate(guard, "s0", "s1")
+    push = {"command": "git push origin fix/123"}
+    guard.post_tool_call("terminal", push, "", session_id="s1", tool_call_id="call_0", status="blocked")
+    assert _push(guard, "s1", "call_0") is None
+    guard.post_tool_call("terminal", push, "ok", session_id="s1", tool_call_id="call_0")   # no status, no duration
+    assert _push(guard, "s1", "call_0") is None
+    rows = [r for r in read_audit_log(path) if r["tool"] == "terminal"]
+    assert [r["decision"] for r in rows] == ["DENY", "ALLOW", "ALLOW"]
+    assert [r.get("use", {}).get("count") for r in rows] == [None, 1, 2]
+
+
+def test_mint_prints_a_plan_path_that_survives_copying(tmp_path, capsys, monkeypatch):
+    import argparse
+    import json
+    import shlex
+
+    import yaml
+
+    from hermes_tenuo.cli import cmd_mint
+
+    monkeypatch.delenv("TENUO_SIGNING_KEY", raising=False)
+    folder = tmp_path / "My Plans: v2 # final"
+    folder.mkdir()
+    path = folder / "plan.json"
+    path.write_text(json.dumps(PLAN))
+    path.chmod(0o600)
+    assert cmd_mint(argparse.Namespace(ttl="1h", allow=None, output="env", plan=str(path))) == 0
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if "TENUO_DELEGATION_PLAN" in ln)
+    assert shlex.split(line) == ["export", f"TENUO_DELEGATION_PLAN={path.resolve()}"]
+    assert cmd_mint(argparse.Namespace(ttl="1h", allow=None, output="yaml", plan=str(path))) == 0
+    assert yaml.safe_load(capsys.readouterr().out)["delegation_plan"] == str(path.resolve())

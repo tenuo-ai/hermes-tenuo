@@ -6,6 +6,9 @@
   `delegate_task` child's grant may use that tool. A use is taken when a call is allowed;
   further calls are refused and logged. Grants delegated from a limited grant share its
   limit. Plans without `max_uses` behave as before.
+- `max_uses` on a plan's `root` is a total for the warrant and everything delegated from
+  it. The count is kept per warrant in `$HERMES_HOME/tenuo/uses.db`, survives restarts and
+  is shared by the profile's Hermes processes.
 - `hermes-tenuo mint --plan PLAN.json` mints a warrant that can delegate under a delegation
   plan and prints the `delegation_plan` setting. `hermes-tenuo doctor` lists what each depth
   of a plan may do.

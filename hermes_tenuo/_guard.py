@@ -160,6 +160,21 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "child_warrant and delegation_plan are mutually exclusive — "
             "every tool call is blocked until one is removed"
         )
+    use_store = None
+    if delegation_plan is not None and delegation_plan.root.max_uses:
+        if access_policy is not None:
+            raise WarrantLoadError(
+                "max_uses on the delegation plan's root is not supported together with access roles — "
+                "every tool call is blocked until one is removed"
+            )
+        from hermes_tenuo.uses import UseStore, default_store_path
+        try:
+            use_store = UseStore(default_store_path())
+        except Exception as exc:  # a limit that cannot be counted must not run uncounted
+            raise WarrantLoadError(
+                f"the use-count file cannot be opened ({type(exc).__name__}) — "
+                "every tool call is blocked until it can"
+            ) from exc
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
     if access_policy is not None:
@@ -185,6 +200,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         require_session_warrant=get_require_session_warrant(ctx),
         delegation_plan=delegation_plan,
         access_policy=access_policy,
+        use_store=use_store,
     )
 
     return PluginGuard(guard)

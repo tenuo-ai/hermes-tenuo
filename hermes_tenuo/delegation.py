@@ -120,10 +120,11 @@ class DelegationPlan:
 # when every ancestor level sets it.
 ALLOW_UNKNOWN = "_allow_unknown"
 
-# A tool entry in a level may set this to a positive integer: how many times a
-# grant at that level may use the tool. A use is taken when a call is allowed,
-# so a call that then fails still counts. The name is reserved: it is never
-# read as an argument of the tool.
+# A tool entry may set this to a positive integer: how many times a grant at
+# that level may use the tool. On the root it is the total for the warrant
+# itself and everything delegated from it. A use is taken when a call is
+# allowed, so a call that then fails still counts. The name is reserved: it is
+# never read as an argument of the tool.
 MAX_USES = "max_uses"
 
 
@@ -145,8 +146,6 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
             raise DelegationPlanError(f"{where}: {tool} constraints must be an object")
         for arg, spec in args.items():
             if arg == MAX_USES:
-                if root:
-                    raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} is only supported in levels")
                 if not isinstance(spec, int) or isinstance(spec, bool) or spec <= 0:
                     raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} must be a positive integer")
                 max_uses[tool] = spec
@@ -216,7 +215,8 @@ def parse_plan(data: Any) -> DelegationPlan:
     )
     for depth in range(1, plan.max_depth + 1):
         plan.constraints_for(depth)  # report ancestry errors at load time
-    inherited_limits: Dict[str, int] = {}
+    # The root's limits are totals for the whole tree, so they bound every level.
+    inherited_limits: Dict[str, int] = plan.root.use_limits(plan.root.tools)
     for index, level in enumerate(plan.levels):
         limits = level.use_limits(level.tools)
         for tool, uses in limits.items():
@@ -237,14 +237,15 @@ RUNS_CODE = ("execute_code", "terminal", "process_manage")
 def unbounded_routes(plan: DelegationPlan) -> List[str]:
     """Warnings for levels where a use limit sits next to an unlimited tool that runs code."""
     notes = []
-    for depth, level in enumerate(plan.levels, start=1):
+    named = [("the warrant", plan.root)] + [(f"depth {n}", lvl) for n, lvl in enumerate(plan.levels, start=1)]
+    for where, level in named:
         limited = {t.removeprefix("tool:") for t in level.max_uses}
         open_tools = [t for t in level.tools
                       if t.removeprefix("tool:") in RUNS_CODE and t.removeprefix("tool:") not in limited
                       and not (level.tools[t] or {}).keys() - {ALLOW_UNKNOWN}]
         if limited and open_tools:
             notes.append(
-                f"depth {depth}: {', '.join(sorted(limited))} has a use limit, but {', '.join(open_tools)} "
+                f"{where}: {', '.join(sorted(limited))} has a use limit, but {', '.join(open_tools)} "
                 "is granted with no argument limits and can run the same commands without one"
             )
     return notes
@@ -252,13 +253,18 @@ def unbounded_routes(plan: DelegationPlan) -> List[str]:
 
 def describe(plan: DelegationPlan) -> List[str]:
     """One line per level, for the command line: what a child at that depth may do."""
-    lines = []
-    for depth, level in enumerate(plan.levels, start=1):
-        tools = []
+    def tools_of(level: Level, what: str) -> str:
+        shown = []
         for tool in level.tools:
             limit = level.max_uses.get(tool)
-            tools.append(f"{tool} (at most {limit} use{'' if limit == 1 else 's'})" if limit else tool)
-        lines.append(f"depth {depth}: {', '.join(tools)}; expires after {level.ttl_seconds}s")
+            shown.append(f"{tool} (at most {limit} use{'' if limit == 1 else 's'}{what})" if limit else tool)
+        return ", ".join(shown)
+
+    lines = []
+    if plan.root.max_uses:
+        lines.append(f"the warrant: {tools_of(plan.root, ' in total, children included')}")
+    for depth, level in enumerate(plan.levels, start=1):
+        lines.append(f"depth {depth}: {tools_of(level, '')}; expires after {level.ttl_seconds}s")
     return lines
 
 

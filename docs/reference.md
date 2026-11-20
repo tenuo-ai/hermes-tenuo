@@ -761,8 +761,10 @@ non-spawn calls retain log-only behavior.
 
 ### Use limits
 
-A plan level can say how many times a child may use a tool. Use it when a
-child should do one thing once: one push, one write, one message.
+A plan can say how many times a tool may be used. Use it when an agent should
+do one thing once: one push, one write, one message. `max_uses` in a level
+limits each child started at that depth. `max_uses` on the `root` is a total
+for the warrant itself and everything delegated from it.
 
 ```json
 {
@@ -770,6 +772,7 @@ child should do one thing once: one push, one write, one message.
   "root": {
     "tools": {
       "terminal": {
+        "max_uses": 1,
         "_allow_unknown": true,
         "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
       },
@@ -798,8 +801,9 @@ hermes-tenuo mint --plan plan.json --ttl 1h
 ```
 
 Paste the printed config and export the key. A child started by
-`delegate_task` can now run that one command once, within five minutes. Its
-second try is refused:
+`delegate_task` can now run that one command once, within five minutes, and
+this warrant allows it once in total, however many children the parent
+starts. A second try is refused:
 
 ```text
 $ hermes-tenuo audit
@@ -809,7 +813,8 @@ $ hermes-tenuo audit
 
 Each record of a limited call carries `"use": {"count", "limit", "grant"}`:
 the use it took, or for a refusal the limit that is used up, and the id of the
-grant that limit belongs to. `hermes-tenuo doctor` lists what each depth may do.
+grant that limit belongs to. `hermes-tenuo doctor` lists what each depth may
+do and how many of the warrant's own uses are spent.
 
 What the limit covers:
 
@@ -823,15 +828,21 @@ What the limit covers:
   like that.
 - **The whole subtree.** Grants delegated from a limited grant share its
   limit, and a level cannot set a higher limit than the level above it.
-- **One delegation.** Every `delegate_task` call makes a new grant with a new
-  count. To limit how often a child delegates, set `max_uses` on its
-  `delegate_task`; one call may start several children (`tasks`), and control
-  actions (`list`, `steer`, `stop`) count as uses too.
-  The root takes no `max_uses`, so the limit bounds each child, not how many
-  children the parent starts.
-- **This Hermes process.** The count is kept in memory for local
-  `delegate_task` children. A child's grant ends with the process, so a
-  restart does not hand its uses back.
+- **One delegation, or the whole warrant.** A limit in a level is per child:
+  every `delegate_task` call makes a new grant with a new count. A limit on
+  the `root` is shared by the parent and all its children, so delegating
+  again does not bring new uses. To limit how often an agent delegates, set
+  `max_uses` on its `delegate_task`; one call may start several children
+  (`tasks`), and control actions (`list`, `steer`, `stop`) count as uses too.
+- **Where the count lives.** A child's count is kept in memory; its grant ends
+  with the Hermes process, so a restart does not hand its uses back. The
+  root's count is kept per warrant in `$HERMES_HOME/tenuo/uses.db`: it
+  survives restarts and is shared by every Hermes process of the profile. A
+  new warrant starts a new count. If the file cannot be read, calls are
+  blocked. Do not grant the agent tools that can write under the Hermes home.
+- **This profile's warrant.** A root limit is not supported together with
+  access roles, and a grant received from another agent cannot use a tool the
+  root limits.
 - **Enforcing mode.** Under `on_denial: log` a spent limit is logged as a
   denial and an ordinary call still runs; a `delegate_task` call stays blocked.
 - **One name per tool.** Tool names with and without the `tool:` prefix share

@@ -52,6 +52,8 @@ class LocalAuditLog:
         record = asdict(event) if is_dataclass(event) else dict(vars(event))
         if record.get("use") is None:
             record.pop("use", None)  # only calls to a limited tool carry it
+        if not record.get("completed"):
+            record.pop("completed", None)  # only the record written after the call carries it
         line = json.dumps(record, ensure_ascii=False, default=str)
         try:
             with self._lock:
@@ -126,6 +128,9 @@ def _completes(rec: Dict[str, Any]) -> bool:
 
     The MCP wrapper writes ``outcome: forwarding`` before it hands a call on; that call is still open.
     """
+    if rec.get("completed"):
+        return True
+    # Records from other writers and from before the marker existed.
     outcome = rec.get("outcome")
     return bool(
         (outcome and outcome != "forwarding")
