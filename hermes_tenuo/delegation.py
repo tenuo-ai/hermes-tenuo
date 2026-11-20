@@ -26,9 +26,9 @@ import json
 import math
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class DelegationPlanError(ValueError):
@@ -39,6 +39,17 @@ class DelegationPlanError(ValueError):
 class Level:
     ttl_seconds: Optional[int]
     tools: Dict[str, Dict[str, dict]]  # tool → arg → {"binaries": [...], "patterns": [...]}
+    max_uses: Dict[str, int] = field(default_factory=dict)  # tool → uses a grant at this level allows
+
+    def use_limits(self, tools: Iterable[str]) -> Dict[str, int]:
+        """The effective limits for retained tools, with aliases sharing the minimum."""
+        keep = set(tools)
+        limits: Dict[str, int] = {}
+        for tool, limit in self.max_uses.items():
+            if tool in keep:
+                name = tool.removeprefix("tool:")
+                limits[name] = min(limits.get(name, limit), limit)
+        return limits
 
 
 def _members(spec: dict) -> List[Any]:
@@ -109,6 +120,13 @@ class DelegationPlan:
 # when every ancestor level sets it.
 ALLOW_UNKNOWN = "_allow_unknown"
 
+# A tool entry may set this to a positive integer: how many times a grant at
+# that level may use the tool. On the root it is the total for the warrant
+# itself and everything delegated from it. A use is taken when a call is
+# allowed, so a call that then fails still counts. The name is reserved: it is
+# never read as an argument of the tool.
+MAX_USES = "max_uses"
+
 
 def _level(raw: Any, where: str, *, root: bool = False) -> Level:
     if not isinstance(raw, dict) or not isinstance(raw.get("tools"), dict):
@@ -120,12 +138,18 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
     ttl = raw.get("ttl_seconds")
     if not root and (not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0):
         raise DelegationPlanError(f"{where}: ttl_seconds must be a positive integer")
+    max_uses: Dict[str, int] = {}
     for tool, args in raw["tools"].items():
         if not isinstance(tool, str) or not tool:
             raise DelegationPlanError(f"{where}: tool names must be non-empty strings")
         if not isinstance(args, dict):
             raise DelegationPlanError(f"{where}: {tool} constraints must be an object")
         for arg, spec in args.items():
+            if arg == MAX_USES:
+                if not isinstance(spec, int) or isinstance(spec, bool) or spec <= 0:
+                    raise DelegationPlanError(f"{where}: {tool}.{MAX_USES} must be a positive integer")
+                max_uses[tool] = spec
+                continue
             if not isinstance(arg, str) or not arg:
                 raise DelegationPlanError(f"{where}: {tool} argument names must be non-empty strings")
             if arg == ALLOW_UNKNOWN:
@@ -170,7 +194,11 @@ def _level(raw: Any, where: str, *, root: bool = False) -> Level:
                 raise DelegationPlanError(
                     f"{where}: {tool}.{arg} invalid constraint ({type(exc).__name__})"
                 ) from exc
-    return Level(ttl, {t: dict(a) for t, a in raw["tools"].items()})
+    tools = {
+        t: {arg: spec for arg, spec in a.items() if not (arg == MAX_USES and t in max_uses)}
+        for t, a in raw["tools"].items()
+    }
+    return Level(ttl, tools, max_uses)
 
 
 def parse_plan(data: Any) -> DelegationPlan:
@@ -187,7 +215,73 @@ def parse_plan(data: Any) -> DelegationPlan:
     )
     for depth in range(1, plan.max_depth + 1):
         plan.constraints_for(depth)  # report ancestry errors at load time
+    # The root's limits are totals for the whole tree, so they bound every level.
+    inherited_limits: Dict[str, int] = plan.root.use_limits(plan.root.tools)
+    for index, level in enumerate(plan.levels):
+        limits = level.use_limits(level.tools)
+        for tool, uses in limits.items():
+            if tool in inherited_limits and uses > inherited_limits[tool]:
+                raise DelegationPlanError(
+                    f"levels[{index}]: {tool}.{MAX_USES} is larger than the level above allows"
+                )
+        # Omitting a limit does not erase the budget inherited from ancestors.
+        inherited_limits.update(limits)
     return plan
+
+
+# Tools that run code or commands of the child's choosing. A use limit on another
+# tool does not bound what a child does through these.
+RUNS_CODE = ("execute_code", "terminal", "process_manage")
+
+
+def unbounded_routes(plan: DelegationPlan) -> List[str]:
+    """Warnings for levels where a use limit sits next to an unlimited tool that runs code."""
+    notes = []
+    named = [("the warrant", plan.root)] + [(f"depth {n}", lvl) for n, lvl in enumerate(plan.levels, start=1)]
+    for where, level in named:
+        limited = {t.removeprefix("tool:") for t in level.max_uses}
+        open_tools = [t for t in level.tools
+                      if t.removeprefix("tool:") in RUNS_CODE and t.removeprefix("tool:") not in limited
+                      and not (level.tools[t] or {}).keys() - {ALLOW_UNKNOWN}]
+        if limited and open_tools:
+            notes.append(
+                f"{where}: {', '.join(sorted(limited))} has a use limit, but {', '.join(open_tools)} "
+                "is granted with no argument limits and can run the same commands without one"
+            )
+    return notes
+
+
+def describe(plan: DelegationPlan) -> List[str]:
+    """One line per level, for the command line: what a child at that depth may do."""
+    def tools_of(level: Level, what: str) -> str:
+        shown = []
+        for tool in level.tools:
+            limit = level.max_uses.get(tool)
+            shown.append(f"{tool} (at most {limit} use{'' if limit == 1 else 's'}{what})" if limit else tool)
+        return ", ".join(shown)
+
+    lines = []
+    if plan.root.max_uses:
+        lines.append(f"the warrant: {tools_of(plan.root, ' in total, children included')}")
+    for depth, level in enumerate(plan.levels, start=1):
+        lines.append(f"depth {depth}: {tools_of(level, '')}; expires after {level.ttl_seconds}s")
+    return lines
+
+
+def root_capabilities(plan: DelegationPlan) -> Dict[str, Dict[str, Any]]:
+    """The capabilities a warrant must hold to delegate under *plan*: its ``root`` entry.
+
+    Each argument is ``All(capability_members(spec))`` so children's grants narrow it.
+    """
+    from tenuo import All
+
+    capabilities: Dict[str, Dict[str, Any]] = {}
+    for tool, args in plan.root.tools.items():
+        caps: Dict[str, Any] = {}
+        for arg, spec in (args or {}).items():
+            caps[arg] = True if arg == ALLOW_UNKNOWN else All(_members(spec))
+        capabilities[tool] = caps
+    return capabilities
 
 
 def capability_members(spec: dict) -> List[Any]:
@@ -198,6 +292,16 @@ def capability_members(spec: dict) -> List[Any]:
     attenuation stays All-to-All.
     """
     return _members(spec)
+
+
+def _no_duplicate_keys(pairs: List[Any]) -> Dict[str, Any]:
+    """JSON keeps the last of two equal keys without a word; in a plan that could drop a limit."""
+    seen: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise DelegationPlanError(f"the plan lists {key!r} twice in one object")
+        seen[key] = value
+    return seen
 
 
 def load_plan(path: str | Path) -> DelegationPlan:
@@ -218,7 +322,7 @@ def load_plan(path: str | Path) -> DelegationPlan:
                     f"delegation plan {p} must not be writable by group or other users"
                 )
             with os.fdopen(fd, encoding="utf-8", closefd=False) as stream:
-                return parse_plan(json.load(stream))
+                return parse_plan(json.load(stream, object_pairs_hook=_no_duplicate_keys))
         finally:
             os.close(fd)
     except FileNotFoundError as exc:
