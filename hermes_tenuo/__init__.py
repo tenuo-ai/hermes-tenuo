@@ -103,6 +103,16 @@ def _register_block_all(ctx: Any, deny_msg: str) -> None:
 def register(ctx: Any) -> None:
     """Called by Hermes plugin loader at startup."""
     _register_skills(ctx)
+    enforcing: dict = {"guard": None}  # the enforcing guard, once there is one
+    if hasattr(ctx, "register_middleware"):
+        def scope_tool_call(**kwargs: Any) -> Any:
+            guard = enforcing["guard"]
+            if guard is None:
+                return kwargs["next_call"](kwargs.get("args"))
+            return guard.around_tool_call(**kwargs)
+
+        # Wrap our other middleware before it copies or adds proof arguments.
+        ctx.register_middleware("tool_execution", scope_tool_call)
     try:
         # Hands is its own feature: it works with or without an enforcement warrant.
         from hermes_tenuo import hands
@@ -113,7 +123,6 @@ def register(ctx: Any) -> None:
     from hermes_tenuo._guard import WarrantLoadError, build_ingress_only_guard, build_plugin_guard
 
     ingress = _register_a2a_ingress(ctx)
-    enforcing: dict = {"guard": None}  # the enforcing guard, once there is one
     from hermes_tenuo import a2a_delegate, mcp_proofs
     a2a_delegate.register(ctx, lambda: enforcing["guard"])
     mcp_resolver = mcp_proofs.register(ctx, lambda: enforcing["guard"])
@@ -214,6 +223,7 @@ def _register_guard_hooks(ctx: Any, guard: Any) -> None:
                     task_id=str(kwargs.get("task_id") or ""),
                     session_id=str(kwargs.get("session_id") or ""),
                     tool_call_id=str(kwargs.get("tool_call_id") or ""),
+                    registry_check=True,
                 )
                 if result and result.get("action") == "block":
                     # Use EnforcementDenied sentinel so the registry distinguishes
@@ -227,6 +237,7 @@ def _register_guard_hooks(ctx: Any, guard: Any) -> None:
 
             _tool_registry.set_enforcement_fn(_enforcement_fn)
             _registered_via_registry = True
+            guard.registry_enforces()
             logger.info("hermes-tenuo: enforcement registered via ToolRegistry (universal coverage)")
     except Exception as exc:
         logger.debug("hermes-tenuo: ToolRegistry enforcement unavailable (%s), using hook fallback", exc)

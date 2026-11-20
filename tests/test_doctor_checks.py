@@ -107,6 +107,19 @@ def test_valid_delegation_plan_passes(install, capsys, tmp_path):
     assert rc == 0 and "✓  delegation plan loads" in out
 
 
+def test_doctor_shows_what_each_depth_may_do(install, capsys, tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "version": 1,
+        "root": {"tools": {"read_file": {}, "delegate_task": {}}},
+        "levels": [{"ttl_seconds": 60, "tools": {"read_file": {"max_uses": 3}}}],
+    }))
+    plan.chmod(0o600)
+    install(delegation_plan=str(plan))
+    rc, out = _doctor(capsys)
+    assert rc == 0 and "—  depth 1: read_file (at most 3 uses); expires after 60s" in out
+
+
 def test_misspelt_on_denial_fails_and_log_is_noted(install, capsys):
     install(on_denial="lgo")
     rc, out = _doctor(capsys)

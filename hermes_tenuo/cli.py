@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import shlex
 import math
 import os
 import re
@@ -104,6 +105,16 @@ def _check_task_id(task_id: str) -> str:
     return task_id
 
 
+def _plan_for_mint(args: argparse.Namespace):
+    """The delegation plan named by ``mint --plan``: (absolute path, plan), or (None, None)."""
+    path = getattr(args, "plan", None)
+    if not path:
+        return None, None
+    from hermes_tenuo.delegation import load_plan
+
+    return Path(path).expanduser().resolve(), load_plan(path)
+
+
 def _mint_separate(args: argparse.Namespace) -> int:
     from hermes_tenuo.issuance import mint_for_holder, read_public_key, read_signing_key, write_private_file
     task_id = getattr(args, "task", None)
@@ -118,7 +129,10 @@ def _mint_separate(args: argparse.Namespace) -> int:
         print("error: --task writes the task warrant path; do not pass --out as well", file=sys.stderr)
         return 1
     try:
-        capabilities = {}
+        from hermes_tenuo.delegation import root_capabilities
+
+        plan_path, plan = _plan_for_mint(args)
+        capabilities = dict(root_capabilities(plan)) if plan is not None else {}
         for spec in args.allow or []:
             tool, constraints, _ = parse_allow(spec)
             if tool in capabilities:
@@ -142,6 +156,8 @@ def _mint_separate(args: argparse.Namespace) -> int:
         return 1
     print(f"Warrant saved: {out}")
     print(f"Issuer public key: {base64.b64encode(issuer.public_key.to_bytes()).decode()}")
+    if plan is not None:
+        print(f"Delegation plan (set delegation_plan to this path): {plan_path}")
     return 0
 
 
@@ -241,20 +257,31 @@ def _mint_local(args: argparse.Namespace) -> int:
         return 1
     from tenuo import SigningKey, Warrant
 
-    if not args.allow:
+    if not args.allow and not getattr(args, "plan", None):
         print(
             "error: at least one --allow TOOL is required, e.g. "
-            "--allow web_search --allow read_file:path=/data",
+            "--allow web_search --allow read_file:path=/data (or --plan PLAN.json)",
             file=sys.stderr,
         )
         return 1
 
+    try:
+        from hermes_tenuo.delegation import describe, root_capabilities
+
+        plan_path, plan = _plan_for_mint(args)
+        from_plan = root_capabilities(plan) if plan is not None else {}
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     parsed = []
-    for spec in args.allow:
+    for spec in args.allow or []:
         try:
             parsed.append(parse_allow(spec))
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if parsed[-1][0] in from_plan:
+            print(f"error: {parsed[-1][0]} is already granted by the plan's root", file=sys.stderr)
             return 1
     if getattr(args, "task", None):
         try:
@@ -279,6 +306,8 @@ def _mint_local(args: argparse.Namespace) -> int:
         agent_key = SigningKey.generate()
 
     builder = Warrant.mint_builder().holder(agent_key.public_key)
+    for tool, constraints in from_plan.items():
+        builder = builder.capability(tool, **constraints)
     for tool, constraints, _ in parsed:
         builder = builder.capability(tool, **constraints)
 
@@ -299,10 +328,14 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"export TENUO_WARRANT={warrant_b64}")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
         print(f"export TENUO_TRUSTED_ROOT={trusted_root_b64}")
+        if plan is not None:
+            print(f"export TENUO_DELEGATION_PLAN={shlex.quote(str(plan_path))}")
     elif args.output == "yaml":
         print("# Add to ~/.hermes/config.yaml under plugins.entries.hermes-tenuo:")
         print(f"warrant: {warrant_b64}")
         print(f"trusted_root: {trusted_root_b64}")
+        if plan is not None:
+            print(f"delegation_plan: {json.dumps(str(plan_path))}")
         print("# Export before running hermes:")
         print(f"# export TENUO_SIGNING_KEY={signing_key_b64}")
     else:  # "full" default
@@ -315,6 +348,8 @@ def _mint_local(args: argparse.Namespace) -> int:
         print(f"      warrant: {warrant_b64}")
         print(f"      trusted_root: {trusted_root_b64}")
         print("      signing_key_env: TENUO_SIGNING_KEY")
+        if plan is not None:
+            print(f"      delegation_plan: {json.dumps(str(plan_path))}")
         print()
         print("# ── Signing key (export before running hermes) ───────────────────")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
@@ -322,12 +357,18 @@ def _mint_local(args: argparse.Namespace) -> int:
         print("# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
         print("# Tools:")
+        for tool in from_plan:
+            print(f"#   {tool}  (from the plan's root)")
         for tool, _, display in parsed:
             if display:
                 shown = ", ".join(f"{k}={v}" for k, v in display.items())
                 print(f"#   {tool}  {shown}")
             else:
                 print(f"#   {tool}  (any arguments)")
+        if plan is not None:
+            print("# delegate_task children, by depth:")
+            for line in describe(plan):
+                print(f"#   {line}")
         print()
         print("# Keep the signing key out of config files. The control key that")
         print("# minted this warrant was not saved; mint again to change scope.")
@@ -735,9 +776,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # 8. Delegation plan, when configured
         plan_path = get_delegation_plan_path(None)
         if plan_path:
-            from hermes_tenuo.delegation import DelegationPlanError, load_plan
+            from hermes_tenuo.delegation import DelegationPlanError, describe, load_plan, unbounded_routes
             try:
-                load_plan(plan_path)
+                loaded_plan = load_plan(plan_path)
             except DelegationPlanError as exc:
                 check(False, f"delegation plan: {exc}", blocks)
             else:
@@ -749,6 +790,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     check(False, "child_warrant and delegation_plan are both set", f"remove one — {blocks}")
                 else:
                     check(True, "delegation plan loads")
+                    for line in describe(loaded_plan):
+                        note(line)
+                    if loaded_plan.root.max_uses:
+                        if get_access_block(None) is not None:
+                            check(False, "max_uses on the plan's root is not supported together with access roles",
+                                  f"remove one — {blocks}")
+                        else:
+                            from hermes_tenuo.uses import UseStore, default_store_path
+                            try:
+                                at = default_store_path()
+                                spent = UseStore(at).used(str(warrant.id)) if warrant and at.exists() else {}
+                            except Exception as exc:
+                                check(False, f"use-count file cannot be read ({type(exc).__name__})", blocks)
+                            else:
+                                for tool, limit in loaded_plan.root.use_limits(loaded_plan.root.tools).items():
+                                    note(f"this warrant has used {tool} {spent.get(tool, 0)} of {limit} times; "
+                                         "a new warrant starts a new count")
+                    for line in unbounded_routes(loaded_plan):
+                        note(f"check: {line}")
 
     # 8b. Access: role-based gateway authorization, if configured.
     access_block = get_access_block(None)
@@ -1077,6 +1137,10 @@ def main() -> None:
                              "Once a tool has any constraint, a call may send only the arguments "
                              "named here: an unnamed argument is denied, and ARG=* requires the "
                              "argument to be present. Quote a spec containing '*', '?' or '|'.")
+    mint_p.add_argument("--plan", metavar="PLAN.json",
+                        help="Grant what a delegation plan's root lists, so the warrant can delegate "
+                             "under that plan, and print the delegation_plan setting. Combine with "
+                             "--allow for tools only the parent uses.")
     mint_p.add_argument("--task", metavar="ID",
                         help="Write the warrant to $HERMES_HOME/tenuo/warrants/<ID>.warrant "
                              "(kanban worker path). With --issuer-key and --holder-public-key it is "
