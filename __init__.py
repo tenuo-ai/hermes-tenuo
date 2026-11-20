@@ -7,9 +7,11 @@ module. ``pip install`` users never touch it: Hermes finds the
 
 This shim makes the clone importable without putting the clone on
 ``sys.path``. The selected checkout is authoritative. An already loaded package
-from another installation is never mixed with it: the plugin then registers a
-hook that blocks every tool call and names both installations, so a second
-installation cannot leave Hermes running without enforcement.
+is reused only when it holds the same code as the checkout, as the copy Hermes
+installs when the plugin is enabled does. A loaded package with different code
+is never mixed with it: the plugin then registers a hook that blocks every tool
+call and names both installations, so a second installation cannot leave Hermes
+running without enforcement.
 """
 
 from __future__ import annotations
@@ -60,15 +62,62 @@ def _blocking_register(message: str):
     return register
 
 
+def _package_digest(package_dir: Path):
+    """A digest of the code and bundled skills in *package_dir*, or None if it can't be read.
+
+    Bytecode, editor backups and hidden files or directories are not part of the
+    package, so they do not make two copies of the same code differ.
+    """
+    import hashlib
+    import os
+
+    digest = hashlib.sha256()
+    try:
+        # What a built package ships: Python sources and each bundled skill's SKILL.md.
+        files = sorted(
+            (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
+            if p.suffix == ".py" or p.name == "SKILL.md"
+        )
+        files = [
+            (name, p) for name, p in files
+            if not any(part.startswith(".") for part in name.parts) and p.is_file()
+        ]
+        for name, path in files:
+            digest.update(os.fsencode(name.as_posix()) + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    except Exception:
+        return None
+    return digest.hexdigest() if files else None
+
+
+def _same_package(source: str) -> bool:
+    """Whether the loaded package at *source* is this checkout or a copy holding the same code.
+
+    Enabling the plugin can also install it as a package from a copy of this
+    checkout (Hermes keeps that copy in its managed environment), so the same
+    code is loaded from a second path. Only a copy with different code is a
+    conflict, and so is one that cannot be compared.
+    """
+    try:
+        loaded_dir = Path(source).parent.resolve()
+        if loaded_dir == _PKG_DIR.resolve():
+            return True
+        ours = _package_digest(_PKG_DIR)
+        return ours is not None and ours == _package_digest(loaded_dir)
+    except Exception:
+        return False
+
+
 def _load_package():
     loaded = sys.modules.get("hermes_tenuo")
     if loaded is not None:
         source = getattr(loaded, "__file__", None)
-        if source and Path(source).resolve() == (_PKG_DIR / "__init__.py").resolve():
+        if source and _same_package(source):
             return loaded
         raise InstallConflict(
             f"hermes-tenuo installation conflict: {source} is already loaded, "
-            f"but Hermes selected {_PKG_DIR}. Keep one plugin installation "
+            f"but Hermes selected {_PKG_DIR} and their code differs. After a plugin "
+            "update, restart Hermes. Otherwise keep one plugin installation "
             "(directory or pip entry point), then restart Hermes."
         )
     spec = importlib.util.spec_from_file_location(

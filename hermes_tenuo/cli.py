@@ -500,14 +500,43 @@ def _signed_by(warrant: Any, roots: list) -> bool:
     return False
 
 
+def _package_digest(package_dir: Path) -> Optional[str]:
+    """A digest of the code and bundled skills in *package_dir*, or None if it can't be read.
+
+    The same comparison the plugin directory's loader makes (the repository's
+    top-level ``__init__.py``), which runs before this package is importable and
+    so cannot share the code.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        files = sorted(
+            (p.relative_to(package_dir), p) for p in package_dir.rglob("*")
+            if p.suffix == ".py" or p.name == "SKILL.md"
+        )
+        files = [
+            (name, p) for name, p in files
+            if not any(part.startswith(".") for part in name.parts) and p.is_file()
+        ]
+        for name, path in files:
+            digest.update(os.fsencode(name.as_posix()) + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    except Exception:
+        return None
+    return digest.hexdigest() if files else None
+
+
 def _second_installation() -> Optional[Tuple[Path, str]]:
     """The Hermes plugin directory when this package is installed beside it, else None.
 
     Only meaningful inside the environment Hermes runs in: there Hermes imports
     this package first and then selects the directory. The second value says
-    what that directory's loader does on the conflict: ``"blocks"`` every tool
-    call, ``"drops"`` the plugin (Hermes then enforces nothing), or ``"reuses"``
-    this package.
+    what that directory's loader does when it finds this package loaded:
+    ``"blocks"`` every tool call, ``"drops"`` the plugin (Hermes then enforces
+    nothing), ``"reuses"`` this package whatever its code, or ``"same"`` when
+    the loader reuses it because both hold the same code (the copy Hermes
+    installs when the plugin is enabled).
     """
     from hermes_tenuo._home import hermes_cli_available, hermes_home
 
@@ -522,6 +551,10 @@ def _second_installation() -> Optional[Tuple[Path, str]]:
     except OSError:
         return None
     if "_blocking_register" in shim:
+        if "_same_package" in shim:
+            ours = _package_digest(Path(__file__).parent.resolve())
+            if ours is not None and ours == _package_digest(directory / "hermes_tenuo"):
+                return directory, "same"
         return directory, "blocks"
     return directory, "drops" if "installation conflict" in shim else "reuses"
 
@@ -575,7 +608,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     config_entry: dict = {}
     from hermes_tenuo._home import config_path, hermes_cli_available, load_hermes_config
     second = _second_installation()
-    if second is not None:
+    if second is not None and second[1] == "same":
+        note(f"this package and the plugin directory {second[0]} hold the same code; Hermes loads them as one")
+    elif second is not None:
         directory, effect = second
         message = f"two installations: this package and the plugin directory {directory}"
         remedy = ("keep one: uninstall hermes-tenuo from the Hermes environment (uvx still runs "
