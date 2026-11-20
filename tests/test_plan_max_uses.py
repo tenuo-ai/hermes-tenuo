@@ -985,10 +985,10 @@ def test_counts_of_expired_warrants_are_dropped(tmp_path):
     from hermes_tenuo import uses
 
     store = uses.UseStore(tmp_path / "uses.db")
-    assert store.take("old", "terminal", 1, uses.time.time() - 1) == (True, 1)
-    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (True, 1)
+    assert store.take("old", "terminal", 1, uses.time.time() - 1) == (True, 1, 1)
+    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (True, 1, 1)
     assert store.used("old") == {} and store.used("live") == {"terminal": 1}
-    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (False, 1)
+    assert store.take("live", "terminal", 1, uses.time.time() + 600) == (False, 1, 1)
 
 
 def test_a_root_limit_is_refused_together_with_access_roles():
@@ -1097,3 +1097,48 @@ def test_mint_prints_a_plan_path_that_survives_copying(tmp_path, capsys, monkeyp
     assert shlex.split(line) == ["export", f"TENUO_DELEGATION_PLAN={path.resolve()}"]
     assert cmd_mint(argparse.Namespace(ttl="1h", allow=None, output="yaml", plan=str(path))) == 0
     assert yaml.safe_load(capsys.readouterr().out)["delegation_plan"] == str(path.resolve())
+
+
+def test_a_use_another_process_gave_back_can_be_taken_again(tmp_path):
+    """Process B was refused while A held the one use; A's delegation is then rejected."""
+    from hermes_tenuo.uses import UseStore
+
+    plan = copy.deepcopy(ROOT_LIMIT)
+    plan["root"]["tools"]["delegate_task"] = {"max_uses": 1}
+    a, _, warrant, keys = _rooted(plan, store=UseStore(tmp_path / "uses.db"))
+    b, _, _, _ = _rooted(plan, store=UseStore(tmp_path / "uses.db"), keys=keys, warrant=warrant)
+    store = UseStore(tmp_path / "uses.db")
+    budget_a, budget_b = a._root_budget(warrant), b._root_budget(warrant)
+    assert budget_a.take("delegate_task").taken             # A reserves the use
+    assert not budget_b.take("delegate_task").taken         # B is refused and has seen a count of 1
+    budget_a.give_back("delegate_task")                     # A's delegation was rejected
+    assert store.used(str(warrant.id)) == {"delegate_task": 0}
+    assert _delegate(b, "s0", "s1", goal="b") is None       # B may now delegate
+    assert store.used(str(warrant.id)) == {"delegate_task": 1}
+    assert "use limit reached" in _delegate(a, "s0", "s2", goal="a")["message"]
+
+
+def test_a_cleared_count_file_is_still_corrected_after_a_give_back(tmp_path):
+    from hermes_tenuo.uses import UseStore
+
+    guard, _, warrant, _ = _rooted(store=UseStore(tmp_path / "uses.db"))
+    budget = guard._root_budget(warrant)
+    assert budget.take("terminal").taken and budget.take("terminal").taken
+    budget.give_back("terminal")                            # one use counts, two were taken
+    (tmp_path / "uses.db").unlink()
+    UseStore(tmp_path / "uses.db")                          # an empty file in its place
+    assert _push(guard, "s0") is None                       # the one that was given back
+    assert _push(guard, "s0") is not None
+    assert UseStore(tmp_path / "uses.db").used(str(warrant.id)) == {"terminal": 2}
+
+
+def test_finishing_a_call_keeps_another_sessions_pass_for_the_same_call_id():
+    """Two primary sessions on one warrant share its budget and both number a call call_0."""
+    guard, _, _, _ = _rooted()
+    guard._registry_enforces = True
+    push = {"command": "git push origin fix/123"}
+    assert _push(guard, "a", "call_0") is None              # hook: use 1, pass left
+    assert _push(guard, "b", "call_0") is None              # hook: use 2, pass left
+    guard.post_tool_call("terminal", push, "ok", session_id="a", tool_call_id="call_0", status="ok")
+    assert _push(guard, "b", "call_0", registry_check=True) is None   # b's own second check still passes
+    assert _push(guard, "b", "call_1") is not None          # and the total is spent

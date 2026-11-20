@@ -62,8 +62,11 @@ def default_store_path() -> Path:
 class UseStore:
     """Use counts in a SQLite file, shared by every process of one Hermes profile.
 
-    One row per warrant and tool. Taking a use is one write transaction, so two
-    processes can never both take the last one. Rows go when the warrant expires.
+    One row per warrant and tool: ``used``, the uses that count now, and
+    ``takes``, how many were ever taken. A use given back lowers ``used`` and
+    leaves ``takes``, so ``takes`` never goes down. Taking a use is one write
+    transaction, so two processes can never both take the last one. Rows go
+    when the warrant expires.
     """
 
     def __init__(self, path: os.PathLike | str) -> None:
@@ -72,9 +75,9 @@ class UseStore:
         with closing(self._open()) as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                "CREATE TABLE IF NOT EXISTS uses ("
-                "warrant TEXT NOT NULL, tool TEXT NOT NULL, used INTEGER NOT NULL, expires REAL NOT NULL, "
-                "PRIMARY KEY (warrant, tool))"
+                "CREATE TABLE IF NOT EXISTS use_counts ("
+                "warrant TEXT NOT NULL, tool TEXT NOT NULL, used INTEGER NOT NULL, takes INTEGER NOT NULL, "
+                "expires REAL NOT NULL, PRIMARY KEY (warrant, tool))"
             )
             db.execute("COMMIT")
         try:
@@ -85,35 +88,45 @@ class UseStore:
     def _open(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=10, isolation_level=None)
 
-    def take(self, warrant: str, tool: str, limit: int, expires: float, at_least: int = 0) -> Tuple[bool, int]:
-        """Take one use if fewer than *limit* are used. Returns (taken, uses now recorded).
+    def take(
+        self, warrant: str, tool: str, limit: int, expires: float, seen: Tuple[int, int] = (0, 0),
+    ) -> Tuple[bool, int, int]:
+        """Take one use if fewer than *limit* are used. Returns (taken, used, takes) as now recorded.
 
-        *at_least* is the count this process has already seen: a file that
-        reports less (replaced or cleared while Hermes runs) is corrected first.
+        *seen* is the (used, takes) this process last read. A file whose
+        ``takes`` is lower was replaced or cleared while Hermes ran, and is put
+        back to what was seen. A lower ``used`` with the same or more takes is
+        another process giving a use back, and stands.
         """
         with closing(self._open()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                db.execute("DELETE FROM uses WHERE expires <= ?", (time.time(),))
-                db.execute("INSERT OR IGNORE INTO uses VALUES (?, ?, 0, ?)", (warrant, tool, expires))
-                used = db.execute("SELECT used FROM uses WHERE warrant = ? AND tool = ?", (warrant, tool)).fetchone()[0]
-                used = max(used, at_least)
+                db.execute("DELETE FROM use_counts WHERE expires <= ?", (time.time(),))
+                db.execute("INSERT OR IGNORE INTO use_counts VALUES (?, ?, 0, 0, ?)", (warrant, tool, expires))
+                used, takes = db.execute(
+                    "SELECT used, takes FROM use_counts WHERE warrant = ? AND tool = ?", (warrant, tool)
+                ).fetchone()
+                if takes < seen[1]:
+                    used, takes = max(used, seen[0]), seen[1]
                 taken = used < limit
                 if taken:
-                    used += 1
-                db.execute("UPDATE uses SET used = ? WHERE warrant = ? AND tool = ?", (used, warrant, tool))
+                    used, takes = used + 1, takes + 1
+                db.execute("UPDATE use_counts SET used = ?, takes = ? WHERE warrant = ? AND tool = ?",
+                           (used, takes, warrant, tool))
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
-        return taken, used
+        return taken, used, takes
 
     def give_back(self, warrant: str, tool: str) -> int:
+        """Return one use. The uses that count afterwards."""
         with closing(self._open()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                db.execute("UPDATE uses SET used = used - 1 WHERE warrant = ? AND tool = ? AND used > 0", (warrant, tool))
-                row = db.execute("SELECT used FROM uses WHERE warrant = ? AND tool = ?", (warrant, tool)).fetchone()
+                db.execute("UPDATE use_counts SET used = used - 1 WHERE warrant = ? AND tool = ? AND used > 0",
+                           (warrant, tool))
+                row = db.execute("SELECT used FROM use_counts WHERE warrant = ? AND tool = ?", (warrant, tool)).fetchone()
                 db.execute("COMMIT")
             except BaseException:
                 db.execute("ROLLBACK")
@@ -123,7 +136,7 @@ class UseStore:
     def used(self, warrant: str) -> Dict[str, int]:
         """tool → uses recorded for *warrant*."""
         with closing(self._open()) as db:
-            return dict(db.execute("SELECT tool, used FROM uses WHERE warrant = ? AND expires > ?",
+            return dict(db.execute("SELECT tool, used FROM use_counts WHERE warrant = ? AND expires > ?",
                                    (warrant, time.time())).fetchall())
 
 
@@ -142,10 +155,11 @@ class UseBudget:
         self._used: Dict[str, int] = {}
         self._parent = parent
         self._grant = grant
-        # With a store, this budget's own count is kept in the file; _used mirrors
-        # the highest count this process has seen.
+        # With a store, this budget's own count is kept in the file; _used and
+        # _takes mirror what this process last read there.
         self._store = store
         self._expires = expires
+        self._takes: Dict[str, int] = {}
         self._passes: Counter = Counter()
 
     def _chain(self, tool: str) -> Iterator["UseBudget"]:
@@ -169,10 +183,11 @@ class UseBudget:
             for budget in holders:
                 if budget._store is None:
                     continue
-                taken, used = budget._store.take(
-                    budget._grant, tool, budget._limits[tool], budget._expires, budget._used.get(tool, 0),
+                taken, used, takes = budget._store.take(
+                    budget._grant, tool, budget._limits[tool], budget._expires,
+                    (budget._used.get(tool, 0), budget._takes.get(tool, 0)),
                 )
-                budget._used[tool] = used
+                budget._used[tool], budget._takes[tool] = used, takes
                 if not taken:
                     for earlier in stored:
                         earlier._used[tool] = earlier._store.give_back(earlier._grant, tool)
@@ -234,6 +249,8 @@ class UseBudget:
             if not tool_call_id:
                 self._passes.pop(call, None)
                 return
+            # Sessions that share a budget may each have a call with this id in
+            # flight; the scope (tool, session, task) tells them apart.
             for pending in list(self._passes):
-                if pending[0] == tool_call_id:
+                if pending[0] == tool_call_id and pending[1] == call[1]:
                     del self._passes[pending]
