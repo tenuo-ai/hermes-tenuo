@@ -12,9 +12,9 @@ Instructions in a prompt are requests. A model can forget them, misread them, or
 - **Give subagents less than their parent.** A `delegate_task` child can never get more than its parent had, and you can narrow it further with `child_warrant` or a delegation plan.
 - **Scope Kanban workers per task.** Each worker needs its own task warrant. Without one it is blocked, and a refusal blocks the task on the board.
 - **Limit what prompt injection can do.** hermes-tenuo doesn't detect injected instructions. It limits what a misled agent can do: a call outside its permission is refused however the model was persuaded.
-- **See every decision, and watch before you enforce.** Allowed and refused calls are logged locally (`hermes-tenuo audit --denied`), and `on_denial: log` records refusals without blocking while you tune a permission.
+- **See every decision, and watch before you enforce.** Allowed and refused calls are logged locally (`hermes-tenuo audit --denied`). While you tune a permission, `on_denial: log` logs ordinary local policy denials without blocking. Denied delegation calls and denials under incoming A2A grants still block, as do internal enforcement errors.
 
-Installing the plugin alone doesn't restrict anything. Protection starts when you configure a warrant, as shown below.
+Installing the plugin alone leaves ordinary sessions unrestricted; configure a warrant to protect them, as shown below. Kanban workers are an exception: once the plugin is enabled, each worker needs its own task warrant or all its tool calls are blocked.
 
 **Why it holds:** the check runs outside the model, in Tenuo's Rust core, so no prompt can argue with it. Permissions are Ed25519-signed and expire, and Hermes accepts only those signed by a key you trust. Authority can only narrow as it is handed to subagents, other agents or [guests](https://github.com/tenuo-ai/hermes-guests), and each hop is verified as a chain.
 
@@ -58,7 +58,7 @@ uvx hermes-tenuo==0.4.2 mint --ttl 1h --allow web_search
 
 The command prints the configuration and signing-key instructions. Apply them
 in the Hermes profile serving the task, check the configuration, and restart
-that profile. Installing the plugin alone does not activate tool authorization.
+that profile. In ordinary sessions, installing the plugin alone does not activate tool authorization.
 
 [See a real-model prompt-injection walkthrough](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/walkthrough.md)
 or explore [argument constraints and delegation](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#scoping-arguments).
