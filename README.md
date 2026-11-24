@@ -1,25 +1,36 @@
 # Tenuo for Hermes Agent
 
-**Let Hermes work. Decide what it can do.**
+**Give Hermes rules it can't simply ignore.**
 
-Give your Hermes agent **signed, expiring permissions** with Tenuo warrants:
-which tools it may call, which arguments it may use, and for how long.
-With **Hands**, connect your remote Hermes to a project on your Mac or Linux
-laptop while its memory and skills stay on the server.
+Instructions in a prompt are requests. A model can forget them, misread them, or be talked out of them by a web page or email it reads. hermes-tenuo checks each tool call in code, before it runs, against a signed, expiring permission you create. A call outside it never reaches the tool, and Hermes is told why.
 
-| What do you want Hermes to do? | Start here |
+## What you can do
+
+- **Allow only the tools a task needs.** Anything not on the list, such as `terminal` or `write_file`, is refused.
+- **Limit the arguments too.** Read files only under `/data/reports`, write only under `/tmp/nightly`, keep a number in a range. Path checks resist `../` tricks.
+- **Keep destructive actions off the table.** Leave shell and write tools out entirely, or limit an allowed terminal to the programs you name with a delegation plan.
+- **Give subagents less than their parent.** A `delegate_task` child can never get more than its parent had, and you can narrow it further with `child_warrant` or a delegation plan.
+- **Scope Kanban workers per task.** Each worker needs its own task warrant. Without one it is blocked, and a refusal blocks the task on the board.
+- **Limit what prompt injection can do.** hermes-tenuo doesn't detect injected instructions. It limits what a misled agent can do: a call outside its permission is refused however the model was persuaded.
+- **See every decision, and watch before you enforce.** Allowed and refused calls are logged locally (`hermes-tenuo audit --denied`), and `on_denial: log` records refusals without blocking while you tune a permission.
+
+Installing the plugin alone doesn't restrict anything. Protection starts when you configure a warrant, as shown below.
+
+**Why it holds:** the check runs outside the model, in Tenuo's Rust core, so no prompt can argue with it. Permissions are Ed25519-signed and expire, and Hermes accepts only those signed by a key you trust. Authority can only narrow as it is handed to subagents, other agents or [guests](https://github.com/tenuo-ai/hermes-guests), and each hop is verified as a chain.
+
+Also in this plugin:
+
+| Want to | Start here |
 |---|---|
-| Run a task with clear limits on tools, files and duration | [Try Tenuo warrants](#try-tenuo-warrants) |
-| Work in a local project from your existing remote chat | [Try Hands](#try-hands) |
+| Limit tools, files and duration for a task | [Try Tenuo warrants](#try-tenuo-warrants) |
+| Let your remote Hermes work in a folder on your laptop | [Try Hands](#try-hands) |
 | Wrap MCP servers you already use and trace scoped calls | [Verify delegated MCP calls](docs/mcp-wrapper.md) |
-
-Use either feature on its own, or both together.
 
 ## Try Tenuo warrants
 
-Give a nightly report job access to its reports folder, let a researcher search
-without writing files, or give a delegated agent fewer permissions than its
-parent. The limits are checked before the tool handler runs.
+Let a research task search without writing files, keep a reporting session to its
+reports folder, or give a delegated agent fewer permissions than its parent. The
+limits are checked before the tool handler runs.
 
 A warrant is a signed permission slip with an expiry. Here is a shortened
 example from the runnable demo:

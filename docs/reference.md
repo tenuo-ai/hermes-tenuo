@@ -3,7 +3,7 @@
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
 [![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)
 
-**Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
+**Give each Hermes agent a signed, expiring permission slip. Tool calls outside it are refused before they run.**
 
 See it without installing Hermes or talking to a model:
 
