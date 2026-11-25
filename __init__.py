@@ -146,7 +146,7 @@ except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "hermes-tenuo runtime dependency is missing. Run `hermes plugins enable "
             "hermes-tenuo` to install the manifest dependencies, or install "
-            "'tenuo>=0.3.6,<0.4' and 'path-jail>=0.3,<0.4' in the Hermes environment."
+            "'tenuo>=0.3.8,<0.4' and 'path-jail>=0.3,<0.4' in the Hermes environment."
         ) from exc
     raise
 else:
