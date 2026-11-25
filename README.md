@@ -1,6 +1,6 @@
 # Tenuo for Hermes Agent
 
-**Give Hermes rules it can't simply ignore.**
+**Let Hermes work on its own, with rules it can't simply ignore.**
 
 Instructions in a prompt are requests. A model can forget them, misread them, or be talked out of them by a web page or email it reads. hermes-tenuo checks each tool call in code, before it runs, against a signed, expiring permission you create. A call outside it never reaches the tool, and Hermes is told why. With that in place you can leave Hermes to run a nightly job, share one bot with a team, or hand a subagent a single task.
 
