@@ -2,14 +2,16 @@
 
 **Give Hermes rules it can't simply ignore.**
 
-Instructions in a prompt are requests. A model can forget them, misread them, or be talked out of them by a web page or email it reads. hermes-tenuo checks each tool call in code, before it runs, against a signed, expiring permission you create. A call outside it never reaches the tool, and Hermes is told why.
+Instructions in a prompt are requests. A model can forget them, misread them, or be talked out of them by a web page or email it reads. hermes-tenuo checks each tool call in code, before it runs, against a signed, expiring permission you create. A call outside it never reaches the tool, and Hermes is told why. With that in place you can leave Hermes to run a nightly job, share one bot with a team, or hand a subagent a single task.
 
 ## What you can do
 
 - **Allow only the tools a task needs.** Anything not on the list, such as `terminal` or `write_file`, is refused.
 - **Limit the arguments too.** Read files only under `/data/reports`, write only under `/tmp/nightly`, keep a number in a range. Path checks resist `../` tricks.
-- **Keep destructive actions off the table.** Leave shell and write tools out entirely, or limit an allowed terminal to the programs you name with a delegation plan.
+- **Keep destructive actions off the table.** Leave shell and write tools out entirely, or limit an allowed terminal to the programs you name with a delegation plan or a role.
 - **Give subagents less than their parent.** A `delegate_task` child can never get more than its parent had, and you can narrow it further with `child_warrant` or a delegation plan.
+- **Give each person in a shared chat their own limits.** In a Telegram, Discord or Slack group, teammates can search and read while only you run commands. [Roles](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#role-based-access-for-the-gateway) follow who sent each message, with no keys to manage.
+- **Let a subagent do one thing, once.** `max_uses` in a delegation plan [caps how often a tool is used](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#use-limits): per child, or in total for the warrant however many children it starts.
 - **Scope Kanban workers per task.** Each worker needs its own task warrant. Without one it is blocked, and a refusal blocks the task on the board.
 - **Limit what prompt injection can do.** hermes-tenuo doesn't detect injected instructions. It limits what a misled agent can do: a call outside its permission is refused however the model was persuaded.
 - **See every decision, and watch before you enforce.** Allowed and refused calls are logged locally (`hermes-tenuo audit --denied`). While you tune a permission, `on_denial: log` logs ordinary local policy denials without blocking. Denied delegation calls and denials under incoming A2A grants still block, as do internal enforcement errors.
