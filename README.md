@@ -8,13 +8,13 @@ Instructions in a prompt are requests. A model can forget them, misread them, or
 
 - **Allow only the tools a task needs.** Anything not on the list, such as `terminal` or `write_file`, is refused.
 - **Limit the arguments too.** Read files only under `/data/reports`, write only under `/tmp/nightly`, keep a number in a range. Path checks resist `../` tricks.
-- **Keep destructive actions off the table.** Leave shell and write tools out entirely, or limit an allowed terminal to the programs you name with a delegation plan or a role.
+- **Keep destructive actions off the table.** Leave shell and write tools out entirely, or limit an allowed terminal to the programs you name with a delegation plan or a role. That checks which program starts, not what it does next, so add patterns when only exact commands should run.
 - **Give subagents less than their parent.** A `delegate_task` child can never get more than its parent had, and you can narrow it further with `child_warrant` or a delegation plan.
 - **Give each person in a shared chat their own limits.** In a Telegram, Discord or Slack group, teammates can search and read while only you run commands. [Roles](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#role-based-access-for-the-gateway) follow who sent each message, with no keys to manage.
 - **Let a subagent do one thing, once.** `max_uses` in a delegation plan [caps how often a tool is used](https://github.com/tenuo-ai/hermes-tenuo/blob/main/docs/reference.md#use-limits): per child, or in total for the warrant however many children it starts.
-- **Scope Kanban workers per task.** Each worker needs its own task warrant. Without one it is blocked, and a refusal blocks the task on the board.
+- **Scope Kanban workers per task.** Each worker needs its own task warrant; without one, all its tool calls are blocked. When a worker's warrant refuses a call, the task is marked blocked on the board.
 - **Limit what prompt injection can do.** hermes-tenuo doesn't detect injected instructions. It limits what a misled agent can do: a call outside its permission is refused however the model was persuaded.
-- **See every decision, and watch before you enforce.** Allowed and refused calls are logged locally (`hermes-tenuo audit --denied`). While you tune a permission, `on_denial: log` logs ordinary local policy denials without blocking. Denied delegation calls and denials under incoming A2A grants still block, as do internal enforcement errors.
+- **See every decision, and watch before you enforce.** Calls checked against a permission are logged locally, allowed and refused (`hermes-tenuo audit --denied`). While you tune a permission, `on_denial: log` logs ordinary policy denials without blocking. Calls that start a subagent (`delegate_task`) or hand work to another agent (`tenuo_delegate`), denials under incoming A2A grants, and internal enforcement errors still block. A setup that blocks every call from startup, such as a permission that cannot be loaded, is reported in the Hermes log, not the audit log.
 
 Installing the plugin alone leaves ordinary sessions unrestricted; configure a warrant to protect them, as shown below. Kanban workers are an exception: once the plugin is enabled, each worker needs its own task warrant or all its tool calls are blocked.
 
