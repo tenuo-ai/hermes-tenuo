@@ -298,13 +298,29 @@ def test_the_setting_is_off_unless_exactly_true(monkeypatch):
 
 # doctor: Hermes running from an environment that does not contain the plugin.
 
-def _managed(home, with_plugin):
-    env = home / "installs" / "abc" / "environments" / "e1" / "venv"
+@pytest.fixture(autouse=True)
+def _not_hermes_python(monkeypatch):
+    """These tests run outside Hermes's Python unless one says which install is running."""
+    monkeypatch.setitem(sys.modules, "pm", None)
+    monkeypatch.setitem(sys.modules, "pm.environments", None)
+    monkeypatch.setitem(sys.modules, "pm.paths", None)
+
+
+def _running_install(monkeypatch, home, install):
+    """Hermes's own answer to "which install is this process"."""
+    monkeypatch.setitem(sys.modules, "pm", types.ModuleType("pm"))
+    monkeypatch.setitem(sys.modules, "pm.paths", types.SimpleNamespace(install_root=lambda: home / "checkout"))
+    monkeypatch.setitem(sys.modules, "pm.environments",
+                        types.SimpleNamespace(install_state_dir=lambda root: home / "installs" / install))
+
+
+def _managed(home, with_plugin, install="abc"):
+    env = home / "installs" / install / "environments" / "e1" / "venv"
     site = env / "lib" / "python3.14" / "site-packages"
     site.mkdir(parents=True)
     if with_plugin:
         (site / "hermes_tenuo-0.4.2.dist-info").mkdir()
-    (home / "installs" / "abc" / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(env)}}}))
+    (home / "installs" / install / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(env)}}}))
     return env
 
 
@@ -349,4 +365,21 @@ def test_a_copy_in_the_default_home_does_not_cover_a_named_profile(tmp_path, mon
     assert _home.managed_environments_without_plugin() == [env]
     (profile / "plugins" / "hermes-tenuo").mkdir(parents=True)
     assert _home.managed_environments_without_plugin() == []
+
+
+def test_only_the_running_install_is_looked_at(tmp_path, monkeypatch):
+    """Another Hermes checkout that shares the home has its own environment; it says nothing about this one."""
+    from hermes_tenuo import _home
+
+    monkeypatch.setattr(_home, "hermes_home", lambda: tmp_path)
+    other = _managed(tmp_path, with_plugin=False, install="other")
+    mine = _managed(tmp_path, with_plugin=True, install="mine")
+    assert _home.managed_environments_without_plugin() == [other]       # outside Hermes's Python: every record
+    _running_install(monkeypatch, tmp_path, "mine")
+    assert _home.managed_environments_without_plugin() == []
+    _running_install(monkeypatch, tmp_path, "other")
+    assert _home.managed_environments_without_plugin() == [other]
+    _running_install(monkeypatch, tmp_path, "never-managed")
+    assert _home.managed_environments_without_plugin() == []
+    assert mine.is_dir()
 
