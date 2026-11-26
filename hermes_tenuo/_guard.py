@@ -176,9 +176,10 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             jobs = parse_jobs(jobs_block, default_job)
         except JobsConfigError as exc:
             raise WarrantLoadError(f"{exc} — every tool call is blocked until jobs are fixed") from exc
-        if delegation_plan is not None:
+        if delegation_plan is not None or child_warrant is not None:
+            other = "delegation_plan" if delegation_plan is not None else "child_warrant"
             raise WarrantLoadError(
-                "jobs and delegation_plan are mutually exclusive — "
+                f"jobs and {other} are mutually exclusive — "
                 "every tool call is blocked until one is removed"
             )
     use_store = None

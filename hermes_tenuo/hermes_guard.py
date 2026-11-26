@@ -416,6 +416,10 @@ class HermesGuard:
         self._root_budgets: Dict[str, Any] = {}  # warrant id → budget; guarded by _session_lock
         # Named limits a parent gives a delegated child (hermes_tenuo.jobs.Jobs), and for each
         # child session what its limits are made of, so its own children can be narrowed further.
+        if jobs is not None and (delegation_plan is not None or child_warrant is not None):
+            from hermes_tenuo.jobs import JobsConfigError
+            other = "a delegation plan" if delegation_plan is not None else "child_warrant"
+            raise JobsConfigError(f"jobs cannot be used together with {other}")
         self._jobs = jobs
         self._session_parts: Dict[str, Dict[str, Dict[str, Any]]] = {}  # guarded by _session_lock
         # A delegated child's job and whether its chain starts at a person's role; guarded by _session_lock.

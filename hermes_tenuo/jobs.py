@@ -40,7 +40,7 @@ class Job:
     name: str
     description: str
     ttl_seconds: Optional[int]
-    tools: Tuple[str, ...]                                   # the tools this job keeps
+    tools: Tuple[str, ...]                                   # the tools this job keeps, without "tool:"
     parts: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # tool → argument → part
     strict: frozenset = frozenset()                          # tools that take only the named arguments
     max_uses: Dict[str, int] = field(default_factory=dict)   # tool → uses
@@ -84,10 +84,16 @@ def parse_jobs(block: Any, default: Any = None) -> Jobs:
             raise JobsConfigError(f"{where}: allow must be a non-empty map of tool → limits")
         parts: Dict[str, Dict[str, Any]] = {}
         strict, limits = set(), {}
-        for tool, limit in allow.items():
-            if not isinstance(tool, str) or not tool:
+        tools = []
+        for written, limit in allow.items():
+            # "tool:terminal" and "terminal" name one tool; everything below is kept under the plain name.
+            tool = written.removeprefix("tool:") if isinstance(written, str) else ""
+            if not tool:
                 raise JobsConfigError(f"{where}.allow: tool names must be non-empty strings")
-            tool_where = f"{where}.allow.{tool}"
+            if tool in tools:
+                raise JobsConfigError(f"{where}.allow: {tool} is listed twice (as {tool} and tool:{tool})")
+            tools.append(tool)
+            tool_where = f"{where}.allow.{written}"
             if limit in ("*", None) or limit == {}:
                 continue
             if not isinstance(limit, dict):
@@ -109,7 +115,7 @@ def parse_jobs(block: Any, default: Any = None) -> Jobs:
                         parts.setdefault(tool, {})[arg] = constraint_part(value, f"{tool_where}.{arg}")
                     except AccessConfigError as exc:
                         raise JobsConfigError(str(exc)) from exc
-        jobs[name] = Job(name, description.strip(), ttl, tuple(allow), parts, frozenset(strict), limits)
+        jobs[name] = Job(name, description.strip(), ttl, tuple(tools), parts, frozenset(strict), limits)
     if default is not None and (not isinstance(default, str) or default not in jobs):
         raise JobsConfigError(f"default_job: no job named {default!r}")
     return Jobs(jobs, default)

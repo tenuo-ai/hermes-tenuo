@@ -35,6 +35,8 @@ JOBS = {
     "config-reader": {"allow": {"read_file": {"path": "/srv/checkout/**"}}},
     "restarter-in-place": {"allow": {"terminal": {"workdir": "/srv/checkout/**",
                                                   "command": {"patterns": [r"^\./checkoutctl restart$"]}}}},
+    "prefixed-restarter": {"allow": {"tool:terminal": {"max_uses": 1, "strict": True,
+                                                       "command": {"patterns": [r"^\./checkoutctl restart$"]}}}},
     "log-lead": {"allow": {"terminal": {"command": {"patterns": [r"^\./checkoutctl logs$"]}}, "delegate_task": {}}},
     "lead": {"allow": {"terminal": {"command": {"patterns": [r"^\./checkoutctl (restart|logs)$"]}}, "delegate_task": {}}},
 }
@@ -124,6 +126,14 @@ def test_a_job_can_keep_a_helper_in_one_directory(team, monkeypatch):
     assert restart(workdir="/srv/checkout") and restart(workdir="/srv/checkout/app")
     assert not restart(workdir="/tmp/elsewhere") and not restart(workdir="/srv/checkout/../../tmp")
     assert not restart()                                                 # the directory must be named
+
+
+def test_a_job_that_writes_a_tool_with_its_prefix_is_limited_the_same(team, monkeypatch):
+    speaks(monkeypatch, DANA)
+    assert helper(team, "dana", "h1", job="prefixed-restarter") is None
+    assert not run(team, "h1", "./checkoutctl logs")                     # the job's command limit holds
+    assert team.pre_tool_call("terminal", {"command": "./checkoutctl restart", "workdir": "/x"}, session_id="h1")  # strict
+    assert run(team, "h1", "./checkoutctl restart") and not run(team, "h1", "./checkoutctl restart")   # and its use limit
 
 
 def test_a_helper_of_a_helper_is_narrowed_again(team, monkeypatch):
@@ -283,6 +293,22 @@ def test_jobs_and_a_delegation_plan_do_not_mix():
     assert refused is not None and "cannot be used with a delegation plan" in refused["message"]
 
 
+@pytest.mark.parametrize("other", ["delegation_plan", "child_warrant"])
+def test_jobs_cannot_be_set_with_a_plan_or_a_child_warrant(other):
+    from hermes_tenuo.delegation import parse_plan
+
+    root, agent = tenuo.SigningKey.generate(), tenuo.SigningKey.generate()
+    warrant = (tenuo.Warrant.mint_builder().holder(agent.public_key).capability("terminal")
+               .capability("delegate_task").ttl(600).mint(root))
+    extra = {"delegation_plan": parse_plan({"version": 1, "root": {"tools": {"terminal": {}, "delegate_task": {}}},
+                                            "levels": [{"ttl_seconds": 60, "tools": {"terminal": {}}}]})}
+    if other == "child_warrant":
+        extra = {"child_warrant": tenuo.Warrant.mint_builder().holder(agent.public_key).capability("terminal").ttl(60).mint(root)}
+    with pytest.raises(JobsConfigError, match="jobs cannot be used together with"):
+        HermesGuard(warrant=warrant, signing_key=agent, trusted_roots=[root.public_key],
+                    jobs=parse_jobs({"lister": {"allow": ["terminal"]}}), **extra)
+
+
 # The jobs block.
 
 @pytest.mark.parametrize("block, default, message", [
@@ -294,6 +320,8 @@ def test_jobs_and_a_delegation_plan_do_not_mix():
     ({"a": {"allow": {"terminal": {"command": {"patterns": ["unanchored"]}}}}}, None, "anchored"),
     ({"a": {"allow": ["terminal"], "ttl_seconds": -5}}, None, "ttl_seconds must be a positive integer"),
     ({"a": {"allow": ["terminal"]}}, "b", "no job named 'b'"),
+    ({"a": {"allow": {"terminal": {}, "tool:terminal": {"max_uses": 1}}}}, None, "terminal is listed twice"),
+    ({"a": {"allow": ["tool:"]}}, None, "tool names must be non-empty"),
 ])
 def test_a_bad_jobs_block_is_refused(block, default, message):
     with pytest.raises(JobsConfigError, match=message):

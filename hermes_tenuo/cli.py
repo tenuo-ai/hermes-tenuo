@@ -836,8 +836,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             except JobsConfigError as exc:
                 check(False, f"jobs: {exc}", blocks)
             else:
-                check(True, f"jobs: {', '.join(parsed.jobs)}"
-                            + (f" (a task that names none gets {parsed.default})" if parsed.default else ""))
+                from hermes_tenuo._config import get_child_warrant_raw as _child, get_delegation_plan_path as _plan
+                try:
+                    has_child = _child(None) is not None
+                except OSError:
+                    has_child = True
+                other = "delegation_plan" if _plan(None) else "child_warrant" if has_child else ""
+                if other:
+                    check(False, f"jobs and {other} are both set", f"remove one — {blocks}")
+                else:
+                    check(True, f"jobs: {', '.join(parsed.jobs)}"
+                                + (f" (a task that names none gets {parsed.default})" if parsed.default else ""))
                 section = _cfg().get("delegation")
                 chosen = str((section or {}).get("backend") or "default") if isinstance(section, dict) else "default"
                 if chosen != BACKEND:

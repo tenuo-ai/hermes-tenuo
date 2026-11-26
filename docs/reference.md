@@ -366,8 +366,8 @@ With the roles above it, in one chat:
   trying again.
 - **Helpers of helpers.** A helper that may delegate can give its own helpers
   jobs; each is narrowed again from the one above.
-- **Not with a delegation plan.** `jobs` and `delegation_plan` cannot both be
-  set.
+- **Not with a delegation plan or `child_warrant`.** `jobs` cannot be set
+  together with `delegation_plan` or `child_warrant`.
 
 ## Hands: let your server's agent use your own machine
 
@@ -759,7 +759,7 @@ variable equivalent.
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Scope template used to attenuate a fresh, parent-chained grant for each `delegate_task` child. |
 | `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a versioned JSON plan that narrows tools, arguments, and TTL at each delegation depth. Mutually exclusive with `child_warrant`. |
 | `on_denial` | | `block` (default) or `log`. |
-| `jobs` | | Named limits for `delegate_task` subagents; see [Jobs for helpers](#jobs-for-helpers). Mutually exclusive with `delegation_plan`. |
+| `jobs` | | Named limits for `delegate_task` subagents; see [Jobs for helpers](#jobs-for-helpers). Mutually exclusive with `delegation_plan` and `child_warrant`. |
 | `default_job` | | The job for a task that names none. |
 | `allow_routed_delegation` | | Default `false`: a `delegate_task` task Hermes would run as another profile is refused, because that profile's tool calls are not checked by this one. `true` lets it run there unchecked. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
