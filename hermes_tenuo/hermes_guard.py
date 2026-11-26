@@ -1786,10 +1786,10 @@ class HermesGuard:
             return None
         from hermes_tenuo.routing import named_profile
 
-        where = self._routing or named_profile
-        for task in _task_args(args):
+        routing = self._routing
+        for index, task in enumerate(_task_args(args)):
             try:
-                profile = where(task) or named_profile(task)
+                profile = (routing(task, index) if routing else None) or named_profile(task)
             except Exception as exc:  # noqa: BLE001 - an unknown destination is not "here"
                 logger.warning("hermes-tenuo: could not tell where a delegated task would run (%s)",
                                type(exc).__name__)
@@ -1798,9 +1798,11 @@ class HermesGuard:
                     f"would run in ({type(exc).__name__})"
                 )}
             if profile:
+                backend = getattr(profile, "backend", "")
+                via = f" (delegation backend '{backend}')" if backend else ""
                 return {"action": "block", "message": (
-                    f"tenuo: delegation rejected: this subagent would run as Hermes profile '{profile}', "
-                    "outside this profile's permission checks. Use the default delegation route, or set "
+                    f"tenuo: delegation rejected: this subagent would run as Hermes profile '{profile}'{via}, "
+                    "outside this profile's permission checks. Use a route that stays in this profile, or set "
                     "allow_routed_delegation: true to accept subagents this plugin cannot check"
                 )}
         return None

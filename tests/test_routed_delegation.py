@@ -44,20 +44,20 @@ def test_a_task_that_names_another_profile_is_refused(args):
 
 
 def test_a_task_that_stays_here_is_delegated_as_before():
-    guard, _ = _guard(routing=lambda task: None)
+    guard, _ = _guard(routing=lambda task, index: None)
     assert _delegate(guard, {"goal": "x"}) is None
     assert _delegate(guard, {"tasks": [{"goal": "a"}, {"goal": "b"}]}, session="s9") is None
 
 
 def test_a_default_profile_set_in_hermes_config_is_refused_too():
     """No task names a profile; Hermes's own routing says where it goes."""
-    guard, _ = _guard(routing=lambda task: "worker")
+    guard, _ = _guard(routing=lambda task, index: "worker")
     refused = _delegate(guard, {"goal": "x"})
     assert refused is not None and "Hermes profile 'worker'" in refused["message"]
 
 
 def test_an_unknown_destination_is_refused():
-    def broken(task):
+    def broken(task, index):
         raise RuntimeError("no route table")
 
     guard, _ = _guard(routing=broken)
@@ -66,7 +66,7 @@ def test_an_unknown_destination_is_refused():
 
 
 def test_the_operator_can_allow_routed_subagents():
-    guard, _ = _guard(routing=lambda task: "worker", allow_routed_delegation=True)
+    guard, _ = _guard(routing=lambda task, index: "worker", allow_routed_delegation=True)
     assert _delegate(guard, {"goal": "x", "profile": "worker"}) is None
 
 
@@ -81,7 +81,7 @@ def test_log_only_mode_still_refuses_it():
 
 
 def test_control_actions_and_other_tools_are_untouched():
-    guard, _ = _guard(routing=lambda task: "worker")
+    guard, _ = _guard(routing=lambda task, index: "worker")
     assert _delegate(guard, {"action": "list"}) is None
     assert guard.pre_tool_call("web_search", {"query": "q", "profile": "worker"}, session_id="s0") is not None  # unknown arg, by the warrant
     assert guard.pre_tool_call("web_search", {"query": "q"}, session_id="s0") is None
@@ -106,15 +106,19 @@ def test_a_refused_routed_delegation_gives_its_use_back():
 # hermes_tenuo.routing against Hermes's delegation strategy interface.
 
 class _Provider:
-    def __init__(self, route):
-        self.route = route
+    def __init__(self, route, name="default", parameters=None):
+        self.route, self.name, self.parameters = route, name, parameters or {}
+
+    def task_parameters(self, config):
+        return self.parameters
 
     def route_task(self, task, config):
         return self.route(task, config) if callable(self.route) else self.route
 
 
-def _fake_hermes(monkeypatch, provider=None, error=None, config=None):
-    class DelegationRouteError(Exception):
+def _fake_hermes(monkeypatch, provider=None, error=None, config=None, others=(), unavailable=(), pinning=True):
+    """Hermes's delegation interface: *provider* is the saved strategy, *others* are installed beside it."""
+    class DelegationRouteError(ValueError):
         pass
 
     def get_active_provider(cfg):
@@ -124,12 +128,20 @@ def _fake_hermes(monkeypatch, provider=None, error=None, config=None):
             raise RuntimeError(error)
         return provider
 
+    installed = {p.name: p for p in ([provider] if provider else []) + list(others)}
+
+    def backend_status(name):
+        return installed.get(name), ("cannot run here" if name in unavailable else "")
+
     monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
-    monkeypatch.setitem(sys.modules, "agent.delegation_provider",
-                        types.SimpleNamespace(DelegationRouteError=DelegationRouteError))
+    monkeypatch.setitem(sys.modules, "agent.delegation_provider", types.SimpleNamespace(
+        DelegationRouteError=DelegationRouteError, RESERVED_TASK_PARAMETERS=frozenset({"goal", "context", "index", "model"})))
     monkeypatch.setitem(sys.modules, "agent.delegation_registry",
-                        types.SimpleNamespace(get_active_provider=get_active_provider))
+                        types.SimpleNamespace(get_active_provider=get_active_provider, backend_status=backend_status))
+    monkeypatch.setitem(sys.modules, "agent.delegation_backends", types.SimpleNamespace(
+        list_backends=lambda: [types.SimpleNamespace(name=name) for name in installed]) if pinning else None)
     monkeypatch.setattr("hermes_tenuo._home.load_hermes_config", lambda: {"delegation": config or {}})
+    return DelegationRouteError
 
 
 def test_routing_reads_the_configured_strategy(monkeypatch):
@@ -139,8 +151,9 @@ def test_routing_reads_the_configured_strategy(monkeypatch):
         seen["config"] = config
         return {"profile": "worker", "label": "worker"}
 
-    _fake_hermes(monkeypatch, _Provider(route), config={"backend": "profile_routes"})
-    assert routing.other_profile({"goal": "x"}) == "worker"
+    _fake_hermes(monkeypatch, _Provider(route, "profile_routes"), config={"backend": "profile_routes"})
+    found = routing.other_profile({"goal": "x"})
+    assert found == "worker" and found.backend == "profile_routes"
     assert seen["config"] == {"backend": "profile_routes"}
 
 
@@ -171,6 +184,86 @@ def test_a_hermes_without_delegation_strategies_runs_every_child_here(monkeypatc
     monkeypatch.setitem(sys.modules, "agent", None)
     monkeypatch.setitem(sys.modules, "agent.delegation_provider", None)
     assert routing.other_profile({"goal": "x"}) is None
+
+
+def test_the_strategy_is_asked_the_way_hermes_asks_it(monkeypatch):
+    """goal, context, the task's place in the batch, and only the parameters the strategy declares."""
+    seen = []
+    provider = _Provider(lambda task, config: seen.append(task) or {}, "routes",
+                         parameters={"lane": {"type": "string"}, "model": {"type": "string"}, "Bad-Name": {}, "raw": "x"})
+    _fake_hermes(monkeypatch, provider)
+    task = {"goal": "g", "context": "c", "lane": "fast", "model": "m", "Bad-Name": 1, "raw": 2, "extra": 3, "index": 7}
+    assert routing.other_profile(task, 1) is None
+    assert seen == [{"goal": "g", "context": "c", "index": 1, "lane": "fast"}]
+
+
+def test_a_route_that_depends_on_the_place_in_the_batch_is_seen(monkeypatch):
+    second = _Provider(lambda task, config: {"profile": "worker"} if task["index"] == 1 else {}, "by_place")
+    _fake_hermes(monkeypatch, second, config={"backend": "by_place"})
+    assert routing.other_profile({"goal": "a"}, 0) is None
+    assert routing.other_profile({"goal": "b"}, 1) == "worker"
+    guard, _ = _guard(routing=routing.other_profile)
+    assert _delegate(guard, {"tasks": [{"goal": "a"}]}) is None
+    refused = _delegate(guard, {"tasks": [{"goal": "a"}, {"goal": "b"}]}, session="s2")
+    assert refused is not None and "Hermes profile 'worker'" in refused["message"]
+
+
+def test_a_strategy_the_session_may_still_be_using_is_asked_too(monkeypatch):
+    """delegation.backend was changed to default; a running session keeps routing on the one it started with."""
+    seen = {}
+
+    def route(task, config):
+        seen["backend"] = config["backend"]
+        return {"profile": "worker"}
+
+    _fake_hermes(monkeypatch, _Provider({}, "default"), config={"backend": "default"},
+                 others=[_Provider(route, "profile_routes")])
+    found = routing.other_profile({"goal": "x"})
+    assert found == "worker" and found.backend == "profile_routes" and seen["backend"] == "profile_routes"
+    guard, _ = _guard(routing=routing.other_profile)
+    refused = _delegate(guard, {"goal": "x"})
+    assert "Hermes profile 'worker' (delegation backend 'profile_routes')" in refused["message"]
+
+
+def test_installed_strategies_that_keep_tasks_here_change_nothing(monkeypatch):
+    _fake_hermes(monkeypatch, _Provider({}, "default"),
+                 others=[_Provider({}, "profile_routes"), _Provider({"model": "fast"}, "model_map")])
+    assert routing.other_profile({"goal": "x"}) is None
+
+
+def test_a_strategy_that_cannot_run_is_not_asked(monkeypatch):
+    _fake_hermes(monkeypatch, _Provider({}, "default"), others=[_Provider({"profile": "worker"}, "broken")],
+                 unavailable={"broken"})
+    assert routing.other_profile({"goal": "x"}) is None
+
+
+def test_a_saved_strategy_that_cannot_run_does_not_hide_the_others(monkeypatch):
+    _fake_hermes(monkeypatch, error="route", others=[_Provider({"profile": "worker"}, "profile_routes")])
+    assert routing.other_profile({"goal": "x"}) == "worker"
+
+
+def test_a_strategy_that_refuses_the_task_starts_nothing(monkeypatch):
+    def refuse(task, config):
+        raise DelegationRouteError("no such lane")
+
+    DelegationRouteError = _fake_hermes(monkeypatch, _Provider(refuse, "default"))
+    assert routing.other_profile({"goal": "x"}) is None
+
+
+def test_a_failing_strategy_is_an_unknown_destination(monkeypatch):
+    def fail(task, config):
+        raise KeyError("routes")
+
+    _fake_hermes(monkeypatch, _Provider({}, "default"), others=[_Provider(fail, "other")])
+    with pytest.raises(KeyError):
+        routing.other_profile({"goal": "x"})
+    guard, _ = _guard(routing=routing.other_profile)
+    assert "could not tell" in _delegate(guard, {"goal": "x"})["message"]
+
+
+def test_a_hermes_where_sessions_keep_no_strategy_asks_the_saved_one(monkeypatch):
+    _fake_hermes(monkeypatch, _Provider({"profile": "worker"}, "profile_routes"), pinning=False)
+    assert routing.other_profile({"goal": "x"}) == "worker"
 
 
 def test_the_setting_is_off_unless_exactly_true(monkeypatch):
