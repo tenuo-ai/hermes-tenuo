@@ -369,7 +369,7 @@ class HermesGuard:
         access_policy: Optional[Any] = None,
         ingress: Optional[Any] = None,
         use_store: Optional[Any] = None,
-        routing: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+        routing: Optional[Callable[[Dict[str, Any], int], Optional[str]]] = None,  # (task, place in the call)
         allow_routed_delegation: bool = False,
         jobs: Optional[Any] = None,
     ):
