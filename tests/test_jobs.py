@@ -33,6 +33,8 @@ JOBS = {
     "restarter": {"description": "Restarts checkout, once.", "ttl_seconds": 120,
                   "allow": {"terminal": {"max_uses": 1, "command": {"patterns": [r"^\./checkoutctl restart$"]}}}},
     "config-reader": {"allow": {"read_file": {"path": "/srv/checkout/**"}}},
+    "restarter-in-place": {"allow": {"terminal": {"workdir": "/srv/checkout/**",
+                                                  "command": {"patterns": [r"^\./checkoutctl restart$"]}}}},
     "lead": {"allow": {"terminal": {"command": {"patterns": [r"^\./checkoutctl (restart|logs)$"]}}, "delegate_task": {}}},
 }
 DANA = dict(user="telegram:101", chat="telegram:-1", platform="telegram")
@@ -108,6 +110,18 @@ def test_a_path_limit_narrows_a_path_limit(team, monkeypatch):
     assert helper(team, "dana", "h1", job="config-reader") is None
     assert team.pre_tool_call("read_file", {"path": "/srv/checkout/app.yaml"}, session_id="h1") is None
     assert team.pre_tool_call("read_file", {"path": "/srv/billing/app.yaml"}, session_id="h1") is not None
+
+
+def test_a_job_can_keep_a_helper_in_one_directory(team, monkeypatch):
+    speaks(monkeypatch, DANA)
+    assert helper(team, "dana", "h1", job="restarter-in-place") is None
+
+    def restart(**more):
+        return team.pre_tool_call("terminal", {"command": "./checkoutctl restart", **more}, session_id="h1") is None
+
+    assert restart(workdir="/srv/checkout") and restart(workdir="/srv/checkout/app")
+    assert not restart(workdir="/tmp/elsewhere") and not restart(workdir="/srv/checkout/../../tmp")
+    assert not restart()                                                 # the directory must be named
 
 
 def test_a_helper_of_a_helper_is_narrowed_again(team, monkeypatch):

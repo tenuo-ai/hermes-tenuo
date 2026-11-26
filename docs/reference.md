@@ -354,6 +354,12 @@ With the roles above it, in one chat:
   same argument when those come from a role or another job. A path limit can
   tighten a path limit. A combination that cannot be made narrower is refused,
   never widened.
+- **The directory too.** The example limits the command line only, and
+  `terminal` also takes a `workdir`. Add `workdir: "/srv/checkout/**"` to a job
+  to keep its helper in that directory; each call must then name a directory
+  under it.
+- **One limit per helper.** `max_uses` counts one helper's calls. A parent that
+  may delegate again can send another helper with the same job.
 - **Helpers of helpers.** A helper that may delegate can give its own helpers
   jobs; each is narrowed again from the one above.
 - **Not with a delegation plan.** `jobs` and `delegation_plan` cannot both be
