@@ -208,6 +208,28 @@ def test_a_route_that_depends_on_the_place_in_the_batch_is_seen(monkeypatch):
     assert refused is not None and "Hermes profile 'worker'" in refused["message"]
 
 
+def test_a_batch_task_does_not_take_the_calls_context(monkeypatch):
+    """Hermes hands its strategy a batch task as written; only the single-goal form carries the call's context."""
+    by_context = _Provider(lambda task, config: {} if task["context"] == "stay" else {"profile": "worker"}, "by_context")
+    _fake_hermes(monkeypatch, by_context, config={"backend": "by_context"})
+    guard, _ = _guard(routing=routing.other_profile)
+    assert _delegate(guard, {"goal": "a", "context": "stay"}) is None
+    assert _delegate(guard, {"tasks": [{"goal": "a", "context": "stay"}]}, session="s2") is None
+    refused = _delegate(guard, {"context": "stay", "tasks": [{"goal": "a"}]}, session="s3")
+    assert refused is not None and "Hermes profile 'worker'" in refused["message"]
+    refused = _delegate(guard, {"context": "stay", "tasks": json.dumps([{"goal": "a"}])}, session="s4")
+    assert refused is not None and "Hermes profile 'worker'" in refused["message"]
+
+
+def test_a_single_goal_is_routed_on_its_goal_and_context_only(monkeypatch):
+    seen = []
+    provider = _Provider(lambda task, config: seen.append(task) or {}, "routes", parameters={"lane": {"type": "string"}})
+    _fake_hermes(monkeypatch, provider, config={"backend": "routes"})
+    guard, _ = _guard(routing=routing.other_profile)
+    assert _delegate(guard, {"goal": "a", "context": "c", "lane": "far"}) is None
+    assert seen == [{"goal": "a", "context": "c", "index": 0}]
+
+
 def test_a_strategy_the_session_may_still_be_using_is_asked_too(monkeypatch):
     """delegation.backend was changed to default; a running session keeps routing on the one it started with."""
     seen = {}

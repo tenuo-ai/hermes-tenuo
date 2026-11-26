@@ -199,18 +199,33 @@ def _delegated_tasks(args: Dict[str, Any]) -> List[Tuple[Optional[str], Optional
     return [(goal if isinstance(goal, str) else None, top)]
 
 
-def _task_args(args: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The arguments of each task a delegate_task call spawns: a task's own keys over the call's."""
-    top = {key: value for key, value in args.items() if key != "tasks"}
+def _batch(args: Dict[str, Any]) -> Optional[List[Any]]:
+    """The ``tasks`` list of a delegate_task call, or None for the single-goal form."""
     tasks = args.get("tasks")
     if isinstance(tasks, str):
         try:
             tasks = json.loads(tasks)
         except ValueError:
             tasks = None
-    if isinstance(tasks, list) and tasks:
+    return tasks if isinstance(tasks, list) and tasks else None
+
+
+def _task_args(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The arguments of each task a delegate_task call spawns: a task's own keys over the call's."""
+    top = {key: value for key, value in args.items() if key != "tasks"}
+    tasks = _batch(args)
+    if tasks:
         return [{**top, **task} if isinstance(task, dict) else dict(top) for task in tasks]
     return [top]
+
+
+def _routed_tasks(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Each task as Hermes hands it to its delegation strategy: a batch task as written, and a
+    single goal with the call's context. A batch task does not take the call's context."""
+    tasks = _batch(args)
+    if tasks:
+        return [dict(task) if isinstance(task, dict) else {} for task in tasks]
+    return [{"goal": args.get("goal"), "context": args.get("context")}]
 
 
 def _allows_unknown_args(warrant: Any, tool: str) -> bool:
@@ -1716,9 +1731,10 @@ class HermesGuard:
         from hermes_tenuo.routing import named_profile
 
         routing = self._routing
-        for index, task in enumerate(_task_args(args)):
+        for index, (task, routed) in enumerate(zip(_task_args(args), _routed_tasks(args))):
             try:
-                profile = (routing(task, index) if routing else None) or named_profile(task)
+                # A profile named anywhere in the call is refused; otherwise Hermes's own inputs decide.
+                profile = named_profile(task) or (routing(routed, index) if routing else None)
             except Exception as exc:  # noqa: BLE001 - an unknown destination is not "here"
                 logger.warning("hermes-tenuo: could not tell where a delegated task would run (%s)",
                                type(exc).__name__)
