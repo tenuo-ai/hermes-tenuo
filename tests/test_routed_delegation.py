@@ -335,3 +335,18 @@ def test_a_named_profile_looks_at_the_install_it_belongs_to(tmp_path, monkeypatc
     monkeypatch.setattr(_home, "hermes_home", lambda: profile)
     env = _managed(tmp_path, with_plugin=False)
     assert _home.managed_environments_without_plugin() == [env]
+
+
+def test_a_copy_in_the_default_home_does_not_cover_a_named_profile(tmp_path, monkeypatch):
+    """Hermes loads directory plugins from the active profile's own plugins folder."""
+    from hermes_tenuo import _home
+
+    profile = tmp_path / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    (tmp_path / "plugins" / "hermes-tenuo").mkdir(parents=True)
+    monkeypatch.setattr(_home, "hermes_home", lambda: profile)
+    env = _managed(tmp_path, with_plugin=False)
+    assert _home.managed_environments_without_plugin() == [env]
+    (profile / "plugins" / "hermes-tenuo").mkdir(parents=True)
+    assert _home.managed_environments_without_plugin() == []
+
