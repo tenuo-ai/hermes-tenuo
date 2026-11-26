@@ -153,6 +153,7 @@ class _ChildGrant:
     invocation_id: str = ""  # originating delegate_task tool_call_id
     ingress_roots: Optional[List[Any]] = None  # provenance captured before the child has a session
     uses: Optional[Any] = None  # hermes_tenuo.uses.UseBudget when the plan limits uses
+    parts: Optional[Dict[str, Dict[str, Any]]] = None  # what its limits are made of (hermes_tenuo.jobs)
 
 
 def _toolset_list(value: Any) -> Optional[List[str]]:
@@ -355,6 +356,7 @@ class HermesGuard:
         use_store: Optional[Any] = None,
         routing: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
         allow_routed_delegation: bool = False,
+        jobs: Optional[Any] = None,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
@@ -395,6 +397,10 @@ class HermesGuard:
             raise DelegationPlanError("max_uses on the plan's root is not supported together with access roles")
         self._use_store = use_store
         self._root_budgets: Dict[str, Any] = {}  # warrant id → budget; guarded by _session_lock
+        # Named limits a parent gives a delegated child (hermes_tenuo.jobs.Jobs), and for each
+        # child session what its limits are made of, so its own children can be narrowed further.
+        self._jobs = jobs
+        self._session_parts: Dict[str, Dict[str, Dict[str, Any]]] = {}  # guarded by _session_lock
         # Which other Hermes profile a delegate_task task would run as, if any
         # (hermes_tenuo.routing). A child in another profile is outside these
         # checks, so such a delegation is refused unless the operator allows it.
@@ -516,6 +522,7 @@ class HermesGuard:
         self._session_warrants[session_id] = (warrant, signing_key)
         self._ingress_roots.pop(session_id, None)
         self._session_uses.pop(session_id, None)
+        self._session_parts.pop(session_id, None)
         self._uses_session_warrants = True
         self._denied_sessions.pop(session_id, None)
         self._child_sessions.pop(session_id, None)
@@ -531,6 +538,7 @@ class HermesGuard:
         self._session_warrants[session_id] = (marker, None)
         self._ingress_roots.pop(session_id, None)
         self._session_uses.pop(session_id, None)
+        self._session_parts.pop(session_id, None)
         self._uses_session_warrants = True
         self._session_warrant_chains.pop(session_id, None)
         self._child_sessions.pop(session_id, None)
@@ -731,9 +739,21 @@ class HermesGuard:
             )
         return caps, remaining
 
+    def _delegating_parts(self, session_id: str) -> Dict[str, Dict[str, Any]]:
+        """What the delegating session's limits are made of, where this plugin wrote them:
+        a child's own record, or the role of the person whose turn this is."""
+        with self._session_lock:
+            parts = self._session_parts.get(session_id)
+            bound = session_id in self._session_warrants
+        if parts is not None or bound or self._access_policy is None:
+            return parts or {}
+        from hermes_tenuo.access import current_sender
+        ident = current_sender()
+        return self._access_policy.parts_for(**ident) if ident is not None else {}
+
     def _grant_children(
         self, parent_session_id: str, tasks: List[Tuple[Optional[str], Optional[List[str]]]],
-        invocation_id: str = "",
+        invocation_id: str = "", jobs: Optional[List[Optional[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Grant one warrant per delegated task from the parent's warrant; block if impossible.
 
@@ -752,13 +772,33 @@ class HermesGuard:
         parent_tools = list(parent_warrant.tools or [])
         grants = []
         goal_scopes: Dict[str, frozenset[str]] = {}
+        names = list(jobs or []) + [None] * len(tasks)
+        parent_parts = self._delegating_parts(parent_session_id) if self._jobs is not None else {}
+        with self._session_lock:
+            parent_uses = self._session_uses.get(parent_session_id)
         try:
+            from hermes_tenuo.uses import UseBudget
+
             child_caps: Optional[Dict[str, Dict[str, Any]]] = None
-            ttl = 3600  # a requested maximum; the core caps it at the parent's expiry
+            base_ttl = 3600  # a requested maximum; the core caps it at the parent's expiry
             if self._child_warrant is not None:
-                child_caps, ttl = self._child_warrant_grants(parent_warrant)
-            for goal, toolsets in tasks:
+                child_caps, base_ttl = self._child_warrant_grants(parent_warrant)
+            for (goal, toolsets), job_name in zip(tasks, names):
+                ttl = base_ttl
+                job = None
+                if self._jobs is not None:
+                    job_name = job_name or self._jobs.default
+                    job = self._jobs.get(job_name)
+                    if job_name and job is None:
+                        return {"action": "block",
+                                "message": f"tenuo: delegation rejected: there is no job named '{job_name}'"}
+                elif job_name:
+                    return {"action": "block", "message": "tenuo: delegation rejected: no jobs are configured"}
                 keep = set(child_caps) if child_caps is not None else set(parent_tools)
+                if job is not None:
+                    wanted = {t.removeprefix("tool:") for t in job.tools}
+                    keep = {t for t in keep if t.removeprefix("tool:") in wanted}
+                    ttl = min(ttl, job.ttl_seconds) if job.ttl_seconds else ttl
                 if toolsets is not None:
                     keep &= self._tools_for_toolsets(toolsets, parent_tools)
                 if not keep:
@@ -770,7 +810,7 @@ class HermesGuard:
                         ),
                     }
                 if goal is not None:
-                    scope = frozenset(keep)
+                    scope = frozenset(keep | {f"job:{job.name}"}) if job is not None else frozenset(keep)
                     prior_scope = goal_scopes.setdefault(goal, scope)
                     if prior_scope != scope:
                         return {
@@ -787,6 +827,24 @@ class HermesGuard:
                 if child_caps is not None:
                     for tool in sorted(keep):
                         builder.with_capability(tool, child_caps[tool])
+                child_parts: Optional[Dict[str, Dict[str, Any]]] = None
+                if self._jobs is not None:
+                    # Record what every kept tool's limits are made of, so this child's own
+                    # children can be narrowed again; then narrow the tools the job limits.
+                    from hermes_tenuo.jobs import narrowed
+                    held = parent_warrant.capabilities
+                    child_parts = {}
+                    for tool in sorted(keep):
+                        plain = tool.removeprefix("tool:")
+                        known = parent_parts.get(tool) or parent_parts.get(plain) or {}
+                        if job is None or child_caps is not None or not (plain in job.parts or plain in job.strict):
+                            if known:
+                                child_parts[tool] = dict(known)
+                            continue
+                        caps, made_of = narrowed(job, plain, held.get(tool) or {}, known,
+                                                 _allows_unknown_args(parent_warrant, tool))
+                        builder.with_capability(tool, caps)
+                        child_parts[tool] = made_of
                 builder.with_holder(child_key.public_key)
                 # This is an atomic cap in the signed delegation operation. It
                 # cannot accidentally request a lifetime beyond the parent.
@@ -796,10 +854,13 @@ class HermesGuard:
                     builder.terminal()
                 child = builder.delegate(parent_key)
                 logger.info(
-                    "hermes-tenuo: delegation scope: parent has %d tools, child gets %s",
-                    len(parent_tools), sorted(keep),
+                    "hermes-tenuo: delegation scope: parent has %d tools, child gets %s%s",
+                    len(parent_tools), sorted(keep), f" as job {job.name}" if job is not None else "",
                 )
-                grants.append(_ChildGrant(child, chain, child_key, goal, invocation_id))
+                limits = {t: n for t, n in (job.max_uses.items() if job is not None else ())
+                          if t in {k.removeprefix("tool:") for k in keep}}
+                uses = UseBudget(limits, parent_uses, str(child.id)) if limits or parent_uses is not None else None
+                grants.append(_ChildGrant(child, chain, child_key, goal, invocation_id, uses=uses, parts=child_parts))
         except Exception as exc:
             error_type = type(exc).__name__
             logger.warning("hermes-tenuo: delegation grant failed (%s)", error_type)
@@ -1016,6 +1077,8 @@ class HermesGuard:
                 self._ingress_roots[child_session_id] = list(grant.ingress_roots)
             if grant.uses is not None:
                 self._session_uses[child_session_id] = grant.uses
+            if grant.parts is not None:
+                self._session_parts[child_session_id] = grant.parts
             self._child_sessions[child_session_id] = None
 
     # ------------------------------------------------------------------
@@ -1179,7 +1242,10 @@ class HermesGuard:
                 chain = self._session_warrant_chains.get(owner)
                 uses = self._session_uses.get(owner)
                 roots = self._ingress_roots.get(owner)
+                parts = self._session_parts.get(owner)
                 self._bind_session(session_id, warrant, key, chain)
+                if parts is not None:
+                    self._session_parts[session_id] = parts
                 if roots is not None:
                     self._ingress_roots[session_id] = list(roots)
                 if uses is not None:
@@ -1632,12 +1698,17 @@ class HermesGuard:
         if result.allowed and _is_delegation_spawn(tool_name, args):
             tasks = _delegated_tasks(args)
             blocked = self._refuse_routed(args)
+            names = [task.get("job") for task in _task_args(args)]
             if blocked is not None:
                 pass
             elif self._delegation_plan is not None:
-                blocked = self._register_planned_children(session_id, tasks, tool_call_id)
+                if any(names):
+                    blocked = {"action": "block",
+                               "message": "tenuo: delegation rejected: jobs cannot be used with a delegation plan"}
+                else:
+                    blocked = self._register_planned_children(session_id, tasks, tool_call_id)
             else:
-                blocked = self._grant_children(session_id, tasks, tool_call_id)
+                blocked = self._grant_children(session_id, tasks, tool_call_id, jobs=names)
             if blocked is not None:
                 grant_rejected = True
                 if used is not None:

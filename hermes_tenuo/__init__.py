@@ -172,6 +172,13 @@ def register(ctx: Any) -> None:
 
     if ingress is not None:
         guard.attach_ingress(ingress)
+    if guard.jobs is not None and hasattr(ctx, "register_delegation_provider"):
+        try:
+            # Lets the agent pick a job per delegate_task task once delegation.backend is "tenuo".
+            from hermes_tenuo.jobs import delegation_provider
+            ctx.register_delegation_provider(delegation_provider(guard.jobs))
+        except Exception as exc:  # noqa: BLE001 - jobs stay enforced; only the picker is missing
+            logger.warning("hermes-tenuo: could not offer jobs to delegate_task (%s)", type(exc).__name__)
     guard.attach_mcp_resolver(mcp_resolver)
     enforcing["guard"] = guard
     _register_guard_hooks(ctx, guard)

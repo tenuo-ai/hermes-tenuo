@@ -12,7 +12,7 @@ import base64
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 logger = logging.getLogger("hermes_tenuo._config")
 
@@ -240,6 +240,12 @@ def get_require_warrant(ctx: Any) -> bool:
         return raw
     logger.warning("hermes-tenuo: require_warrant must be a boolean; treating invalid value as true")
     return True
+
+
+def get_jobs_block(ctx: Any) -> Tuple[Any, Any]:
+    """(the ``jobs`` block, ``default_job``) as written in config; (None, None) when no jobs are set."""
+    entry = _get_plugin_entry(ctx)
+    return entry.get("jobs"), entry.get("default_job")
 
 
 def get_allow_routed_delegation(ctx: Any) -> bool:

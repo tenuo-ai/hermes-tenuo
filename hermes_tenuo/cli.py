@@ -824,13 +824,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     for line in unbounded_routes(loaded_plan):
                         note(f"check: {line}")
 
+    # 8-jobs. Jobs for delegated helpers.
+    try:
+        from hermes_tenuo._config import get_jobs_block
+        from hermes_tenuo._home import load_hermes_config as _cfg
+        jobs_block, default_job = get_jobs_block(None)
+        if jobs_block is not None or default_job is not None:
+            from hermes_tenuo.jobs import BACKEND, JobsConfigError, parse_jobs
+            try:
+                parsed = parse_jobs(jobs_block, default_job)
+            except JobsConfigError as exc:
+                check(False, f"jobs: {exc}", blocks)
+            else:
+                check(True, f"jobs: {', '.join(parsed.jobs)}"
+                            + (f" (a task that names none gets {parsed.default})" if parsed.default else ""))
+                section = _cfg().get("delegation")
+                chosen = str((section or {}).get("backend") or "default") if isinstance(section, dict) else "default"
+                if chosen != BACKEND:
+                    note(f"delegation.backend is {chosen}: set it to {BACKEND} so the agent can pick a job per task"
+                         + ("" if parsed.default else "; until then a helper gets everything its parent has"))
+    except Exception:  # noqa: BLE001 - a diagnostic must not stop the other checks
+        pass
+
     # 8a. A delegation strategy that can run a subagent in another Hermes profile.
     try:
         from hermes_tenuo._config import get_allow_routed_delegation
         from hermes_tenuo._home import load_hermes_config
         delegation = load_hermes_config().get("delegation")
         backend = str((delegation or {}).get("backend") or "").strip() if isinstance(delegation, dict) else ""
-        if backend and backend != "default":
+        if backend and backend not in ("default", "tenuo"):
             if get_allow_routed_delegation(None):
                 note(f"delegation.backend is {backend}: a subagent sent to another profile runs there "
                      "without this plugin's checks (allow_routed_delegation is on)")
