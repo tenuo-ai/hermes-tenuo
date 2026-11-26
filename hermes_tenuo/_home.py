@@ -83,17 +83,24 @@ def managed_environments_without_plugin() -> list:
     roots = [home, home.parent.parent] if home.parent.name == "profiles" else [home]
     if (home / "plugins" / "hermes-tenuo").is_dir():  # Hermes loads directory plugins from the active profile only
         return []
+    try:
+        # The record of the Hermes that runs this check, when this is its Python.
+        from pm.environments import install_state_dir
+        from pm.paths import install_root
+
+        records = [Path(install_state_dir(install_root())) / "facts.json"]
+    except Exception:  # noqa: BLE001 - not Hermes's Python: which install is meant is unknown, so look at each
+        records = [facts for root in roots for facts in sorted(root.glob("installs/*/facts.json"))]
     missing = []
-    for root in roots:
-        for facts in sorted(root.glob("installs/*/facts.json")):
-            try:
-                env = json.loads(facts.read_text(encoding="utf-8"))["packages"]["venv"]["environment"]
-            except (OSError, ValueError, KeyError, TypeError):
-                continue
-            env = Path(env)
-            if not env.is_dir():
-                continue
-            found = list(env.glob("lib/python*/site-packages/hermes_tenuo*")) + list(env.glob("Lib/site-packages/hermes_tenuo*"))
-            if not found:
-                missing.append(env)
+    for facts in records:
+        try:
+            env = json.loads(facts.read_text(encoding="utf-8"))["packages"]["venv"]["environment"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        env = Path(env)
+        if not env.is_dir():
+            continue
+        found = list(env.glob("lib/python*/site-packages/hermes_tenuo*")) + list(env.glob("Lib/site-packages/hermes_tenuo*"))
+        if not found:
+            missing.append(env)
     return missing
