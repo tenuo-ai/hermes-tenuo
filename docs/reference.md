@@ -755,8 +755,10 @@ A subagent is checked only while it runs in the profile that delegated. Hermes
 can send a task to another profile (`delegation.backend`, for example
 `profile_routes`). That profile loads its own plugins and config, so such a
 delegation is refused. Tasks that stay on this profile run and are checked as
-usual. Set `allow_routed_delegation: true` to let routed subagents run without
-this plugin's checks.
+usual. A running session keeps the delegation backend it started with, so every
+installed backend that can run is asked where a task would go, not only the one
+saved in config. Set `allow_routed_delegation: true` to let routed subagents run
+without this plugin's checks.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,
