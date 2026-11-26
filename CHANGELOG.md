@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 - 2026-11-26
 
 - Fix every tool call being blocked as an installation conflict after
   `hermes plugins enable` on Hermes 0.23. Hermes also installs an enabled plugin as a
@@ -25,6 +25,9 @@
 - A delegated child that Hermes continues under a new session id keeps its own grant and
   its use count.
 - A delegation plan file that repeats a key is refused.
+- Hands works with Hermes versions that pass new arguments to the command wrapper.
+- Requires Tenuo SDK 0.3.8.
+- README and catalog description lead with what the plugin is for.
 
 ## 0.4.2 - 2026-11-17
 

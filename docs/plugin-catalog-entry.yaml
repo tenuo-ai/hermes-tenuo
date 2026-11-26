@@ -7,15 +7,18 @@
 # match what register() registers at that commit.
 name: hermes-tenuo
 title: Tenuo
-version: 0.4.2
+version: 0.4.3
 category: tools
 repo: https://github.com/tenuo-ai/hermes-tenuo
 sha: "0000000000000000000000000000000000000000"   # placeholder: replace with the selected release commit
 description: >-
-  Signed, expiring tool permissions and local workspaces for Hermes Agent.
-  Tenuo warrants control which tools and arguments each task can use, including
-  delegated agents. Hands connects a folder on your Mac or Linux machine to an
-  existing Hermes conversation while memory and skills stay on the server.
+  Guardrails Hermes can't talk its way past: tool permissions enforced in code.
+  Restrict tool calls and their arguments, protect sensitive files, keep
+  destructive commands off the table, give subagents and Kanban workers only what
+  a task needs, and limit what prompt injection can do. Protection starts once you
+  configure a signed, expiring Tenuo warrant; delegated permissions can only
+  narrow. Every decision is logged locally. Also includes Hands, which connects a
+  folder on your Mac or Linux machine to an existing Hermes conversation while memory and skills stay on the server.
   Use either feature independently or together. Hands is off until configured;
   its optional HTTP listener accepts outbound device connections. Internet is off
   by default. Commands and results travel to the Hermes server and its model;

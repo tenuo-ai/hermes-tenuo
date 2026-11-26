@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-tenuo"
-version = "0.4.2"
+version = "0.4.3"
 description = "Hard limits on Hermes Agent tool calls: tool permissions, argument limits and scoped subagents, plus local workspaces"
 readme = "README.md"
 requires-python = ">=3.10"
