@@ -835,6 +835,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 parsed = parse_jobs(jobs_block, default_job)
             except JobsConfigError as exc:
                 check(False, f"jobs: {exc}", blocks)
+            except Exception as exc:  # noqa: BLE001 - the plugin blocks on this too
+                check(False, f"jobs could not be read ({type(exc).__name__})", blocks)
             else:
                 from hermes_tenuo._config import get_child_warrant_raw as _child, get_delegation_plan_path as _plan
                 try:

@@ -70,7 +70,7 @@ def parse_jobs(block: Any, default: Any = None) -> Jobs:
             raise JobsConfigError(f"{where}: a job must be an object")
         unknown = set(spec) - {"description", "ttl_seconds", "allow"}
         if unknown:
-            raise JobsConfigError(f"{where}: unknown fields: {sorted(unknown)}")
+            raise JobsConfigError(f"{where}: unknown fields: {sorted(unknown, key=str)}")
         description = spec.get("description", "")
         if not isinstance(description, str):
             raise JobsConfigError(f"{where}: description must be text")

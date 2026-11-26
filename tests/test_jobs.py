@@ -322,6 +322,9 @@ def test_jobs_cannot_be_set_with_a_plan_or_a_child_warrant(other):
     ({"a": {"allow": ["terminal"]}}, "b", "no job named 'b'"),
     ({"a": {"allow": {"terminal": {}, "tool:terminal": {"max_uses": 1}}}}, None, "terminal is listed twice"),
     ({"a": {"allow": ["tool:"]}}, None, "tool names must be non-empty"),
+    ({"a": {"allow": ["terminal"], "extra": 1, 2: "bad"}}, None, "unknown fields"),
+    ({"a": {"allow": {3: {}}}}, None, "tool names must be non-empty"),
+    ({7: {"allow": ["terminal"]}}, None, "not a valid job name"),
 ])
 def test_a_bad_jobs_block_is_refused(block, default, message):
     with pytest.raises(JobsConfigError, match=message):
@@ -342,3 +345,44 @@ def test_the_agent_is_offered_the_jobs_by_name(monkeypatch):
     assert param["enum"] == sorted(JOBS) and "log-reader (Reads the checkout logs.)" in param["description"]
     assert provider.task_parameters({}) == provider.task_parameters({})          # stable for the prompt cache
     assert provider.route_task({"goal": "x", "job": "log-reader"}, {"model": "m", "service_tier": "fast"}) == {"model": "m"}
+
+
+# Plugin startup: a jobs block that cannot be used blocks every call.
+
+def _startup(tmp_path, monkeypatch, jobs):
+    import hermes_tenuo._home as home
+    from hermes_tenuo._guard import build_plugin_guard
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TENUO_SIGNING_KEY", raising=False)
+    entry = {"access": ROLES, "jobs": jobs}
+    monkeypatch.setattr(home, "load_hermes_config",
+                        lambda: {"plugins": {"enabled": ["hermes-tenuo"], "entries": {"hermes-tenuo": entry}}})
+    return build_plugin_guard(None)
+
+
+def test_startup_with_jobs(tmp_path, monkeypatch):
+    assert sorted(_startup(tmp_path, monkeypatch, JOBS).jobs.jobs) == sorted(JOBS)
+
+
+@pytest.mark.parametrize("jobs, message", [
+    ({"a": {"allow": {}}}, "allow must be a non-empty map"),
+    ({"a": {"allow": ["terminal"], "extra": 1, 2: "bad"}}, "unknown fields"),
+])
+def test_startup_blocks_everything_on_a_bad_jobs_block(tmp_path, monkeypatch, jobs, message):
+    from hermes_tenuo._guard import WarrantLoadError
+
+    with pytest.raises(WarrantLoadError, match=message):
+        _startup(tmp_path, monkeypatch, jobs)
+
+
+def test_startup_blocks_everything_when_jobs_cannot_be_read_at_all(tmp_path, monkeypatch):
+    import hermes_tenuo.jobs as jobs_module
+    from hermes_tenuo._guard import WarrantLoadError
+
+    def broken(block, default=None):
+        raise TypeError("unexpected")
+
+    monkeypatch.setattr(jobs_module, "parse_jobs", broken)
+    with pytest.raises(WarrantLoadError, match=r"jobs could not be read \(TypeError\)"):
+        _startup(tmp_path, monkeypatch, JOBS)
