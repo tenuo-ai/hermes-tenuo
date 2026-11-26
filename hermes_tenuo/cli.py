@@ -591,6 +591,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check(False, "tenuo_core not importable", f"pip install tenuo ({exc})")
         return 1
 
+    # 1b. Hermes may run from an environment it manages, where a pip-installed copy is absent.
+    try:
+        from hermes_tenuo._home import managed_environments_without_plugin
+        unmanaged = managed_environments_without_plugin()
+    except Exception:  # noqa: BLE001 - a diagnostic must not stop the other checks
+        unmanaged = []
+    if unmanaged:
+        check(
+            False,
+            "Hermes runs this install from its own environment, and hermes-tenuo is not in it",
+            "Hermes does not load the plugin there, so no tool call is checked. Install it into Hermes: "
+            "`hermes plugins install tenuo-ai/hermes-tenuo`, then `hermes plugins enable hermes-tenuo`",
+        )
+
     # 2. Plugin entry point registered
     try:
         from importlib.metadata import entry_points
@@ -809,6 +823,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                                          "a new warrant starts a new count")
                     for line in unbounded_routes(loaded_plan):
                         note(f"check: {line}")
+
+    # 8a. A delegation strategy that can run a subagent in another Hermes profile.
+    try:
+        from hermes_tenuo._config import get_allow_routed_delegation
+        from hermes_tenuo._home import load_hermes_config
+        delegation = load_hermes_config().get("delegation")
+        backend = str((delegation or {}).get("backend") or "").strip() if isinstance(delegation, dict) else ""
+        if backend and backend != "default":
+            if get_allow_routed_delegation(None):
+                note(f"delegation.backend is {backend}: a subagent sent to another profile runs there "
+                     "without this plugin's checks (allow_routed_delegation is on)")
+            else:
+                note(f"delegation.backend is {backend}: a subagent sent to another profile is refused; "
+                     "others run here and are checked")
+    except Exception:  # noqa: BLE001 - a diagnostic must not stop the other checks
+        pass
 
     # 8b. Access: role-based gateway authorization, if configured.
     access_block = get_access_block(None)

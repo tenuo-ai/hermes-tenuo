@@ -242,6 +242,16 @@ def get_require_warrant(ctx: Any) -> bool:
     return True
 
 
+def get_allow_routed_delegation(ctx: Any) -> bool:
+    """Whether a delegate_task child may run in another Hermes profile, where this plugin cannot
+    check it. Off unless set to exactly ``true``."""
+    raw = _get_plugin_entry(ctx).get("allow_routed_delegation", False)
+    if type(raw) is bool:
+        return raw
+    logger.warning("hermes-tenuo: allow_routed_delegation must be a boolean; treating invalid value as false")
+    return False
+
+
 def get_require_session_warrant(ctx: Any) -> Optional[bool]:
     """Return the session-warrant gate, or None for the auto default.
 

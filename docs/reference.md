@@ -80,7 +80,11 @@ in the next step, so leave both empty for now. `enable` installs the `tenuo` and
 dependencies into the Hermes runtime.
 
 If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead, pinned to `hermes-tenuo==0.4.2`. Use one route or the other: with both
+instead, pinned to `hermes-tenuo==0.4.2`. Prefer the route above: when you
+install any plugin with `hermes plugins install`, Hermes moves the install onto
+an environment it manages, and a pip-installed hermes-tenuo is not carried over.
+Hermes then still lists it as enabled but does not load it, and no call is
+checked. `hermes-tenuo doctor` reports this. Use one route or the other: with both
 a pip install and a plugin directory, the plugin blocks every tool call until
 one is removed, and `hermes-tenuo doctor` reports the pair. That also puts the
 `hermes-tenuo` command on your path, so you can drop the `uvx` prefix below.
@@ -691,6 +695,7 @@ variable equivalent.
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Scope template used to attenuate a fresh, parent-chained grant for each `delegate_task` child. |
 | `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a versioned JSON plan that narrows tools, arguments, and TTL at each delegation depth. Mutually exclusive with `child_warrant`. |
 | `on_denial` | | `block` (default) or `log`. |
+| `allow_routed_delegation` | | Default `false`: a `delegate_task` task Hermes would run as another profile is refused, because that profile's tool calls are not checked by this one. `true` lets it run there unchecked. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
 | `hands.listen` | `TENUO_HANDS_LISTEN` | `host:port` the server listens on for your machines. Unset means Hands is off. |
@@ -745,6 +750,13 @@ matching `All(...)` constraint structure; the
 the plan operator-controlled, as a regular file that is not a symlink and is
 not group- or world-writable. Invalid or unreadable plans fail closed during
 plugin startup.
+
+A subagent is checked only while it runs in the profile that delegated. Hermes
+can send a task to another profile (`delegation.backend`, for example
+`profile_routes`). That profile loads its own plugins and config, so such a
+delegation is refused. Tasks that stay on this profile run and are checked as
+usual. Set `allow_routed_delegation: true` to let routed subagents run without
+this plugin's checks.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,

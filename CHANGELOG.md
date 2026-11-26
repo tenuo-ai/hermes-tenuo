@@ -25,6 +25,11 @@
 - A delegated child that Hermes continues under a new session id keeps its own grant and
   its use count.
 - A delegation plan file that repeats a key is refused.
+- A `delegate_task` task that Hermes would run as another profile (`delegation.backend`, for
+  example `profile_routes`) is refused: that profile's tool calls are not checked by the
+  profile that delegated. `allow_routed_delegation: true` restores the previous behaviour.
+- `hermes-tenuo doctor` fails when Hermes runs from an environment it manages and
+  hermes-tenuo is not installed there, and notes a non-default `delegation.backend`.
 
 ## 0.4.2 - 2026-11-17
 

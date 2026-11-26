@@ -199,6 +199,20 @@ def _delegated_tasks(args: Dict[str, Any]) -> List[Tuple[Optional[str], Optional
     return [(goal if isinstance(goal, str) else None, top)]
 
 
+def _task_args(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The arguments of each task a delegate_task call spawns: a task's own keys over the call's."""
+    top = {key: value for key, value in args.items() if key != "tasks"}
+    tasks = args.get("tasks")
+    if isinstance(tasks, str):
+        try:
+            tasks = json.loads(tasks)
+        except ValueError:
+            tasks = None
+    if isinstance(tasks, list) and tasks:
+        return [{**top, **task} if isinstance(task, dict) else dict(top) for task in tasks]
+    return [top]
+
+
 def _allows_unknown_args(warrant: Any, tool: str) -> bool:
     """Whether *warrant* lets *tool* take arguments it does not name (``_allow_unknown``).
 
@@ -339,6 +353,8 @@ class HermesGuard:
         access_policy: Optional[Any] = None,
         ingress: Optional[Any] = None,
         use_store: Optional[Any] = None,
+        routing: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+        allow_routed_delegation: bool = False,
     ):
         self._static_warrant = warrant
         self._static_signing_key = signing_key
@@ -379,6 +395,11 @@ class HermesGuard:
             raise DelegationPlanError("max_uses on the plan's root is not supported together with access roles")
         self._use_store = use_store
         self._root_budgets: Dict[str, Any] = {}  # warrant id → budget; guarded by _session_lock
+        # Which other Hermes profile a delegate_task task would run as, if any
+        # (hermes_tenuo.routing). A child in another profile is outside these
+        # checks, so such a delegation is refused unless the operator allows it.
+        self._routing = routing
+        self._allow_routed_delegation = allow_routed_delegation is True
         # Set when the tool registry also checks each call (see hermes_tenuo.uses).
         self._registry_enforces = False
         # task id of a delegated child → the session id that holds its grant (or its
@@ -1610,7 +1631,10 @@ class HermesGuard:
         grant_rejected = False
         if result.allowed and _is_delegation_spawn(tool_name, args):
             tasks = _delegated_tasks(args)
-            if self._delegation_plan is not None:
+            blocked = self._refuse_routed(args)
+            if blocked is not None:
+                pass
+            elif self._delegation_plan is not None:
                 blocked = self._register_planned_children(session_id, tasks, tool_call_id)
             else:
                 blocked = self._grant_children(session_id, tasks, tool_call_id)
@@ -1684,6 +1708,31 @@ class HermesGuard:
             if warrant is None or _marker_reason(warrant) is not None or self._session_warrant_chains.get(session_id):
                 return None
             return self._root_budgets.get(str(warrant.id))
+
+    def _refuse_routed(self, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The refusal for a delegation Hermes would run in another profile, else None."""
+        if self._allow_routed_delegation:
+            return None
+        from hermes_tenuo.routing import named_profile
+
+        where = self._routing or named_profile
+        for task in _task_args(args):
+            try:
+                profile = where(task) or named_profile(task)
+            except Exception as exc:  # noqa: BLE001 - an unknown destination is not "here"
+                logger.warning("hermes-tenuo: could not tell where a delegated task would run (%s)",
+                               type(exc).__name__)
+                return {"action": "block", "message": (
+                    "tenuo: delegation rejected: could not tell which Hermes profile the subagent "
+                    f"would run in ({type(exc).__name__})"
+                )}
+            if profile:
+                return {"action": "block", "message": (
+                    f"tenuo: delegation rejected: this subagent would run as Hermes profile '{profile}', "
+                    "outside this profile's permission checks. Use the default delegation route, or set "
+                    "allow_routed_delegation: true to accept subagents this plugin cannot check"
+                )}
+        return None
 
     def _take_use(
         self, budget: Optional[Any], name: str, tool_call_id: str,

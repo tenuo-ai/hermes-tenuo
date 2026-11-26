@@ -29,11 +29,16 @@ def build_ingress_only_guard(ctx: Any, ingress: Any) -> "PluginGuard":
     if audit_path is not None:
         from hermes_tenuo.audit import LocalAuditLog
         audit_callback = LocalAuditLog(audit_path)
+    from hermes_tenuo._config import get_allow_routed_delegation
+    from hermes_tenuo.routing import other_profile
+
     guard = HermesGuard(
         audit_callback=audit_callback,
         # Binding an A2A grant must not make unrelated local sessions warrant-required.
         require_session_warrant=False,
         ingress=ingress,
+        routing=other_profile,
+        allow_routed_delegation=get_allow_routed_delegation(ctx),
     )
     return PluginGuard(guard)
 
@@ -43,8 +48,10 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
 
     Raises WarrantLoadError when a warrant IS configured but unloadable.
     """
+    from hermes_tenuo.routing import other_profile
     from hermes_tenuo._config import (
         get_access_block,
+        get_allow_routed_delegation,
         get_audit_log_path,
         get_child_warrant_raw,
         get_delegation_plan_path,
@@ -201,6 +208,8 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         delegation_plan=delegation_plan,
         access_policy=access_policy,
         use_store=use_store,
+        routing=other_profile,
+        allow_routed_delegation=get_allow_routed_delegation(ctx),
     )
 
     return PluginGuard(guard)
