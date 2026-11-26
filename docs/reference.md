@@ -360,6 +360,10 @@ With the roles above it, in one chat:
   under it.
 - **One limit per helper.** `max_uses` counts one helper's calls. A parent that
   may delegate again can send another helper with the same job.
+- **Refusals say whose limit it is.** A helper's refused call says whether it
+  is outside the helper's job or outside what the person who asked may do, so
+  the agent can send a helper with another job, or tell the person, without
+  trying again.
 - **Helpers of helpers.** A helper that may delegate can give its own helpers
   jobs; each is narrowed again from the one above.
 - **Not with a delegation plan.** `jobs` and `delegation_plan` cannot both be

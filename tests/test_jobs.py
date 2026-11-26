@@ -35,6 +35,7 @@ JOBS = {
     "config-reader": {"allow": {"read_file": {"path": "/srv/checkout/**"}}},
     "restarter-in-place": {"allow": {"terminal": {"workdir": "/srv/checkout/**",
                                                   "command": {"patterns": [r"^\./checkoutctl restart$"]}}}},
+    "log-lead": {"allow": {"terminal": {"command": {"patterns": [r"^\./checkoutctl logs$"]}}, "delegate_task": {}}},
     "lead": {"allow": {"terminal": {"command": {"patterns": [r"^\./checkoutctl (restart|logs)$"]}}, "delegate_task": {}}},
 }
 DANA = dict(user="telegram:101", chat="telegram:-1", platform="telegram")
@@ -102,7 +103,8 @@ def test_a_helper_never_gets_more_than_the_person_who_asked(team, monkeypatch):
 def test_a_job_whose_tools_the_asker_lacks_is_refused(team, monkeypatch):
     speaks(monkeypatch, SAM)
     refused = helper(team, "sam", "h1", job="config-reader")             # Sam has no read_file
-    assert refused is not None and "would hold no tools" in refused["message"]
+    assert refused is not None
+    assert "job 'config-reader' uses read_file, which the person who asked may not use" in refused["message"]
 
 
 def test_a_path_limit_narrows_a_path_limit(team, monkeypatch):
@@ -165,6 +167,68 @@ def test_a_job_named_when_none_are_configured_is_refused():
     assert refused is not None and "no jobs are configured" in refused["message"]
 
 
+# A refusal says whose limit it is.
+
+def why(guard, session, command="./checkoutctl restart", tool="terminal", **args):
+    refused = guard.pre_tool_call(tool, {"command": command} if tool == "terminal" else args, session_id=session)
+    return refused["message"] if refused else None
+
+
+def test_a_refusal_names_the_person_who_asked_when_the_limit_is_theirs(team, monkeypatch):
+    speaks(monkeypatch, SAM)
+    assert helper(team, "sam", "h1", job="restarter") is None
+    message = why(team, "h1")
+    assert message.startswith("tenuo: the person who asked may not do this, so a helper working for them may not either")
+    assert "Constraint 'command' not satisfied" in message              # the check's own words stay
+    assert team.events[-1].decision == "DENY" and "the person who asked may not do this" in team.events[-1].reason
+    assert "the person who asked may not do this" in why(team, "h1", tool="read_file", path="/srv/x")
+
+
+def test_a_refusal_names_the_job_when_the_limit_is_the_jobs(team, monkeypatch):
+    speaks(monkeypatch, DANA)
+    assert helper(team, "dana", "h1", job="log-reader") is None
+    assert why(team, "h1").startswith("tenuo: this is outside this helper's job ('log-reader')")
+    assert "outside this helper's job ('log-reader')" in why(team, "h1", tool="read_file", path="/srv/x")
+    assert why(team, "h1", "./checkoutctl logs") is None
+
+
+def test_a_refusal_names_the_helper_in_between_when_the_limit_is_its(team, monkeypatch):
+    speaks(monkeypatch, DANA)
+    assert helper(team, "dana", "lead", job="log-lead") is None
+    assert helper(team, "lead", "h2", job="restarter", goal="restart") is None
+    assert why(team, "h2").startswith("tenuo: the helper that delegated this task may not do this itself")
+
+
+def test_a_refusal_two_helpers_down_still_names_the_person(team, monkeypatch):
+    speaks(monkeypatch, SAM)
+    assert helper(team, "sam", "lead", job="lead") is None
+    assert helper(team, "lead", "h2", job="restarter", goal="restart") is None
+    assert "the person who asked may not do this" in why(team, "h2")
+
+
+def test_a_use_limit_refusal_keeps_its_own_words(team, monkeypatch):
+    speaks(monkeypatch, DANA)
+    assert helper(team, "dana", "h1", job="restarter") is None
+    assert why(team, "h1") is None
+    assert why(team, "h1") == "tenuo: use limit reached: this grant allows terminal 1 time"
+
+
+def test_a_helper_without_a_job_is_told_about_the_person_too(monkeypatch):
+    key = tenuo.SigningKey.generate()
+    policy = build_access_policy(ROLES, control_key=key, holder=key.public_key, signing_key=key)
+    guard = HermesGuard(signing_key=key, trusted_roots=[key.public_key], access_policy=policy)
+    monkeypatch.setattr(access, "subagent_attribution_lookup", lambda: (lambda task_id: None))
+    speaks(monkeypatch, SAM)
+    assert helper(guard, "sam", "h1") is None
+    assert "the person who asked may not do this" in why(guard, "h1")
+    assert why(guard, "h1", "./checkoutctl logs") is None
+
+
+def test_the_asker_is_refused_in_the_checks_own_words(team, monkeypatch):
+    speaks(monkeypatch, SAM)
+    assert why(team, "sam") == "Constraint 'command' not satisfied: value does not match constraint"
+
+
 def _single(warrant_caps, jobs):
     root, agent = tenuo.SigningKey.generate(), tenuo.SigningKey.generate()
     builder = tenuo.Warrant.mint_builder().holder(agent.public_key).capability("delegate_task")
@@ -187,6 +251,16 @@ def test_with_one_warrant_a_job_tightens_a_path():
     assert helper(guard, "p", "h1", job="reports") is None
     assert guard.pre_tool_call("read_file", {"path": "/data/reports/q3"}, session_id="h1") is None
     assert guard.pre_tool_call("read_file", {"path": "/data/payroll"}, session_id="h1") is not None
+
+
+def test_with_one_warrant_a_refusal_names_the_job_or_the_warrant():
+    guard = _single({"read_file": {"path": tenuo.Subpath("/data")}},
+                    {"reports": {"allow": {"read_file": {"path": "/data/reports/**"}}}})
+    assert helper(guard, "p", "h1", job="reports") is None
+    assert "outside this helper's job ('reports')" in why(guard, "h1", tool="read_file", path="/data/payroll")
+    assert "this agent's own warrant does not allow this" in why(guard, "h1", tool="read_file", path="/etc/passwd")
+    refused = helper(_single({}, {"reports": {"allow": {"read_file": {}}}}), "p", "h2", job="reports")
+    assert "job 'reports' uses read_file, which the agent delegating it may not use" in refused["message"]
 
 
 def test_a_job_that_cannot_be_combined_with_the_parents_limit_is_refused_not_widened():

@@ -35,6 +35,8 @@
   `ttl_seconds`. `delegation.backend: tenuo` adds a `job` choice per task to
   `delegate_task`; `default_job` covers tasks that name none. Works on top of `access`
   roles, so a helper never gets more than the person who asked.
+- A delegated subagent's refused call says whose limit refused it: its own job, the agent
+  that delegated it, or the person who asked.
 
 ## 0.4.2 - 2026-11-17
 
