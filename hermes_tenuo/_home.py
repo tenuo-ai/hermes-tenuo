@@ -81,7 +81,7 @@ def managed_environments_without_plugin() -> list:
 
     home = hermes_home()
     roots = [home, home.parent.parent] if home.parent.name == "profiles" else [home]
-    if any((root / "plugins" / "hermes-tenuo").is_dir() for root in roots):
+    if (home / "plugins" / "hermes-tenuo").is_dir():  # Hermes loads directory plugins from the active profile only
         return []
     missing = []
     for root in roots:
