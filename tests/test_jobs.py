@@ -92,6 +92,8 @@ def test_a_job_can_carry_a_use_limit(team, monkeypatch):
     assert run(team, "h1", "./checkoutctl restart")
     assert not run(team, "h1", "./checkoutctl restart")
     assert "use limit reached" in team.events[-1].reason
+    assert team.use_limited("h1", {"terminal": {}}) == ["terminal"]     # so it is not handed to another agent
+    assert team.use_limited("dana", {"terminal": {}}) == []
 
 
 def test_a_helper_never_gets_more_than_the_person_who_asked(team, monkeypatch):

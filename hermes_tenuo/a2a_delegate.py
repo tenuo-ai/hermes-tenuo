@@ -295,6 +295,12 @@ def register(ctx: Any, get_guard: Any) -> bool:
             task_id = str(_kw.get("task_id") or "")
             session_id = guard.delegation_session(session_id, task_id)
             chain, key = guard.delegation_authority(session_id)
+            tools = args.get("tools")
+            limited = guard.use_limited(session_id, tools if isinstance(tools, dict) else ())
+            if limited:
+                raise DelegationError(
+                    f"{', '.join(limited)} has a use limit here, and the count does not travel to another agent. "
+                    "Leave it out of the grant")
             result = delegate(config=config, chain=chain, key=key, peer=args.get("peer", ""),
                               task=args.get("task", ""), tools=args.get("tools"),
                               ttl_seconds=args.get("ttl_seconds", DEFAULT_TTL))

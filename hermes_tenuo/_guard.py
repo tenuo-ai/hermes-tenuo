@@ -249,6 +249,10 @@ class PluginGuard:
         """This session's chain and key for ``tenuo_delegate`` (hermes_tenuo.a2a_delegate)."""
         return self._guard.delegation_authority(session_id)
 
+    def use_limited(self, session_id: str, tools) -> list:
+        """The tools among *tools* this session holds with a use limit (see HermesGuard.use_limited)."""
+        return self._guard.use_limited(session_id, tools)
+
     def call_meta(self, session_id: str, tool_name: str, args: dict):
         """MCP ``_meta`` with this session's proof for one call (see HermesGuard.call_meta)."""
         return self._guard.call_meta(session_id, tool_name, args)

@@ -1615,6 +1615,17 @@ class HermesGuard:
             return [], None
         return self._chain_for(session_id) + [warrant], key
 
+    def use_limited(self, session_id: str, tools: Any) -> List[str]:
+        """Which of *tools* this session may use only a limited number of times.
+
+        A use count is kept by the agent that set the limit. It does not travel with a grant
+        to another agent, so ``tenuo_delegate`` does not hand such a tool on."""
+        names = sorted({str(tool).removeprefix("tool:") for tool in tools or ()})
+        with self._session_lock:
+            budget = self._session_uses.get(session_id)
+        return [name for name in names
+                if name in self._root_limits or (budget is not None and budget.limits(name))]
+
     def call_meta(self, session_id: str, tool_name: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """MCP ``_meta`` carrying this session's proof for one call: its warrant chain, signed with its
         own key over the tool and arguments (``tenuo.mcp`` format, as ``MCPVerifier`` checks it). On a

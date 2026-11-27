@@ -353,6 +353,26 @@ def test_sessionless_handler_uses_child_authority_and_refuses_unknown_tasks(k, w
     assert not result["ok"] and "does not identify one session" in result["error"]
 
 
+def test_a_tool_with_a_use_limit_is_not_handed_to_another_agent(k, w_a, monkeypatch):
+    from hermes_tenuo import a2a_delegate
+    from hermes_tenuo._guard import PluginGuard
+    from hermes_tenuo.uses import UseBudget
+
+    guard = HermesGuard(warrant=w_a, signing_key=k.a, trusted_roots=[k.root.public_key])
+    monkeypatch.setattr(a2a_delegate, "load_sender_config", lambda ctx: _config(k))
+    sent = []
+    monkeypatch.setattr(a2a_delegate, "delegate", lambda **kwargs: sent.append(kwargs) or {
+        "grant": {"id": "delegated"}, "peer": "home", "context_id": "context", "state": "done"})
+    ctx = _Ctx()
+    a2a_delegate.register(ctx, lambda: PluginGuard(guard))
+    handler = ctx.tools["tenuo_delegate"].handler
+    guard._session_uses["limited"] = UseBudget({"ha_call_service": 1})
+    result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, session_id="limited"))
+    assert not result["ok"] and "ha_call_service has a use limit here" in result["error"] and not sent
+    result = json.loads(handler({"peer": "home", "task": "Porch on", "tools": LIGHT}, session_id="free"))
+    assert result["ok"] and len(sent) == 1
+
+
 @pytest.mark.parametrize("tool", ["tenuo_delegate", "tool:tenuo_delegate"])
 @pytest.mark.parametrize("has_capability", [False, True])
 def test_log_only_mode_cannot_allow_denied_remote_delegation(k, tool, has_capability):

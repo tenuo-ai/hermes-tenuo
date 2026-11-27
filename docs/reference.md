@@ -359,7 +359,8 @@ With the roles above it, in one chat:
   to keep its helper in that directory; each call must then name a directory
   under it.
 - **One limit per helper.** `max_uses` counts one helper's calls. A parent that
-  may delegate again can send another helper with the same job.
+  may delegate again can send another helper with the same job. A helper
+  cannot hand a tool it holds with a limit to another agent (`tenuo_delegate`).
 - **Refusals say whose limit it is.** A helper's refused call says whether it
   is outside the helper's job or outside what the person who asked may do, so
   the agent can send a helper with another job, or tell the person, without
@@ -923,6 +924,9 @@ What the limit covers:
 - **This profile's warrant.** A root limit is not supported together with
   access roles, and a grant received from another agent cannot use a tool the
   root limits.
+- **Not handed to another agent.** `tenuo_delegate` refuses a grant that
+  names a tool the session holds with a use limit, because the count is kept
+  here and would not follow the grant.
 - **Enforcing mode.** Under `on_denial: log` a spent limit is logged as a
   denial and an ordinary call still runs; a `delegate_task` call stays blocked.
 - **One name per tool.** Tool names with and without the `tool:` prefix share
