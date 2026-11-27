@@ -23,7 +23,7 @@ expect "isn't valid" $P accept.py "$LINK" --home "$W/other" --wait 1
 
 echo "3. Read works; write is refused by Alex's client and by the server"
 expect "Standup" $P accept.py --home "$G" --call list_events day=2026-11-27
-expect "Refused" $P accept.py --home "$G" --call add_event day=2026-11-27 title=Hack
+expect "doesn.t include" $P accept.py --home "$G" --call add_event day=2026-11-27 title=Hack
 expect "SERVER REFUSED" $P bypass.py "$G" add_event '{"day":"2026-11-27","title":"Hack"}' signed
 expect "SERVER REFUSED" $P bypass.py "$G" list_events '{"day":"2026-11-27"}' none
 $P accept.py --home "$G" --call list_events day=2026-11-27 | grep -q Hack && fail "refused write had an effect"

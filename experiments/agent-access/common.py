@@ -74,4 +74,4 @@ def until(warrant) -> str:
     from datetime import datetime
     value = warrant.expires_at()
     when = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else datetime.fromtimestamp(value)
-    return when.astimezone().strftime("%a %H:%M")
+    return when.astimezone().strftime("%a %H:%M %Z")

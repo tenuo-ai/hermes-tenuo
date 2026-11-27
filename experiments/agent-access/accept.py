@@ -32,6 +32,15 @@ from tenuo import PublicKey, SigningKey, Warrant, configure, key_scope, warrant_
 from tenuo.mcp import SecureMCPClient
 
 HOME = Path(os.environ.get("TENUO_GUEST_HOME", Path.home() / ".tenuo-agent-access"))
+ACCEPT_URL = ("https://raw.githubusercontent.com/tenuo-ai/hermes-tenuo/"
+              "experiments/agent-access-pairing/experiments/agent-access/accept.py")
+
+
+def me() -> str:
+    """How to run this client again: its URL when uv ran it from one, else its path."""
+    here = Path(sys.argv[0]).resolve()
+    from_url = here.is_relative_to(Path(tempfile.gettempdir()).resolve())
+    return f"uv run {ACCEPT_URL}" if from_url else f"uv run {sys.argv[0]}"
 
 
 # --- small helpers -------------------------------------------------------------------
@@ -85,7 +94,7 @@ def until(warrant: Warrant) -> str:
     value = warrant.expires_at()
     when = (datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str)
             else datetime.fromtimestamp(value))
-    return when.astimezone().strftime("%a %H:%M")
+    return when.astimezone().strftime("%a %H:%M %Z")
 
 
 # --- pairing ---------------------------------------------------------------------------
@@ -135,13 +144,14 @@ def wait_for_approval(home: Path, wait: float) -> int:
             # Pin the owner's key now; later pickups must match it.
             write_state(home, {**state, "issuer": issuer})
             print(f"✓ Approved. {describe(w)}")
-            print(f"  Try it: {sys.argv[0]} --call {sorted(w.tools)[0]} …")
+            print(f"\nCall a tool with: {me()} --call {sorted(w.tools)[0]} name=value")
+            print(f"Or make a shortcut: alias shared='{me()} --call'   then: shared {sorted(w.tools)[0]} name=value")
             return 0
         if status in ("declined", "ended"):
             print("✗ The owner declined this request.")
             return 1
         if time.time() >= deadline:
-            print(f"Still waiting. Run '{sys.argv[0]} --status' later to check again.")
+            print(f"Still waiting. Check again later with: {me()} --status")
             return 1
         time.sleep(1)
 
@@ -150,7 +160,7 @@ def wait_for_approval(home: Path, wait: float) -> int:
 async def call(home: Path, tool: str, args: dict) -> int:
     state = read_state(home)
     if not state or "issuer" not in state:
-        print("✗ Not paired yet. Run this with the link you were sent.")
+        print("✗ Not paired yet. Run this with the invitation link you were sent.")
         return 2
     status, w, issuer = fetch(state["server"], state["holder"])
     if issuer and issuer != state["issuer"]:
@@ -165,6 +175,10 @@ async def call(home: Path, tool: str, args: dict) -> int:
         if tool not in client.tools:
             print(f"✗ This server has no tool called {tool}. It offers: {', '.join(sorted(client.tools))}.")
             return 2
+        if tool not in w.tools:
+            print(f"✗ Your access doesn't include {tool}. You can use {', '.join(sorted(w.tools))}. "
+                  "Ask the owner if you need more.")
+            return 1
         with warrant_scope(w), key_scope(key):
             try:
                 result = await client.tools[tool](**args)

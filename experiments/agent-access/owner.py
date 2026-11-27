@@ -156,6 +156,7 @@ def main(argv=None) -> int:
     e.add_argument("fingerprint")
     sub.add_parser("list")
     args = ap.parse_args(argv)
+    sys.stdout.reconfigure(line_buffering=True)  # progress shows up even when piped or logged
     owner = Owner(args.home)
 
     def by_fp(fp):
