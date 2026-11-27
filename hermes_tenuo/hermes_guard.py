@@ -224,10 +224,12 @@ def _task_args(args: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _routed_tasks(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Each task as Hermes hands it to its delegation strategy: a batch task as written, and a
-    single goal with the call's context. A batch task does not take the call's context."""
+    single goal with the call's context. A batch task does not take the call's context, and
+    one written as a bare string is its goal."""
     tasks = _batch(args)
     if tasks:
-        return [dict(task) if isinstance(task, dict) else {} for task in tasks]
+        return [dict(task) if isinstance(task, dict) else {"goal": task} if isinstance(task, str) else {}
+                for task in tasks]
     return [{"goal": args.get("goal"), "context": args.get("context")}]
 
 

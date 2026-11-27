@@ -221,6 +221,15 @@ def test_a_batch_task_does_not_take_the_calls_context(monkeypatch):
     assert refused is not None and "Hermes profile 'worker'" in refused["message"]
 
 
+def test_a_batch_task_written_as_a_string_is_routed_on_that_goal(monkeypatch):
+    by_goal = _Provider(lambda task, config: {"profile": "worker"} if task["goal"] == "far" else {}, "by_goal")
+    _fake_hermes(monkeypatch, by_goal, config={"backend": "by_goal"})
+    guard, _ = _guard(routing=routing.other_profile)
+    assert _delegate(guard, {"tasks": ["near"]}) is None
+    refused = _delegate(guard, {"tasks": ["near", "far"]}, session="s2")
+    assert refused is not None and "Hermes profile 'worker'" in refused["message"]
+
+
 def test_a_single_goal_is_routed_on_its_goal_and_context_only(monkeypatch):
     seen = []
     provider = _Provider(lambda task, config: seen.append(task) or {}, "routes", parameters={"lane": {"type": "string"}})
