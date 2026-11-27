@@ -80,10 +80,12 @@ in the next step, so leave both empty for now. `enable` installs the `tenuo` and
 dependencies into the Hermes runtime.
 
 If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead, pinned to `hermes-tenuo==0.4.3`. Use one route or the other: with both
-a pip install and a plugin directory, the plugin blocks every tool call until
-one is removed, and `hermes-tenuo doctor` reports the pair. That also puts the
-`hermes-tenuo` command on your path, so you can drop the `uvx` prefix below.
+instead, pinned to `hermes-tenuo==0.4.3`. That also puts the `hermes-tenuo`
+command on your path, so you can drop the `uvx` prefix below. Use one route or
+the other. A pip install and a plugin directory that hold the same code are
+loaded as one installation, as with the copy `hermes plugins enable` makes.
+When their code differs or can't be compared, the plugin blocks every tool call
+until one is removed. `hermes-tenuo doctor` reports which case you have.
 
 Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
 the plugin loader of upstream Hermes `main` using both install routes; the
