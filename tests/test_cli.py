@@ -81,10 +81,21 @@ class TestMintLocal:
         assert str(tmp_path / "home" / "config.yaml") in out
         assert str(tmp_path / "home" / ".env") in out
         assert "~/.hermes" not in out
-        assert " doctor" in out and "hermes gateway restart" in out
+        home = tmp_path / "home"
+        assert f"HERMES_HOME={home} uvx hermes-tenuo==" in out and f"HERMES_HOME={home} hermes gateway restart" in out
         if output == "yaml":
             import yaml
             assert set(yaml.safe_load(out)) == {"warrant", "trusted_root"}
+
+    def test_mint_commands_name_no_home_for_the_default_one(self, capsys, monkeypatch, tmp_path):
+        from hermes_tenuo.cli import cmd_mint
+        monkeypatch.setitem(sys.modules, "hermes_constants", None)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert cmd_mint(argparse.Namespace(ttl="1h", allow=["web_search"], output="full")) == 0
+        out = capsys.readouterr().out
+        assert str(tmp_path / ".hermes" / "config.yaml") in out
+        assert "HERMES_HOME=" not in out and "#   hermes gateway restart" in out
 
     def test_mint_warrant_is_valid_tenuo_warrant(self):
         """The minted warrant must be decodable by tenuo_core."""

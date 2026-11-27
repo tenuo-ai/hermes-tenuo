@@ -326,13 +326,16 @@ def _mint_local(args: argparse.Namespace) -> int:
 
     from hermes_tenuo._home import hermes_home
     from hermes_tenuo._version import __version__
-    config_path = hermes_home() / "config.yaml"
-    env_path = hermes_home() / ".env"
+    home = hermes_home()
+    config_path = home / "config.yaml"
+    env_path = home / ".env"
+    # A home other than the default is named in the commands, so they act on the files above.
+    at_home = "" if home == Path("~/.hermes").expanduser() else f"HERMES_HOME={shlex.quote(str(home))} "
     check_and_restart = [
         "# Check, then restart Hermes (a running gateway keeps the old settings):",
         "#   export TENUO_SIGNING_KEY=...   (same value, for the check in this shell)",
-        f"#   uvx hermes-tenuo=={__version__} doctor",
-        "#   hermes gateway restart",
+        f"#   {at_home}uvx hermes-tenuo=={__version__} doctor",
+        f"#   {at_home}hermes gateway restart",
     ]
 
     if args.output == "env":
