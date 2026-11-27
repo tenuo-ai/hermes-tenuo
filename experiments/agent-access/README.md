@@ -60,6 +60,35 @@ and `owner.py end KEY`, where KEY is the fingerprint shown on the card and by `o
 ./journey.sh
 ```
 
+## Tested on two machines
+
+Run on 2026-11-27 following this README from scratch: owner and server on an Ubuntu 24.04
+VM, guest on a Mac on the same network, plain HTTP.
+
+| Step | Result |
+|---|---|
+| Owner: clone, `share`, start server | About 2 s with uv; no virtualenv |
+| Guest: the one sent command, from its URL | Key created, paired and approved in about 4 s; nothing cloned |
+| Owner's card | Showed the same key fingerprint the guest was told to read out |
+| Read | Runs |
+| Write with read access | Refused by the guest's client; signed anyway by `bypass.py`, refused by the server |
+| No warrant | Refused by the server |
+| Owner widens access from the VM | The guest's next write runs |
+| Owner ends access | The next call is refused; the last warrant replayed is refused as revoked |
+
+What a fresh run changed in this experiment:
+
+- Stock Ubuntu has neither `pip` nor a working `venv`, so the scripts declare their
+  dependencies inline and run with `uv run`.
+- The guest's client is one file that runs from its URL, so a guest clones nothing.
+- After pairing, the client prints the command to run next, and a shortcut, instead of a
+  temporary file path.
+- Times show their time zone. The owner's server and the guest's laptop were in different
+  zones, so the same moment read as two different times.
+- A refused call says what the guest can use and to ask the owner, not "not authorized".
+  A missing argument names the argument, instead of reading like a refusal.
+- `approve --wait` waits for the guest, and the server prints when an agent connects.
+
 ## How it's built
 
 - `owner.py` holds the issuer key in `OWNER/private`. Everything the server needs is in
@@ -89,5 +118,7 @@ and `owner.py end KEY`, where KEY is the fingerprint shown on the card and by `o
 
 - The guest's client is a script. Agents such as Claude Code or Hermes need a client that
   adds the chain to their MCP calls.
+- The guest runs the client from a branch URL. A real release would pin a version and
+  publish the client as a package.
 - Approval is a terminal prompt. State is kept in JSON files without locking, and plain
   HTTP is used locally.

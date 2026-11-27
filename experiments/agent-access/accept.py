@@ -175,6 +175,13 @@ async def call(home: Path, tool: str, args: dict) -> int:
         if tool not in client.tools:
             print(f"✗ This server has no tool called {tool}. It offers: {', '.join(sorted(client.tools))}.")
             return 2
+        tools = {x.name: x for x in await client.get_tools()}
+        schema = getattr(tools.get(tool), "input_schema", None) or getattr(tools.get(tool), "inputSchema", None) or {}
+        missing = [name for name in schema.get("required", []) if name not in args]
+        if missing:
+            example = " ".join(f"{name}=…" for name in schema.get("required", []))
+            print(f"✗ {tool} needs {', '.join(missing)}. For example: --call {tool} {example}")
+            return 2
         if tool not in w.tools:
             print(f"✗ Your access doesn't include {tool}. You can use {', '.join(sorted(w.tools))}. "
                   "Ask the owner if you need more.")
