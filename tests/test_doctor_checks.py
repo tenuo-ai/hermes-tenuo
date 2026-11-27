@@ -107,6 +107,19 @@ def test_valid_delegation_plan_passes(install, capsys, tmp_path):
     assert rc == 0 and "✓  delegation plan loads" in out
 
 
+def test_doctor_shows_what_each_depth_may_do(install, capsys, tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "version": 1,
+        "root": {"tools": {"read_file": {}, "delegate_task": {}}},
+        "levels": [{"ttl_seconds": 60, "tools": {"read_file": {"max_uses": 3}}}],
+    }))
+    plan.chmod(0o600)
+    install(delegation_plan=str(plan))
+    rc, out = _doctor(capsys)
+    assert rc == 0 and "—  depth 1: read_file (at most 3 uses); expires after 60s" in out
+
+
 def test_misspelt_on_denial_fails_and_log_is_noted(install, capsys):
     install(on_denial="lgo")
     rc, out = _doctor(capsys)
@@ -224,6 +237,43 @@ def test_doctor_reports_a_second_installation_by_what_its_loader_does(
     assert ("✗  two installations" in out) is fails
     if fails:
         assert code == 1
+
+
+def _copy_of_this_checkout(home):
+    """The plugin directory as Hermes installs it: this shim and this package."""
+    import shutil
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    directory = home / "plugins" / "hermes-tenuo"
+    shutil.copytree(root / "hermes_tenuo", directory / "hermes_tenuo",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (directory / "__init__.py").write_text(_THIS_SHIM)
+    return directory
+
+
+def test_doctor_accepts_a_plugin_directory_with_the_same_code(tmp_path, monkeypatch, capsys):
+    """Hermes installs an enabled plugin as a package from a copy; that is one installation."""
+    from hermes_tenuo import cli
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
+    directory = _copy_of_this_checkout(tmp_path)
+    (directory / "hermes_tenuo" / ".DS_Store").write_bytes(b"\0")
+    assert cli._second_installation() == (directory, "same")
+    cli.cmd_doctor(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "two installations" not in out
+    assert f"this package and the plugin directory {directory} hold the same code" in out
+
+
+def test_doctor_reports_a_plugin_directory_with_different_code(tmp_path, monkeypatch, capsys):
+    from hermes_tenuo import cli
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
+    directory = _copy_of_this_checkout(tmp_path)
+    version = directory / "hermes_tenuo" / "_version.py"
+    version.write_text(version.read_text() + "\n# changed\n")
+    assert cli._second_installation() == (directory, "blocks")
+    assert cli.cmd_doctor(argparse.Namespace()) == 1
+    assert "every tool call is blocked" in capsys.readouterr().out
 
 
 def test_doctor_ignores_the_plugin_directory_outside_the_hermes_environment(tmp_path, monkeypatch):

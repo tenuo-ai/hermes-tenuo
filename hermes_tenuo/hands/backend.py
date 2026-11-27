@@ -196,9 +196,9 @@ class HandsEnvironment(BaseEnvironment):
             result = _settled(result, reply, rebuilt)
         return result
 
-    def _wrap_command(self, command: str, cwd: str) -> str:
+    def _wrap_command(self, command: str, cwd: str, **kwargs: Any) -> str:
         # Remember which plain command each wrapped script came from, for the device's log.
-        wrapped = super()._wrap_command(command, cwd)
+        wrapped = super()._wrap_command(command, cwd, **kwargs)
         self._wrapped.append((wrapped, command))
         return wrapped
 

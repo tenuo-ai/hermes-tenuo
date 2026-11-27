@@ -56,7 +56,7 @@ def test_root_init_registers_hooks_and_skill(monkeypatch, tmp_path):
 
 def test_plugin_yaml_declares_tenuo_dependency():
     text = (ROOT / "plugin.yaml").read_text()
-    assert "python_dependencies" in text and "tenuo>=0.3.7,<0.4" in text
+    assert "python_dependencies" in text and "tenuo>=0.3.8,<0.4" in text
 
 
 def _fake_registry(monkeypatch, enforcement: bool, denied: bool):
@@ -120,6 +120,130 @@ def test_directory_conflict_also_denies_through_the_registry(monkeypatch, tmp_pa
         registry.registry.installed[0]("terminal", {"command": "id"}, session_id="s1")
     assert str(tmp_path / 'old') in str(raised.value) and str(ROOT) in str(raised.value)
     assert ctx.call_hook("pre_tool_call", tool_name="terminal", args={})["action"] == "block"
+
+
+def _package_modules():
+    return {n: m for n, m in sys.modules.items() if n == "hermes_tenuo" or n.startswith("hermes_tenuo.")}
+
+
+@pytest.fixture
+def load_copy(tmp_path, monkeypatch):
+    """Load hermes_tenuo from a copy of this checkout, as an enabled plugin's managed install does.
+
+    Afterwards every module the copy brought in is dropped and this checkout's
+    own modules are put back, so later tests never see a mix of the two.
+    """
+    import shutil
+    before = _package_modules()
+
+    def load(change=None):
+        copy = tmp_path / "plugin-sources" / "hermes-tenuo-copy"
+        shutil.copytree(ROOT / "hermes_tenuo", copy / "hermes_tenuo",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        if change:
+            change(copy / "hermes_tenuo")
+        for name in _package_modules():
+            del sys.modules[name]
+        monkeypatch.syspath_prepend(str(copy))
+        import hermes_tenuo
+        assert Path(hermes_tenuo.__file__).resolve().parent == (copy / "hermes_tenuo").resolve()
+        return hermes_tenuo
+
+    yield load
+    for name in _package_modules():
+        del sys.modules[name]
+    sys.modules.update(before)
+
+
+def _edit_version(pkg):
+    version = pkg / "_version.py"
+    version.write_text(version.read_text() + "\n# changed\n")
+
+
+def _edit_skill(pkg):
+    skill = pkg / "skills" / "tenuo-scope" / "SKILL.md"
+    skill.write_text(skill.read_text() + "\nchanged\n")
+
+
+def _add_stray_files(pkg):
+    (pkg / ".DS_Store").write_bytes(b"\0")
+    (pkg / "cli.py~").write_text("backup")
+    (pkg / "hands" / ".ruff_cache").mkdir()
+    (pkg / "hands" / ".ruff_cache" / "CACHEDIR.TAG").write_text("cache")
+    (pkg / ".pytest_cache" / "v").mkdir(parents=True)
+    (pkg / ".pytest_cache" / "README.md").write_text("cache")
+    (pkg / ".pytest_cache" / "v" / "stale.py").write_text("cache")
+    (pkg / "README.md").write_text("notes")
+
+
+@pytest.mark.parametrize("change", [None, _add_stray_files])
+def test_directory_reuses_a_managed_copy_with_the_same_code(monkeypatch, load_copy, change):
+    """The same code loaded from Hermes's managed copy is not a conflict, whatever else lies beside it."""
+    from tests.test_integration_smoke import MockCtx
+    loaded = load_copy(change)
+    module = _load_as_hermes_does()
+    assert module.register is loaded.register
+    ctx = MockCtx()
+    monkeypatch.setattr("hermes_tenuo._config._get_plugin_entry", lambda _ctx: {})
+    for var in ("TENUO_WARRANT", "TENUO_CONNECT_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    module.register(ctx)
+    assert "tenuo-scope" in ctx.skills
+
+
+def _blocked(module):
+    from tests.test_integration_smoke import MockCtx
+    ctx = MockCtx()
+    module.register(ctx)
+    verdict = ctx.call_hook("pre_tool_call", tool_name="terminal", args={"command": "id"})
+    return verdict["action"] == "block" and "installation conflict" in verdict["message"]
+
+
+def test_directory_blocks_a_managed_copy_with_different_code(monkeypatch, load_copy):
+    """A copy that differs by one byte is still another installation."""
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+    load_copy(_edit_version)
+    assert _blocked(_load_as_hermes_does())
+
+
+def test_directory_blocks_a_copy_it_cannot_compare(monkeypatch, load_copy):
+    """A failed comparison blocks; it never leaves the plugin unloaded."""
+    _fake_registry(monkeypatch, enforcement=False, denied=False)
+    load_copy()
+
+    def unreadable(self):
+        raise UnicodeError("cannot read")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    assert _blocked(_load_as_hermes_does())
+
+
+def test_a_directory_without_code_has_no_digest(tmp_path):
+    """Two unreadable or empty trees must not compare as the same package."""
+    from hermes_tenuo import cli
+    shim = _load_as_hermes_does()
+    (tmp_path / "empty").mkdir()
+    for digest in (shim._package_digest, cli._package_digest):
+        assert digest(tmp_path / "missing") is None
+        assert digest(tmp_path / "empty") is None
+
+
+def test_doctor_compares_packages_as_the_directory_loader_does(tmp_path):
+    """Doctor keeps its own copy of the comparison; the two must agree."""
+    import shutil
+    from hermes_tenuo import cli
+    shim = _load_as_hermes_does()
+    package = ROOT / "hermes_tenuo"
+    assert shim._package_digest(package) == cli._package_digest(package) is not None
+    # Besides Python sources the package ships only what package-data names.
+    assert 'hermes_tenuo = ["skills/*/SKILL.md"]' in (ROOT / "pyproject.toml").read_text(), \
+        "package-data changed: compare the new files in both digests"
+    for change in (_add_stray_files, _edit_version, _edit_skill):
+        copy = tmp_path / change.__name__ / "hermes_tenuo"
+        shutil.copytree(package, copy, ignore=shutil.ignore_patterns("__pycache__"))
+        change(copy)
+        assert shim._package_digest(copy) == cli._package_digest(copy)
+        assert (shim._package_digest(copy) == shim._package_digest(package)) is (change is _add_stray_files)
 
 
 def test_directory_reuses_itself_when_already_loaded():

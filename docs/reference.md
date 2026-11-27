@@ -3,7 +3,7 @@
 [![CI](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/ci.yml)
 [![Upstream Hermes](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml/badge.svg)](https://github.com/tenuo-ai/hermes-tenuo/actions/workflows/upstream-hermes.yml)
 
-**Give each Hermes agent a signed, expiring permission slip. Nothing outside it runs.**
+**Give each Hermes agent a signed, expiring permission slip. Tool calls outside it are refused before they run.**
 
 See it without installing Hermes or talking to a model:
 
@@ -656,6 +656,7 @@ Two things stay outside this check:
 ```bash
 hermes-tenuo demo        # local allow/deny transcript (no Hermes process)
 hermes-tenuo mint --allow TOOL[:ARG=VALUE,...] [--allow ...] [--ttl 1h] [--task ID] [--output full|yaml|env]
+hermes-tenuo mint --plan PLAN.json [--allow ...] [--ttl 1h]   # a warrant that delegates under a delegation plan
 hermes-tenuo status      # what the plugin will load from config and env
 hermes-tenuo verify      # signature (if trusted_root is set), expiry, capabilities
 hermes-tenuo doctor      # end-to-end install check
@@ -736,7 +737,10 @@ again, and every TTL is atomically capped to the parent's remaining lifetime.
 }
 ```
 
-The root warrant must use matching `All(...)` constraint structure; the
+`hermes-tenuo mint --plan PLAN.json` mints a warrant that holds what the plan's
+`root` lists and prints the `delegation_plan` setting with it. Add `--allow`
+for tools only the parent uses. A root warrant minted another way must use the
+matching `All(...)` constraint structure; the
 `hermes_tenuo.delegation.capability_members()` helper builds its members. Keep
 the plan operator-controlled, as a regular file that is not a symlink and is
 not group- or world-writable. Invalid or unreadable plans fail closed during
@@ -754,6 +758,98 @@ concurrent delegations. Control actions (`list`, `steer`, `stop`) create no gran
 A spawn denied by the warrant is blocked even under `on_denial: log`. Letting
 it run could attach its child to another invocation’s pending grant. Ordinary
 non-spawn calls retain log-only behavior.
+
+### Use limits
+
+A plan can say how many times a tool may be used. Use it when an agent should
+do one thing once: one push, one write, one message. `max_uses` in a level
+limits each child started at that depth. `max_uses` on the `root` is a total
+for the warrant itself and everything delegated from it.
+
+```json
+{
+  "version": 1,
+  "root": {
+    "tools": {
+      "terminal": {
+        "max_uses": 1,
+        "_allow_unknown": true,
+        "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
+      },
+      "delegate_task": {}
+    }
+  },
+  "levels": [
+    {
+      "role": "pusher",
+      "ttl_seconds": 300,
+      "tools": {
+        "terminal": {
+          "max_uses": 1,
+          "_allow_unknown": true,
+          "command": {"binaries": ["git"], "patterns": ["^git push origin fix/123$"]}
+        }
+      }
+    }
+  ]
+}
+```
+
+```bash
+chmod 600 plan.json
+hermes-tenuo mint --plan plan.json --ttl 1h
+```
+
+Paste the printed config and export the key. A child started by
+`delegate_task` can now run that one command once, within five minutes, and
+this warrant allows it once in total, however many children the parent
+starts. A second try is refused:
+
+```text
+$ hermes-tenuo audit
+2026-11-19 17:25:01  ALLOW  terminal  command=git push origin fix/123  (use 1 of 1)
+2026-11-19 17:25:04  DENY   terminal  command=git push origin fix/123  — tenuo: use limit reached: this grant allows terminal 1 time
+```
+
+Each record of a limited call carries `"use": {"count", "limit", "grant"}`:
+the use it took, or for a refusal the limit that is used up, and the id of the
+grant that limit belongs to. `hermes-tenuo doctor` lists what each depth may
+do and how many of the warrant's own uses are spent.
+
+What the limit covers:
+
+- **Calls, not effects.** Every allowed call of the tool takes a use, whatever
+  its arguments, and a call that then fails still counts. Pair `max_uses`
+  with a pattern that matches one exact command.
+- **That tool only.** If the same level also grants a tool that runs code or
+  commands of the child's choosing, such as `execute_code` with no argument
+  limits, the child can do the same thing there without a use. Calls a script
+  makes to the limited tool do count. `hermes-tenuo doctor` points out a level
+  like that.
+- **The whole subtree.** Grants delegated from a limited grant share its
+  limit, and a level cannot set a higher limit than the level above it.
+- **One delegation, or the whole warrant.** A limit in a level is per child:
+  every `delegate_task` call makes a new grant with a new count. A limit on
+  the `root` is shared by the parent and all its children, so delegating
+  again does not bring new uses. To limit how often an agent delegates, set
+  `max_uses` on its `delegate_task`; one call may start several children
+  (`tasks`), and control actions (`list`, `steer`, `stop`) count as uses too.
+- **Where the count lives.** A child's count is kept in memory; its grant ends
+  with the Hermes process, so a restart does not hand its uses back. The
+  root's count is kept per warrant in `$HERMES_HOME/tenuo/uses.db`: it
+  survives restarts and is shared by every Hermes process of the profile. A
+  new warrant starts a new count. If the file cannot be read, calls are
+  blocked. Do not grant the agent tools that can write under the Hermes home.
+- **This profile's warrant.** A root limit is not supported together with
+  access roles, and a grant received from another agent cannot use a tool the
+  root limits.
+- **Enforcing mode.** Under `on_denial: log` a spent limit is logged as a
+  denial and an ordinary call still runs; a `delegate_task` call stays blocked.
+- **One name per tool.** Tool names with and without the `tool:` prefix share
+  a count. If a level lists both with a limit, the smaller limit applies.
+
+`max_uses` is always the limit. A tool argument of that name cannot be
+constrained in a plan, and a plan file that repeats a key is refused.
 
 ## Things to know
 

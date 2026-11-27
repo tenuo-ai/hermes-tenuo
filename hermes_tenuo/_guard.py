@@ -160,6 +160,21 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "child_warrant and delegation_plan are mutually exclusive — "
             "every tool call is blocked until one is removed"
         )
+    use_store = None
+    if delegation_plan is not None and delegation_plan.root.max_uses:
+        if access_policy is not None:
+            raise WarrantLoadError(
+                "max_uses on the delegation plan's root is not supported together with access roles — "
+                "every tool call is blocked until one is removed"
+            )
+        from hermes_tenuo.uses import UseStore, default_store_path
+        try:
+            use_store = UseStore(default_store_path())
+        except Exception as exc:  # a limit that cannot be counted must not run uncounted
+            raise WarrantLoadError(
+                f"the use-count file cannot be opened ({type(exc).__name__}) — "
+                "every tool call is blocked until it can"
+            ) from exc
     signing_key = get_signing_key(ctx)
     trusted_roots = get_trusted_roots(ctx)
     if access_policy is not None:
@@ -185,6 +200,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         require_session_warrant=get_require_session_warrant(ctx),
         delegation_plan=delegation_plan,
         access_policy=access_policy,
+        use_store=use_store,
     )
 
     return PluginGuard(guard)
@@ -219,6 +235,15 @@ class PluginGuard:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress
 
+    def registry_enforces(self) -> None:
+        """The tool registry checks each call too, after this guard's hook."""
+        self._guard._registry_enforces = True
+
+    def around_tool_call(self, **kwargs: Any) -> Any:
+        if not self._guard._registry_enforces:
+            return kwargs["next_call"](kwargs.get("args"))
+        return self._guard.around_tool_call(**kwargs)
+
     @property
     def has_warrant(self) -> bool:
         return self._guard.has_warrant
@@ -235,14 +260,15 @@ class PluginGuard:
         try:
             result = self._guard.pre_tool_call(
                 tool_name=tool_name,
-                args=args or {},
+                args=args if args is not None else {},
                 task_id=task_id,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
+                registry_check=kwargs.get("registry_check") is True,
             )
         except Exception as exc:  # noqa: BLE001 - an escaped hook error can allow the call
             block = self._internal_error_block(tool_name, "authorization check", exc)
-            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            self._record_block(tool_name, args if args is not None else {}, block["message"], session_id, task_id, tool_call_id)
             return block
 
         if result is not None and not isinstance(result, dict):
@@ -251,7 +277,7 @@ class PluginGuard:
                 "authorization check",
                 TypeError(f"unexpected result type {type(result).__name__}"),
             )
-            self._record_block(tool_name, args or {}, block["message"], session_id, task_id, tool_call_id)
+            self._record_block(tool_name, args if args is not None else {}, block["message"], session_id, task_id, tool_call_id)
             return block
 
         if result and result.get("action") == "block":
@@ -331,7 +357,7 @@ class PluginGuard:
     ) -> None:
         self._guard.post_tool_call(
             tool_name=tool_name,
-            args=args or {},
+            args=args if args is not None else {},
             result=result,
             task_id=task_id,
             session_id=session_id,

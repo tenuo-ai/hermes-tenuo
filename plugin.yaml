@@ -1,11 +1,11 @@
 name: hermes-tenuo
 version: 0.4.2
 description: >
-  Signed, expiring tool permissions and local workspaces for Hermes Agent.
-  Tenuo warrants control which tools and arguments each task can use, including
-  delegated agents. Hands lets your remote Hermes work in a folder on your Mac
-  or Linux machine while memory and skills stay on the server. Use either feature
-  independently or together.
+  Give Hermes rules it can't simply ignore. Enforce hard limits on tool calls
+  and their arguments, keep sensitive actions off the table, and give subagents
+  and Kanban workers only the permissions their task needs, with signed,
+  expiring Tenuo warrants checked before each call. Also includes Hands, which
+  lets your remote Hermes work in a folder on your Mac or Linux machine.
 author: Tenuo AI
 license: Apache-2.0
 homepage: https://github.com/tenuo-ai/hermes-tenuo
@@ -13,9 +13,9 @@ kind: standalone
 # `hermes plugins enable` installs these into the Hermes runtime, after consent.
 python_dependencies:
   - "path-jail>=0.3,<0.4"
-  - "tenuo>=0.3.7,<0.4"
+  - "tenuo>=0.3.8,<0.4"
 requires_hermes: ">=0.20"
-tags: [authorization, warrants, hands, remote, workspace, sandbox, tenuo]
+tags: [security, permissions, guardrails, authorization, delegation, warrants, hands, workspace, sandbox, tenuo]
 provides_tools:
   - tenuo_delegate
 provides_hooks:

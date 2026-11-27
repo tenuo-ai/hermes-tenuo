@@ -11,10 +11,14 @@ Record shape (one per line):
      "args": {...}, "reason": "...", "session_id": "...", "task_id": "...",
      "tool_call_id": "...", "duration_ms": 0}
 
+A call to a tool with a use limit also carries ``"use": {"count": 1, "limit": 1,
+"grant": "<warrant id>"}``: on ALLOW the use it took, on a DENY for the limit
+the limit that is used up, and the grant that limit belongs to.
+
 The guard emits once from ``pre_tool_call`` (the decision) and, for calls that
 ran, once more from ``post_tool_call`` (same decision plus ``duration_ms``).
-:func:`read_audit_log` collapses those by ``tool_call_id`` so each call shows
-once, with timing when it is known.
+:func:`read_audit_log` collapses those per session and ``tool_call_id`` so each
+call shows once, with timing when it is known.
 """
 from __future__ import annotations
 
@@ -46,6 +50,10 @@ class LocalAuditLog:
 
     def __call__(self, event: Any) -> None:
         record = asdict(event) if is_dataclass(event) else dict(vars(event))
+        if record.get("use") is None:
+            record.pop("use", None)  # only calls to a limited tool carry it
+        if not record.get("completed"):
+            record.pop("completed", None)  # only the record written after the call carries it
         line = json.dumps(record, ensure_ascii=False, default=str)
         try:
             with self._lock:
@@ -65,14 +73,18 @@ def read_audit_log(
 ) -> List[Dict[str, Any]]:
     """Return audit records, one per tool call, oldest first.
 
-    Pre- and post-call records sharing a ``tool_call_id`` are merged (the later
-    one wins, so ``duration_ms`` is filled in). Malformed lines are skipped.
+    The decision record and the completion record of one call are merged (the
+    later one wins, so ``duration_ms`` is filled in). They are matched by
+    session and ``tool_call_id``, and a call that has completed is closed: some
+    models reuse an id such as ``call_0`` in every session or turn, and those
+    are different calls. Malformed lines are skipped.
     """
     p = Path(os.path.expanduser(str(path)))
     if not p.exists():
         return []
-    merged: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
+    merged: Dict[Any, Dict[str, Any]] = {}
+    order: List[Any] = []
+    open_rows: Dict[Any, Any] = {}  # (session, tool_call_id) → row still waiting for its completion
     with p.open("r", encoding="utf-8") as fh:
         for n, raw in enumerate(fh):
             raw = raw.strip()
@@ -84,25 +96,47 @@ def read_audit_log(
                 continue
             if not isinstance(rec, dict):
                 continue
-            key = rec.get("tool_call_id") or f"_line{n}"
-            if key not in merged:
-                order.append(key)
-                merged[key] = rec
+            call = (rec.get("session_id") or "", rec.get("tool_call_id")) if rec.get("tool_call_id") else None
+            row = open_rows.get(call) if call is not None else None
+            if row is None:
+                row = n
+                order.append(row)
+                merged[row] = rec
+                if call is not None:
+                    open_rows[call] = row
             else:
                 # Later records add timing; they never soften a denial. A DENY
                 # from the pre hook stays DENY even if a post record says ALLOW.
-                prev = merged[key]
+                prev = merged[row]
                 combined = {**prev, **rec}
                 if prev.get("decision") == "DENY" and rec.get("decision") != "DENY":
                     combined["decision"] = "DENY"
                     combined["reason"] = prev.get("reason") or rec.get("reason")
-                merged[key] = combined
+                merged[row] = combined
+            if call is not None and _completes(rec):
+                open_rows.pop(call, None)
     records = [merged[k] for k in order]
     if denied_only:
         records = [r for r in records if r.get("decision") == "DENY"]
     if last is not None and last >= 0:
         records = records[-last:] if last else []
     return records
+
+
+def _completes(rec: Dict[str, Any]) -> bool:
+    """Whether *rec* is the record written after a call finished (or was reported blocked).
+
+    The MCP wrapper writes ``outcome: forwarding`` before it hands a call on; that call is still open.
+    """
+    if rec.get("completed"):
+        return True
+    # Records from other writers and from before the marker existed.
+    outcome = rec.get("outcome")
+    return bool(
+        (outcome and outcome != "forwarding")
+        or rec.get("duration_ms")
+        or rec.get("reason") in ("post-dispatch", "audit-only")
+    )
 
 
 def format_record(rec: Dict[str, Any]) -> str:
@@ -114,6 +148,9 @@ def format_record(rec: Dict[str, Any]) -> str:
     shown = ", ".join(f"{k}={_short(v)}" for k, v in args.items()) if isinstance(args, dict) else str(args)
     reason = rec.get("reason") or ""
     tail = f"  — {reason}" if decision == "DENY" and reason else ""
+    use = rec.get("use")
+    if decision == "ALLOW" and isinstance(use, dict) and use.get("limit"):
+        tail = f"  (use {use.get('count')} of {use.get('limit')})"
     return f"{ts}  {decision:5}  {tool}  {shown}{tail}"
 
 
