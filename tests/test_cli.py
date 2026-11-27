@@ -81,7 +81,10 @@ class TestMintLocal:
         assert str(tmp_path / "home" / "config.yaml") in out
         assert str(tmp_path / "home" / ".env") in out
         assert "~/.hermes" not in out
-        assert "restart" in out.lower()
+        assert " doctor" in out and "hermes gateway restart" in out
+        if output == "yaml":
+            import yaml
+            assert set(yaml.safe_load(out)) == {"warrant", "trusted_root"}
 
     def test_mint_warrant_is_valid_tenuo_warrant(self):
         """The minted warrant must be decodable by tenuo_core."""
