@@ -25,6 +25,20 @@
 - A delegated child that Hermes continues under a new session id keeps its own grant and
   its use count.
 - A delegation plan file that repeats a key is refused.
+- `tenuo_delegate` refuses a grant that names a tool the session holds with a use limit:
+  the count is kept by this agent and does not travel with a grant to another one.
+- A `delegate_task` task that Hermes would run as another profile (`delegation.backend`, for
+  example `profile_routes`) is refused: that profile's tool calls are not checked by the
+  profile that delegated. `allow_routed_delegation: true` restores the previous behaviour.
+- `hermes-tenuo doctor` fails when Hermes runs from an environment it manages and
+  hermes-tenuo is not installed there, and notes a non-default `delegation.backend`.
+- Jobs: named limits the agent gives a `delegate_task` subagent, set under `jobs`. A subagent
+  gets its parent's permissions narrowed to its job, with optional `max_uses` and
+  `ttl_seconds`. `delegation.backend: tenuo` adds a `job` choice per task to
+  `delegate_task`; `default_job` covers tasks that name none. Works on top of `access`
+  roles, so a helper never gets more than the person who asked.
+- A delegated subagent's refused call says whose limit refused it: its own job, the agent
+  that delegated it, or the person who asked.
 
 ## 0.4.2 - 2026-11-17
 

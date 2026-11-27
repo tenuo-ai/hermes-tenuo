@@ -859,6 +859,22 @@ def _rooted(plan=ROOT_LIMIT, store=None, keys=None, **kwargs):
     return guard, events, warrant, (root_key, agent_key)
 
 
+def test_a_tool_with_a_use_limit_is_named_for_the_grant_that_holds_it():
+    """What tenuo_delegate asks before it hands tools to another agent."""
+    guard, _ = _guard(PLAN)
+    assert _delegate(guard, "parent", "child") is None
+    assert guard.use_limited("child", {"terminal": {}, "tool:terminal": {}, "read_file": {}}) == ["terminal"]
+    assert guard.use_limited("parent", {"terminal": {}}) == []
+    assert guard.use_limited("child", None) == []
+
+
+def test_a_tool_the_root_limits_is_named_for_every_session():
+    guard, *_ = _rooted()
+    assert _delegate(guard, "parent", "child") is None
+    assert guard.use_limited("parent", ["terminal"]) == ["terminal"]
+    assert guard.use_limited("child", ["terminal", "delegate_task"]) == ["terminal"]
+
+
 def test_the_roots_limit_is_a_total_for_the_parent_and_its_children():
     guard, events, warrant, _ = _rooted()
     assert _push(guard, "s0") is None

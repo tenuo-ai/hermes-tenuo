@@ -80,7 +80,11 @@ in the next step, so leave both empty for now. `enable` installs the `tenuo` and
 dependencies into the Hermes runtime.
 
 If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead, pinned to `hermes-tenuo==0.4.2`. Use one route or the other: with both
+instead, pinned to `hermes-tenuo==0.4.2`. Prefer the route above: when you
+install any plugin with `hermes plugins install`, Hermes moves the install onto
+an environment it manages, and a pip-installed hermes-tenuo is not carried over.
+Hermes then still lists it as enabled but does not load it, and no call is
+checked. `hermes-tenuo doctor` reports this. Use one route or the other: with both
 a pip install and a plugin directory, the plugin blocks every tool call until
 one is removed, and `hermes-tenuo doctor` reports the pair. That also puts the
 `hermes-tenuo` command on your path, so you can drop the `uvx` prefix below.
@@ -300,6 +304,71 @@ plugins:
   children under a role or a static or session warrant. A child whose
   lifecycle hook was missed is denied, and grants are never assigned by
   session order when access is enabled.
+
+## Jobs for helpers
+
+People have roles. Helpers get jobs. A job is a named set of limits that the
+agent gives a `delegate_task` subagent: "read the logs", "restart the service,
+once". The subagent gets its parent's permissions narrowed to that job, so it
+never has more than whoever asked, and usually much less.
+
+```yaml
+delegation:
+  backend: tenuo                # lets the agent pick a job per task
+plugins:
+  entries:
+    hermes-tenuo:
+      jobs:
+        log-reader:
+          description: Reads the checkout logs.
+          allow:
+            terminal: { command: { patterns: ["^\\./checkoutctl logs$"] } }
+        restarter:
+          description: Restarts checkout, once.
+          ttl_seconds: 300
+          allow:
+            terminal: { max_uses: 1, command: { patterns: ["^\\./checkoutctl restart$"] } }
+      default_job: log-reader   # optional: the job for a task that names none
+```
+
+With the roles above it, in one chat:
+
+- Dana (ops) asks for a restart. The agent sends a `restarter`. It restarts the
+  service once; a second try is refused, and so is anything else.
+- Dana asks what went wrong. The agent sends a `log-reader`. It can read the
+  logs and cannot restart anything, although Dana can.
+- Sam (developer) asks for a restart. The `restarter` the agent sends can do
+  nothing, because Sam's role does not allow a restart.
+
+- **Choosing a job.** With `delegation.backend: tenuo`, `delegate_task` gains a
+  `job` choice per task, listing your job names and descriptions. The strategy
+  routes subagents exactly as Hermes's default one does. Without it the agent
+  cannot name a job, and a helper gets `default_job`, or everything its parent
+  has when none is set.
+- **What a job is.** `allow` uses the same syntax as a role. A helper keeps only
+  the tools its job lists, and only where its parent has them. `max_uses` on a
+  tool is how many times that helper may use it. `ttl_seconds` shortens its
+  lifetime.
+- **Only narrower.** A job is applied on top of the parent's permissions. Limits
+  written with `binaries`, `patterns` or `range` join the parent's limits on the
+  same argument when those come from a role or another job. A path limit can
+  tighten a path limit. A combination that cannot be made narrower is refused,
+  never widened.
+- **The directory too.** The example limits the command line only, and
+  `terminal` also takes a `workdir`. Add `workdir: "/srv/checkout/**"` to a job
+  to keep its helper in that directory; each call must then name a directory
+  under it.
+- **One limit per helper.** `max_uses` counts one helper's calls. A parent that
+  may delegate again can send another helper with the same job. A helper
+  cannot hand a tool it holds with a limit to another agent (`tenuo_delegate`).
+- **Refusals say whose limit it is.** A helper's refused call says whether it
+  is outside the helper's job or outside what the person who asked may do, so
+  the agent can send a helper with another job, or tell the person, without
+  trying again.
+- **Helpers of helpers.** A helper that may delegate can give its own helpers
+  jobs; each is narrowed again from the one above.
+- **Not with a delegation plan or `child_warrant`.** `jobs` cannot be set
+  together with `delegation_plan` or `child_warrant`.
 
 ## Hands: let your server's agent use your own machine
 
@@ -691,6 +760,9 @@ variable equivalent.
 | `child_warrant` | `TENUO_CHILD_WARRANT` | Scope template used to attenuate a fresh, parent-chained grant for each `delegate_task` child. |
 | `delegation_plan` | `TENUO_DELEGATION_PLAN` | Path to a versioned JSON plan that narrows tools, arguments, and TTL at each delegation depth. Mutually exclusive with `child_warrant`. |
 | `on_denial` | | `block` (default) or `log`. |
+| `jobs` | | Named limits for `delegate_task` subagents; see [Jobs for helpers](#jobs-for-helpers). Mutually exclusive with `delegation_plan` and `child_warrant`. |
+| `default_job` | | The job for a task that names none. |
+| `allow_routed_delegation` | | Default `false`: a `delegate_task` task Hermes would run as another profile is refused, because that profile's tool calls are not checked by this one. `true` lets it run there unchecked. |
 | `require_session_warrant` | `TENUO_REQUIRE_SESSION_WARRANT` | After any `set_session_warrant` call, sessions with no warrant are blocked. `true` / `false` override the auto default. |
 | `audit_log` | `TENUO_AUDIT_LOG` | Path of the JSONL audit log, or `false` to disable. Default `$HERMES_HOME/tenuo/audit.jsonl`. |
 | `hands.listen` | `TENUO_HANDS_LISTEN` | `host:port` the server listens on for your machines. Unset means Hands is off. |
@@ -745,6 +817,15 @@ matching `All(...)` constraint structure; the
 the plan operator-controlled, as a regular file that is not a symlink and is
 not group- or world-writable. Invalid or unreadable plans fail closed during
 plugin startup.
+
+A subagent is checked only while it runs in the profile that delegated. Hermes
+can send a task to another profile (`delegation.backend`, for example
+`profile_routes`). That profile loads its own plugins and config, so such a
+delegation is refused. Tasks that stay on this profile run and are checked as
+usual. A running session keeps the delegation backend it started with, so every
+installed backend that can run is asked where a task would go, not only the one
+saved in config. Set `allow_routed_delegation: true` to let routed subagents run
+without this plugin's checks.
 
 Child grants are scoped to one `delegate_task` invocation. Unclaimed grants
 expire when that call returns, including failed and background calls. Cancelled,
@@ -843,6 +924,9 @@ What the limit covers:
 - **This profile's warrant.** A root limit is not supported together with
   access roles, and a grant received from another agent cannot use a tool the
   root limits.
+- **Not handed to another agent.** `tenuo_delegate` refuses a grant that
+  names a tool the session holds with a use limit, because the count is kept
+  here and would not follow the grant.
 - **Enforcing mode.** Under `on_denial: log` a spent limit is logged as a
   denial and an ordinary call still runs; a `delegate_task` call stays blocked.
 - **One name per tool.** Tool names with and without the `tool:` prefix share

@@ -66,3 +66,41 @@ def load_hermes_config() -> Dict[str, Any]:
     except Exception as exc:
         logger.debug("hermes-tenuo: could not read %s: %s", path, exc)
         return {}
+
+
+def managed_environments_without_plugin() -> list:
+    """Hermes-managed Python environments of this install that do not contain hermes-tenuo.
+
+    ``hermes plugins install`` moves an install onto an environment Hermes builds and owns
+    (``installs/<id>/environments/<id>/venv``). A hermes-tenuo that was pip-installed into the
+    environment Hermes ran from before is not carried over: Hermes keeps listing it as enabled but
+    does not load it. A copy installed with ``hermes plugins install`` lives in ``plugins/`` and is
+    not affected, so with one present this returns nothing.
+    """
+    import json
+
+    home = hermes_home()
+    roots = [home, home.parent.parent] if home.parent.name == "profiles" else [home]
+    if (home / "plugins" / "hermes-tenuo").is_dir():  # Hermes loads directory plugins from the active profile only
+        return []
+    try:
+        # The record of the Hermes that runs this check, when this is its Python.
+        from pm.environments import install_state_dir
+        from pm.paths import install_root
+
+        records = [Path(install_state_dir(install_root())) / "facts.json"]
+    except Exception:  # noqa: BLE001 - not Hermes's Python: which install is meant is unknown, so look at each
+        records = [facts for root in roots for facts in sorted(root.glob("installs/*/facts.json"))]
+    missing = []
+    for facts in records:
+        try:
+            env = json.loads(facts.read_text(encoding="utf-8"))["packages"]["venv"]["environment"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        env = Path(env)
+        if not env.is_dir():
+            continue
+        found = list(env.glob("lib/python*/site-packages/hermes_tenuo*")) + list(env.glob("Lib/site-packages/hermes_tenuo*"))
+        if not found:
+            missing.append(env)
+    return missing

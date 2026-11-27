@@ -94,6 +94,33 @@ def test_missing_delegation_plan_fails(install, capsys, tmp_path):
     assert "✗  delegation plan" in out and "does not exist" in out
 
 
+def test_jobs_are_listed(install, capsys):
+    install(jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 0 and "✓  jobs: reader" in out
+
+
+def test_jobs_set_with_a_delegation_plan_fail(install, capsys, tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "version": 1,
+        "root": {"tools": {"read_file": {}, "delegate_task": {}}},
+        "levels": [{"ttl_seconds": 60, "tools": {"read_file": {}}}],
+    }))
+    plan.chmod(0o600)
+    install(delegation_plan=str(plan), jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 1 and "✗  jobs and delegation_plan are both set" in out
+
+
+def test_jobs_set_with_a_child_warrant_fail(install, capsys):
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    child = Warrant.mint_builder().tool("read_file").holder(holder.public_key).ttl(60).mint(issuer)
+    install(child_warrant=_b64(child.to_bytes()), jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 1 and "✗  jobs and child_warrant are both set" in out
+
+
 def test_valid_delegation_plan_passes(install, capsys, tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({
@@ -285,3 +312,29 @@ def test_doctor_ignores_the_plugin_directory_outside_the_hermes_environment(tmp_
     monkeypatch.setattr("hermes_tenuo._home.hermes_cli_available", lambda: True)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "elsewhere"))
     assert cli._second_installation() is None
+
+
+def test_doctor_fails_when_hermes_runs_from_an_environment_without_the_plugin(install, capsys, tmp_path, monkeypatch):
+    from hermes_tenuo import _home
+
+    env = tmp_path / "managed" / "venv"
+    env.mkdir(parents=True)
+    monkeypatch.setattr(_home, "managed_environments_without_plugin", lambda: [env])
+    install()
+    rc, out = _doctor(capsys)
+    assert rc == 1
+    assert "✗  Hermes runs this install from its own environment, and hermes-tenuo is not in it" in out
+    assert "hermes plugins install tenuo-ai/hermes-tenuo" in out
+
+
+def test_doctor_notes_a_delegation_strategy_that_can_leave_the_profile(install, capsys, monkeypatch):
+    from hermes_tenuo import _home
+
+    real = _home.load_hermes_config
+    monkeypatch.setattr(_home, "load_hermes_config", lambda: {**real(), "delegation": {"backend": "profile_routes"}})
+    install()
+    rc, out = _doctor(capsys)
+    assert "delegation.backend is profile_routes: a subagent sent to another profile is refused" in out
+    install(allow_routed_delegation=True)
+    rc, out = _doctor(capsys)
+    assert "runs there without this plugin's checks" in out
