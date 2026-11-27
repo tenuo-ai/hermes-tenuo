@@ -1,5 +1,5 @@
 name: hermes-tenuo
-version: 0.4.2
+version: 0.4.3
 description: >
   Give Hermes rules it can't simply ignore. Enforce hard limits on tool calls
   and their arguments, keep sensitive actions off the table, and give subagents

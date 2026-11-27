@@ -68,7 +68,7 @@ see [docs/walkthrough.md](walkthrough.md).
 
 ## Install into Hermes
 
-Install hermes-tenuo 0.4.2 on the Hermes server:
+Install hermes-tenuo 0.4.3 on the Hermes server:
 
 ```bash
 hermes plugins install tenuo-ai/hermes-tenuo
@@ -80,10 +80,12 @@ in the next step, so leave both empty for now. `enable` installs the `tenuo` and
 dependencies into the Hermes runtime.
 
 If you manage the Hermes venv yourself, `pip install hermes-tenuo` into it
-instead, pinned to `hermes-tenuo==0.4.2`. Use one route or the other: with both
-a pip install and a plugin directory, the plugin blocks every tool call until
-one is removed, and `hermes-tenuo doctor` reports the pair. That also puts the
-`hermes-tenuo` command on your path, so you can drop the `uvx` prefix below.
+instead, pinned to `hermes-tenuo==0.4.3`. That also puts the `hermes-tenuo`
+command on your path, so you can drop the `uvx` prefix below. Use one route or
+the other. A pip install and a plugin directory that hold the same code are
+loaded as one installation, as with the copy `hermes plugins enable` makes.
+When their code differs or can't be compared, the plugin blocks every tool call
+until one is removed. `hermes-tenuo doctor` reports which case you have.
 
 Requires Hermes Agent 0.20 or newer. A nightly job loads the plugin through
 the plugin loader of upstream Hermes `main` using both install routes; the
@@ -93,7 +95,7 @@ badge above is its latest result.
 the exact config block to paste.
 
 ```bash
-uvx hermes-tenuo==0.4.2 mint --ttl 1h \
+uvx hermes-tenuo==0.4.3 mint --ttl 1h \
   --allow read_file:path=/data \
   --allow web_search
 ```
@@ -122,14 +124,14 @@ export TENUO_SIGNING_KEY=<printed by mint>
 
 ```bash
 hermes plugins doctor hermes-tenuo
-uvx hermes-tenuo==0.4.2 doctor
+uvx hermes-tenuo==0.4.3 doctor
 hermes
 ```
 
 - `hermes plugins doctor hermes-tenuo` — Hermes loads the plugin and registers
   its hooks. This does not look at your warrant. If it cannot find the plugin,
   go back to step 1.
-- `uvx hermes-tenuo==0.4.2 doctor` — checks the config you pasted, the warrant, its
+- `uvx hermes-tenuo==0.4.3 doctor` — checks the config you pasted, the warrant, its
   expiry, that the signing key matches the warrant holder, and that
   `trusted_root` is the issuer that signed the warrant. Fix anything it
   marks with `✗` before you start Hermes. This command runs outside Hermes, so
@@ -306,7 +308,7 @@ plugins:
 **Start here:** [your first Hands session](hands-first-session.md) uses a disposable project,
 permission presets and `/hands verify`. In chat, `/hands setup` explains server configuration
 when Hands is off, or offers read/edit/online choices when it is ready. On your laptop,
-`uvx hermes-tenuo==0.4.2 hands demo` creates the practice project without pairing anything.
+`uvx hermes-tenuo==0.4.3 hands demo` creates the practice project without pairing anything.
 
 
 Your Hermes runs on a server, with its skills and memory. Your code is on your
@@ -330,7 +332,7 @@ plugins:
 **On your machine**, in the folder you want to work in, run that line:
 
 ```bash
-uvx hermes-tenuo==0.4.2 hands up 'hands://my-server:8765/…' --dir . --for 4h
+uvx hermes-tenuo==0.4.3 hands up 'hands://my-server:8765/…' --dir . --for 4h
 ```
 
 Commands on your machine have no internet. Add `--network` if the work needs
@@ -669,7 +671,7 @@ hermes-tenuo hands log [--last N]
 After a catalog install these commands are not on your path. Prefix each
 one with `uvx `.
 
-`uvx hermes-tenuo==0.4.2 doctor` checks the config, warrant validity and expiry,
+`uvx hermes-tenuo==0.4.3 doctor` checks the config, warrant validity and expiry,
 that the signing key matches the warrant holder, that `trusted_root` signed
 the warrant, and that a configured delegation plan loads. Export
 `TENUO_SIGNING_KEY` in that shell first, because `uvx` does not load
