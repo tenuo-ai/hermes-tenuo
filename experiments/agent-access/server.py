@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["tenuo[mcp,fastmcp]==0.3.8", "httpx"]
+# ///
 """An MCP server (a calendar fixture) that checks Tenuo chains and hands out warrants.
 
 Reads only OWNER/public: the issuer public key, invitations, pairings and the
@@ -89,6 +93,8 @@ def build(home: Path) -> FastMCP:
             "status": "pending", "requested_at": now,
         }
         write_json(public / "pairings.json", pairings)
+        print(f"{invite['person']}'s agent connected (key {fingerprint(unb64(holder))}). "
+              f"Approve it with: owner.py --home {home} approve", flush=True)
         return JSONResponse({"status": "pending", "fingerprint": fingerprint(unb64(holder))}, 202)
 
     @mcp.custom_route("/tenuo/warrant", methods=["GET"])
@@ -112,6 +118,10 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
+    if not (args.home / "public" / "issuer.pub").exists():
+        raise SystemExit(f"No owner setup in {args.home}. Run owner.py --home {args.home} share … first.")
+    where = "this machine only" if args.host in ("127.0.0.1", "localhost") else "other machines too"
+    print(f"Serving the calendar on port {args.port} ({where}). Agents connect to /mcp.", flush=True)
     build(args.home).run(transport="http", host=args.host, port=args.port, show_banner=False)
 
 

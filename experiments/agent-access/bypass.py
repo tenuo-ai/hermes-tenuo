@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["tenuo[mcp,fastmcp]==0.3.8", "httpx"]
+# ///
 """A guest client that skips its own check, to show the server refuses on its own.
 
   python bypass.py GUEST_HOME TOOL '{"arg": "value"}' signed|none [WARRANT_B64_FILE]

@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["tenuo[mcp,fastmcp]==0.3.8", "httpx"]
+# ///
 """Owner side: create an invitation, approve a paired agent, extend or end access.
 
 The issuer key lives in OWNER/private and never leaves it. The server only reads
@@ -19,7 +23,11 @@ from common import (
     read_json, unb64, until, write_json, write_private,
 )
 
-# Scopes the spike offers, in the words a card would use.
+# Where a guest runs the client from, without cloning anything.
+ACCEPT_URL = ("https://raw.githubusercontent.com/tenuo-ai/hermes-tenuo/"
+              "experiments/agent-access-pairing/experiments/agent-access/accept.py")
+
+# Scopes this experiment offers, in the words a card would use.
 SCOPES = {
     "calendar.read": {
         "label": "Calendar: read events",
@@ -138,7 +146,8 @@ def main(argv=None) -> int:
     s.add_argument("--hours", type=float, default=24)
     s.add_argument("--server", required=True)
     a = sub.add_parser("approve")
-    a.add_argument("--yes", action="store_true")
+    a.add_argument("--yes", action="store_true", help="approve without asking (for scripts)")
+    a.add_argument("--wait", type=float, default=0, help="seconds to wait for an agent to connect")
     c = sub.add_parser("change")
     c.add_argument("fingerprint")
     c.add_argument("--scope", choices=SCOPES)
@@ -157,14 +166,24 @@ def main(argv=None) -> int:
 
     if args.cmd == "share":
         link = owner.share(args.person, args.scope, int(args.hours * 3600), args.server)
-        print(f"{SCOPES[args.scope]['label']} for {args.person}, {args.hours:g} h after you approve.")
-        print(f"Send {args.person} this command:\n  python accept.py '{link}'")
+        print(f"{SCOPES[args.scope]['label']} for {args.person}, {args.hours:g} h from when you approve.")
+        print(f"Send {args.person} this command (it needs uv, https://docs.astral.sh/uv/):\n")
+        print(f"  uv run {ACCEPT_URL} '{link}' --as {args.person}\n")
+        print(f"The link works once, for 24 hours. When {args.person} runs it, approve with:")
+        print(f"  uv run owner.py --home {args.home} approve --wait 600")
     elif args.cmd == "approve":
         waiting = owner.pending()
+        if not waiting and args.wait:
+            print("Waiting for an agent to connect…")
+            deadline = time.time() + args.wait
+            while not waiting and time.time() < deadline:
+                time.sleep(1)
+                waiting = owner.pending()
         if not waiting:
             print("No agents are waiting.")
         for k, p in waiting.items():
             print(card(k, p))
+            print("  Check the key matches what they tell you.")
             ok = args.yes or input("  Approve? [y/N] ").strip().lower() == "y"
             if ok:
                 w = owner.approve(k)

@@ -23,23 +23,42 @@ on either side, using only released Tenuo (0.3.8).
 
 ## Run it
 
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/) on both machines.
+It installs each script's dependencies on first run, so there's no virtualenv to set up.
+
+### On two machines
+
+**Owner**, on the machine that runs the server:
+
 ```bash
-python -m pip install 'tenuo[mcp,fastmcp]==0.3.8' httpx
-cd experiments/agent-access
-./journey.sh python
+git clone https://github.com/tenuo-ai/hermes-tenuo.git
+cd hermes-tenuo/experiments/agent-access
+uv run owner.py --home ~/calendar-owner share Alex calendar.read --hours 2 \
+  --server http://ADDRESS:8765          # an address Alex's machine can reach
+uv run server.py --home ~/calendar-owner --host 0.0.0.0
 ```
 
-`journey.sh` runs the owner, server and guest on one machine and checks each outcome:
+`share` prints the one command to send Alex. In a second terminal, wait for Alex and approve:
 
-| Check | Expected |
-|---|---|
-| Reusing an invitation code | Refused |
-| Read with read access | Runs |
-| Write with read access | Refused by the guest's client, and by the server when a client skips its own check (`bypass.py`); no effect on the calendar |
-| A call with no warrant | Refused by the server |
-| Owner widens and extends access | The guest's next write runs, with no action from the guest |
-| Replaying the warrant from before the change | Refused: revoked |
-| Owner ends access | The guest's next call is refused, and replaying the last warrant is refused |
+```bash
+uv run owner.py --home ~/calendar-owner approve --wait 600
+```
+
+**Alex**, on any machine with uv, runs the command they were sent. Nothing to clone:
+
+```bash
+uv run https://raw.githubusercontent.com/…/accept.py 'http://ADDRESS:8765/#HG-XXXX-XXXX' --as Alex
+uv run https://raw.githubusercontent.com/…/accept.py --call list_events day=2026-11-27
+```
+
+The owner changes or ends access with `owner.py change KEY --scope calendar.write --hours 4`
+and `owner.py end KEY`, where KEY is the fingerprint shown on the card and by `owner.py list`.
+
+### On one machine, with every check
+
+```bash
+./journey.sh
+```
 
 ## How it's built
 
@@ -68,7 +87,6 @@ cd experiments/agent-access
 
 ## Limits
 
-- One machine in `journey.sh`. Running server and guest on two machines is the next check.
 - The guest's client is a script. Agents such as Claude Code or Hermes need a client that
   adds the chain to their MCP calls.
 - Approval is a terminal prompt. State is kept in JSON files without locking, and plain
