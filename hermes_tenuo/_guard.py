@@ -53,6 +53,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         get_access_block,
         get_allow_routed_delegation,
         get_audit_log_path,
+        get_jobs_block,
         get_child_warrant_raw,
         get_delegation_plan_path,
         get_on_denial,
@@ -167,6 +168,24 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
             "child_warrant and delegation_plan are mutually exclusive — "
             "every tool call is blocked until one is removed"
         )
+    jobs = None
+    jobs_block, default_job = get_jobs_block(ctx)
+    if jobs_block is not None or default_job is not None:
+        from hermes_tenuo.jobs import JobsConfigError, parse_jobs
+        try:
+            jobs = parse_jobs(jobs_block, default_job)
+        except JobsConfigError as exc:
+            raise WarrantLoadError(f"{exc} — every tool call is blocked until jobs are fixed") from exc
+        except Exception as exc:  # noqa: BLE001 - a block that cannot be read at all must still fail closed
+            raise WarrantLoadError(
+                f"jobs could not be read ({type(exc).__name__}) — every tool call is blocked until jobs are fixed"
+            ) from exc
+        if delegation_plan is not None or child_warrant is not None:
+            other = "delegation_plan" if delegation_plan is not None else "child_warrant"
+            raise WarrantLoadError(
+                f"jobs and {other} are mutually exclusive — "
+                "every tool call is blocked until one is removed"
+            )
     use_store = None
     if delegation_plan is not None and delegation_plan.root.max_uses:
         if access_policy is not None:
@@ -210,6 +229,7 @@ def build_plugin_guard(ctx: Any) -> Optional["PluginGuard"]:
         use_store=use_store,
         routing=other_profile,
         allow_routed_delegation=get_allow_routed_delegation(ctx),
+        jobs=jobs,
     )
 
     return PluginGuard(guard)
@@ -243,6 +263,11 @@ class PluginGuard:
     def attach_ingress(self, ingress: Any) -> None:
         """Enforce protected A2A ingress grants on inbound A2A turns (hermes_tenuo.a2a_ingress)."""
         self._guard._ingress = ingress
+
+    @property
+    def jobs(self) -> Any:
+        """The configured jobs (hermes_tenuo.jobs.Jobs), or None."""
+        return self._guard._jobs
 
     def registry_enforces(self) -> None:
         """The tool registry checks each call too, after this guard's hook."""

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_tenuo.delegation import ALLOW_UNKNOWN, capability_members
@@ -155,6 +155,22 @@ def _constraint(value: Any, where: str) -> Any:
         raise AccessConfigError(f"{where}: {exc}") from exc
 
 
+def constraint_part(value: Any, where: str) -> Tuple[str, Any]:
+    """One friendly argument value as a part: ``("all", [members])`` for the advanced form, whose
+    members can be joined with more members later, or ``("bare", constraint)`` for a single one."""
+    from tenuo.exceptions import TenuoError
+
+    try:
+        if isinstance(value, dict) and {"binaries", "patterns", "range"} & set(value):
+            _compile_constraint(value, where)  # the same validation and error wording
+            return "all", list(capability_members(value))
+        return "bare", _compile_constraint(value, where)
+    except AccessConfigError:
+        raise
+    except (TenuoError, ValueError, TypeError, OverflowError) as exc:
+        raise AccessConfigError(f"{where}: {exc}") from exc
+
+
 def _compile_constraint(value: Any, where: str) -> Any:
     """Compile one friendly argument value to a Tenuo constraint.
 
@@ -231,7 +247,7 @@ def _validate_advanced(spec: dict, where: str) -> None:
         raise AccessConfigError(f"{where}: an advanced constraint needs binaries, patterns or range")
 
 
-def _compile_allow(allow: Any, where: str) -> Dict[str, Dict[str, Any]]:
+def _compile_allow(allow: Any, where: str, parts: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Dict[str, Any]]:
     """A role's ``allow`` → ``{tool: {arg: Constraint, _allow_unknown: True}}``.
 
     ``allow`` is a map of tool → argument constraints, or a list of tool names
@@ -261,6 +277,8 @@ def _compile_allow(allow: Any, where: str) -> Dict[str, Dict[str, Any]]:
             if not isinstance(arg, str) or not arg or arg.startswith("_"):
                 raise AccessConfigError(f"{tool_where}: argument names must be non-empty and not start with '_'")
             constraints[arg] = _constraint(value, f"{tool_where}.{arg}")
+            if parts is not None:
+                parts.setdefault(tool, {})[arg] = constraint_part(value, f"{tool_where}.{arg}")
         if not strict:
             constraints[ALLOW_UNKNOWN] = True
         if not constraints:
@@ -275,6 +293,8 @@ class Role:
     match: Dict[str, Tuple[str, ...]]
     capabilities: Dict[str, Dict[str, Any]]
     is_default: bool = False
+    # tool → argument → part (see constraint_part): what the role's limits are made of.
+    parts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def matches(self, user: str, chat: str, platform: str) -> bool:
         """True when the sender satisfies every dimension this role names."""
@@ -354,7 +374,9 @@ def parse_access(block: Any) -> AccessConfig:
         match = _parse_match(spec.get("match"), where)
         if not match and not is_default:
             raise AccessConfigError(f"{where}: a non-default role must have a match")
-        roles.append(Role(name, match, _compile_allow(spec.get("allow"), f"{where}.allow"), is_default))
+        parts: Dict[str, Dict[str, Any]] = {}
+        caps = _compile_allow(spec.get("allow"), f"{where}.allow", parts)
+        roles.append(Role(name, match, caps, is_default, parts))
 
     if len(defaults) > 1:
         raise AccessConfigError(f"only one role may be the default; found {sorted(defaults)}")
@@ -424,6 +446,11 @@ class AccessPolicy:
         if role is None:
             return None, None
         return self._role_warrant(role.name, fresh), self.signing_key
+
+    def parts_for(self, *, user: str = "", chat: str = "", platform: str = "") -> Dict[str, Dict[str, Any]]:
+        """What the sender's role limits are made of (for narrowing a delegated child further)."""
+        role = self.config.role_for(user=user, chat=chat, platform=platform)
+        return role.parts if role is not None else {}
 
     def role_name_for(self, *, user: str = "", chat: str = "", platform: str = "") -> Optional[str]:
         role = self.config.role_for(user=user, chat=chat, platform=platform)

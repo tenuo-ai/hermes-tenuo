@@ -94,6 +94,33 @@ def test_missing_delegation_plan_fails(install, capsys, tmp_path):
     assert "✗  delegation plan" in out and "does not exist" in out
 
 
+def test_jobs_are_listed(install, capsys):
+    install(jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 0 and "✓  jobs: reader" in out
+
+
+def test_jobs_set_with_a_delegation_plan_fail(install, capsys, tmp_path):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "version": 1,
+        "root": {"tools": {"read_file": {}, "delegate_task": {}}},
+        "levels": [{"ttl_seconds": 60, "tools": {"read_file": {}}}],
+    }))
+    plan.chmod(0o600)
+    install(delegation_plan=str(plan), jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 1 and "✗  jobs and delegation_plan are both set" in out
+
+
+def test_jobs_set_with_a_child_warrant_fail(install, capsys):
+    issuer, holder = SigningKey.generate(), SigningKey.generate()
+    child = Warrant.mint_builder().tool("read_file").holder(holder.public_key).ttl(60).mint(issuer)
+    install(child_warrant=_b64(child.to_bytes()), jobs="{reader: {allow: [read_file]}}")
+    rc, out = _doctor(capsys)
+    assert rc == 1 and "✗  jobs and child_warrant are both set" in out
+
+
 def test_valid_delegation_plan_passes(install, capsys, tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({
