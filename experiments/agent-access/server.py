@@ -106,7 +106,7 @@ def build(home: Path) -> FastMCP:
             return JSONResponse({"status": "pending"}, 202)
         if p["status"] in ("ended", "declined"):
             return JSONResponse({"status": p["status"]}, 410)
-        return JSONResponse({"status": "approved", "warrant": p["warrant"],
+        return JSONResponse({"status": "approved", "warrant": p["warrant"], "name": mcp.name,
                              "issuer": (public / "issuer.pub").read_text().strip()})
 
     return mcp
