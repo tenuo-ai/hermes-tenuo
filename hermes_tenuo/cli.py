@@ -324,6 +324,20 @@ def _mint_local(args: argparse.Namespace) -> int:
     signing_key_b64 = base64.b64encode(agent_key.secret_key_bytes()).decode()
     trusted_root_b64 = base64.b64encode(control_key.public_key.to_bytes()).decode()
 
+    from hermes_tenuo._home import hermes_home
+    from hermes_tenuo._version import __version__
+    home = hermes_home()
+    config_path = home / "config.yaml"
+    env_path = home / ".env"
+    # A home other than the default is named in the commands, so they act on the files above.
+    at_home = "" if home == Path("~/.hermes").expanduser() else f"HERMES_HOME={shlex.quote(str(home))} "
+    check_and_restart = [
+        "# Check, then restart Hermes (a running gateway keeps the old settings):",
+        "#   export TENUO_SIGNING_KEY=...   (same value, for the check in this shell)",
+        f"#   {at_home}uvx hermes-tenuo=={__version__} doctor",
+        f"#   {at_home}hermes gateway restart",
+    ]
+
     if args.output == "env":
         print(f"export TENUO_WARRANT={warrant_b64}")
         print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
@@ -331,15 +345,17 @@ def _mint_local(args: argparse.Namespace) -> int:
         if plan is not None:
             print(f"export TENUO_DELEGATION_PLAN={shlex.quote(str(plan_path))}")
     elif args.output == "yaml":
-        print("# Add to ~/.hermes/config.yaml under plugins.entries.hermes-tenuo:")
+        print(f"# Add to {config_path} under plugins.entries.hermes-tenuo:")
         print(f"warrant: {warrant_b64}")
         print(f"trusted_root: {trusted_root_b64}")
         if plan is not None:
             print(f"delegation_plan: {json.dumps(str(plan_path))}")
-        print("# Export before running hermes:")
-        print(f"# export TENUO_SIGNING_KEY={signing_key_b64}")
+        print(f"# Put this line in {env_path}:")
+        print(f"# TENUO_SIGNING_KEY={signing_key_b64}")
+        for line in check_and_restart:
+            print(line)
     else:  # "full" default
-        print("# ── Hermes config (add to ~/.hermes/config.yaml) ────────────────")
+        print(f"# ── 1. Hermes config: add to {config_path}")
         print("plugins:")
         print("  enabled:")
         print("    - hermes-tenuo")
@@ -351,8 +367,12 @@ def _mint_local(args: argparse.Namespace) -> int:
         if plan is not None:
             print(f"      delegation_plan: {json.dumps(str(plan_path))}")
         print()
-        print("# ── Signing key (export before running hermes) ───────────────────")
-        print(f"export TENUO_SIGNING_KEY={signing_key_b64}")
+        print(f"# ── 2. Signing key: put this line in {env_path}")
+        print(f"TENUO_SIGNING_KEY={signing_key_b64}")
+        print()
+        print("# ── 3. Check, then restart Hermes (a running gateway keeps the old settings)")
+        for line in check_and_restart[1:]:
+            print(line)
         print()
         print("# ── Warrant details ─────────────────────────────────────────────")
         print(f"# TTL:   {ttl_seconds}s ({args.ttl})")
